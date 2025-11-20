@@ -1,0 +1,21 @@
+Pricing for Claude Opus 4.1 starts at $15 per million input tokens and $75 per million output tokens, 
+with up to 90% cost savings with prompt caching and 50% cost savings with batch processing. 
+To learn more, check out our pricing page.
+
+│ 1. **Provide your data**: Share CSV/JSON with OHLCV data                                                                        │
+│ 2. **Specify your strategy**: What indicators or patterns interest you?                                                         │
+│ 3. **Ask for analysis**: I'll identify what the data shows objectively                                                          │
+│ 4. **You make decisions**: Use my analysis as one input in your process                                                         │
+│                                                                                                                                 │
+│ Would you like to share some data for analysis, or discuss specific technical indicators you're interested in?  
+
+
+TODO:
+- [ ] Charle Schwab API integration
+- [ ] Add git repository for version control
+- [ ] Add User Database Persistence and Registration
+- [ ] Add support for CSV/JSON data
+- [ ] Add support for technical indicators
+- [ ] Add support for batch processing
+- [ ] Add support for prompt caching
+

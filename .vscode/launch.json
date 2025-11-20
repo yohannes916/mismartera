@@ -1,0 +1,81 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "CLI: Interactive Mode",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/backend/run_cli.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}/backend",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/backend"
+            },
+            "envFile": "${workspaceFolder}/backend/.env",
+            "justMyCode": true,
+            "python": "${workspaceFolder}/backend/.venv/bin/python"
+        },
+        {
+            "name": "CLI: Single Command",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/backend/run_cli.py",
+            "args": [
+                "status"
+            ],
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}/backend",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/backend"
+            },
+            "envFile": "${workspaceFolder}/backend/.env",
+            "justMyCode": true,
+            "python": "${workspaceFolder}/backend/.venv/bin/python"
+        },
+        {
+            "name": "CLI: Init Database",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/backend/run_cli.py",
+            "args": [
+                "init-db"
+            ],
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}/backend",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/backend"
+            },
+            "envFile": "${workspaceFolder}/backend/.env",
+            "justMyCode": true,
+            "python": "${workspaceFolder}/backend/.venv/bin/python"
+        },
+        {
+            "name": "API: Start Server",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/backend/run_api.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}/backend",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/backend"
+            },
+            "envFile": "${workspaceFolder}/backend/.env",
+            "justMyCode": true,
+            "python": "${workspaceFolder}/backend/.venv/bin/python"
+        },
+        {
+            "name": "Python: Current File",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}/backend",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/backend"
+            },
+            "envFile": "${workspaceFolder}/backend/.env",
+            "justMyCode": true,
+            "python": "${workspaceFolder}/backend/.venv/bin/python"
+        }
+    ]
+}
