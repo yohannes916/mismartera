@@ -236,6 +236,25 @@ class CSVImportService:
             filtered_count = total_before_filter - len(bars)
             logger.info(f"Date filter applied: {len(bars)}/{total_before_filter} bars kept (filtered {filtered_count})")
         
+        # Filter to only include regular trading hours (9:30 AM - 4:00 PM ET)
+        # This excludes pre-market and after-hours data
+        from datetime import time as dt_time
+        market_open = dt_time(9, 30, 0)
+        market_close = dt_time(16, 0, 0)
+        
+        before_hours_filter = len(bars)
+        bars = [
+            bar for bar in bars
+            if market_open <= bar['timestamp'].time() < market_close
+        ]
+        hours_filtered = before_hours_filter - len(bars)
+        
+        if hours_filtered > 0:
+            logger.info(
+                f"Trading hours filter: {len(bars)}/{before_hours_filter} bars kept "
+                f"(filtered {hours_filtered} outside 9:30-16:00 ET)"
+            )
+        
         total_bars = len(bars)
         imported = 0
         

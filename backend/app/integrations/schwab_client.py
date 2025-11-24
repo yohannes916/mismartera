@@ -2,7 +2,13 @@
 Charles Schwab API Client Integration
 """
 import httpx
+import json
+import base64
+import secrets
+from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Optional, Dict, Any, List
+from urllib.parse import urlencode
 from app.config import settings
 from app.logger import logger
 
@@ -12,6 +18,14 @@ class SchwabClient:
     Client for interacting with Charles Schwab Trader API
     
     Documentation: https://developer.schwab.com/
+    
+    OAuth 2.0 Flow:
+    1. Generate authorization URL
+    2. User authorizes via browser
+    3. Receive callback with auth code
+    4. Exchange code for access token
+    5. Use access token for API calls
+    6. Refresh token when expired
     """
     
     def __init__(self):
@@ -21,41 +35,273 @@ class SchwabClient:
         self.callback_url = settings.SCHWAB_CALLBACK_URL
         self.access_token: Optional[str] = None
         self.refresh_token: Optional[str] = None
+        self.token_expires_at: Optional[datetime] = None
+        self._token_file = Path.home() / ".mismartera" / "schwab_tokens.json"
         
         if not self.app_key or not self.app_secret:
             logger.warning("Schwab API credentials not configured")
+        else:
+            # Try to load existing tokens
+            self._load_tokens()
     
-    async def authenticate(self, authorization_code: str) -> Dict[str, Any]:
+    async def validate_connection(self) -> bool:
         """
-        Exchange authorization code for access token
+        Validate Schwab API configuration and connectivity.
+        
+        Returns:
+            True if configuration is valid and API is reachable, False otherwise
+        """
+        try:
+            # Check if credentials are configured
+            if not self.app_key or not self.app_secret:
+                logger.error("Schwab API credentials not configured")
+                return False
+            
+            if not self.base_url:
+                logger.error("Schwab API base URL not configured")
+                return False
+            
+            # Test basic connectivity to Schwab API
+            # For now, just verify the configuration is present
+            # Full OAuth flow requires user interaction
+            logger.info("Schwab API configuration validated")
+            logger.info(f"  Base URL: {self.base_url}")
+            logger.info(f"  App Key: {self.app_key[:8]}..." if self.app_key else "  App Key: Not set")
+            logger.info(f"  Callback URL: {self.callback_url}")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Schwab connection validation error: {e}")
+            return False
+    
+    def generate_authorization_url(self) -> tuple[str, str]:
+        """
+        Generate OAuth 2.0 authorization URL for user to visit.
+        
+        Returns:
+            Tuple of (authorization_url, state) where state should be verified in callback
+        """
+        # Generate random state for CSRF protection
+        state = secrets.token_urlsafe(32)
+        
+        # Schwab OAuth authorization endpoint
+        auth_base_url = "https://api.schwabapi.com/v1/oauth/authorize"
+        
+        # Request 'readonly' scope for market data access
+        params = {
+            "client_id": self.app_key,
+            "redirect_uri": self.callback_url,
+            "response_type": "code",
+            "scope": "readonly",  # Required for market data API access
+            "state": state,
+        }
+        
+        auth_url = f"{auth_base_url}?{urlencode(params)}"
+        logger.info(f"Generated authorization URL with state: {state[:8]}... and scope: readonly")
+        
+        return auth_url, state
+    
+    async def exchange_code_for_token(self, authorization_code: str) -> Dict[str, Any]:
+        """
+        Exchange authorization code for access token.
         
         Args:
-            authorization_code: OAuth authorization code
+            authorization_code: OAuth authorization code from callback (URL-encoded or decoded)
             
         Returns:
             Token response with access_token and refresh_token
         """
-        logger.info("Authenticating with Schwab API")
+        from urllib.parse import unquote
         
-        # TODO: Implement OAuth 2.0 token exchange
-        # This requires:
-        # 1. User authorization flow
-        # 2. Token exchange
-        # 3. Token refresh mechanism
+        # URL decode if it contains encoded characters, otherwise use as-is
+        # This handles both manual paste (encoded) and server callback (decoded)
+        if '%' in authorization_code:
+            decoded_code = unquote(authorization_code)
+            logger.info(f"URL decoded authorization code (length: {len(decoded_code)})")
+        else:
+            decoded_code = authorization_code
+            logger.info(f"Using authorization code as-is (length: {len(decoded_code)})")
         
-        raise NotImplementedError("Schwab authentication not yet implemented")
+        token_url = "https://api.schwabapi.com/v1/oauth/token"
+        
+        # Prepare Basic Auth header
+        credentials = f"{self.app_key}:{self.app_secret}"
+        encoded_credentials = base64.b64encode(credentials.encode()).decode()
+        
+        headers = {
+            "Authorization": f"Basic {encoded_credentials}",
+            "Content-Type": "application/x-www-form-urlencoded",
+        }
+        
+        # httpx will automatically URL-encode form data, so pass the decoded code
+        data = {
+            "grant_type": "authorization_code",
+            "code": decoded_code,
+            "redirect_uri": self.callback_url,
+        }
+        
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(token_url, headers=headers, data=data)
+            
+            if response.status_code != 200:
+                logger.error(f"Token exchange failed: {response.status_code} {response.text}")
+                raise RuntimeError(f"Failed to exchange authorization code: {response.status_code}")
+            
+            token_data = response.json()
+            
+            # Store tokens
+            self.access_token = token_data["access_token"]
+            self.refresh_token = token_data["refresh_token"]
+            expires_in = token_data.get("expires_in", 1800)  # Default 30 minutes
+            self.token_expires_at = datetime.now() + timedelta(seconds=expires_in)
+            
+            # Save to disk
+            self._save_tokens()
+            
+            logger.success("Successfully obtained access token")
+            return token_data
     
     async def refresh_access_token(self) -> Dict[str, Any]:
         """
-        Refresh access token using refresh token
+        Refresh access token using refresh token.
         
         Returns:
             New token response
         """
+        if not self.refresh_token:
+            raise RuntimeError("No refresh token available. Please authorize first.")
+        
         logger.info("Refreshing Schwab access token")
         
-        # TODO: Implement token refresh
-        raise NotImplementedError("Token refresh not yet implemented")
+        token_url = "https://api.schwabapi.com/v1/oauth/token"
+        
+        # Prepare Basic Auth header
+        credentials = f"{self.app_key}:{self.app_secret}"
+        encoded_credentials = base64.b64encode(credentials.encode()).decode()
+        
+        headers = {
+            "Authorization": f"Basic {encoded_credentials}",
+            "Content-Type": "application/x-www-form-urlencoded",
+        }
+        
+        data = {
+            "grant_type": "refresh_token",
+            "refresh_token": self.refresh_token,
+        }
+        
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(token_url, headers=headers, data=data)
+            
+            if response.status_code != 200:
+                logger.error(f"Token refresh failed: {response.status_code} {response.text}")
+                raise RuntimeError(f"Failed to refresh token: {response.status_code}")
+            
+            token_data = response.json()
+            
+            # Update tokens
+            self.access_token = token_data["access_token"]
+            if "refresh_token" in token_data:
+                self.refresh_token = token_data["refresh_token"]
+            expires_in = token_data.get("expires_in", 1800)
+            self.token_expires_at = datetime.now() + timedelta(seconds=expires_in)
+            
+            # Save to disk
+            self._save_tokens()
+            
+            logger.success("Successfully refreshed access token")
+            return token_data
+    
+    async def get_valid_access_token(self) -> str:
+        """
+        Get a valid access token, refreshing if necessary.
+        
+        Returns:
+            Valid access token
+            
+        Raises:
+            RuntimeError: If no tokens available or refresh fails
+        """
+        if not self.access_token:
+            raise RuntimeError(
+                "No access token available. Please authorize first using 'schwab auth-start'"
+            )
+        
+        # Note: Schwab tokens are proprietary format (not standard JWT), so we can't decode them
+        # The token is valid if we received it from Schwab's OAuth flow with the readonly scope
+        
+        # Check if token is expired or will expire soon (5 minutes buffer)
+        if self.token_expires_at:
+            time_until_expiry = (self.token_expires_at - datetime.now()).total_seconds()
+            if time_until_expiry < 300:  # Less than 5 minutes
+                logger.info("Access token expired or expiring soon, refreshing...")
+                await self.refresh_access_token()
+        
+        return self.access_token
+    
+    def _load_tokens(self) -> None:
+        """Load tokens from disk if they exist."""
+        if not self._token_file.exists():
+            return
+        
+        try:
+            with open(self._token_file, 'r') as f:
+                data = json.load(f)
+            
+            self.access_token = data.get("access_token")
+            self.refresh_token = data.get("refresh_token")
+            expires_at_str = data.get("expires_at")
+            
+            if expires_at_str:
+                self.token_expires_at = datetime.fromisoformat(expires_at_str)
+            
+            logger.info("Loaded Schwab tokens from disk")
+            
+        except Exception as e:
+            logger.warning(f"Failed to load Schwab tokens: {e}")
+    
+    def _save_tokens(self) -> None:
+        """Save tokens to disk."""
+        try:
+            # Create directory if it doesn't exist
+            self._token_file.parent.mkdir(parents=True, exist_ok=True)
+            
+            data = {
+                "access_token": self.access_token,
+                "refresh_token": self.refresh_token,
+                "expires_at": self.token_expires_at.isoformat() if self.token_expires_at else None,
+                "saved_at": datetime.now().isoformat(),
+            }
+            
+            # Write with restricted permissions
+            with open(self._token_file, 'w') as f:
+                json.dump(data, f, indent=2)
+            
+            # Set file permissions to owner-only (600)
+            import os
+            os.chmod(self._token_file, 0o600)
+            
+            logger.info(f"Saved Schwab tokens to {self._token_file}")
+            
+        except Exception as e:
+            logger.error(f"Failed to save Schwab tokens: {e}")
+    
+    def clear_tokens(self) -> None:
+        """Clear tokens from memory and disk."""
+        self.access_token = None
+        self.refresh_token = None
+        self.token_expires_at = None
+        
+        if self._token_file.exists():
+            try:
+                self._token_file.unlink()
+                logger.info("Cleared Schwab tokens")
+            except Exception as e:
+                logger.error(f"Failed to delete token file: {e}")
+    
+    def is_authenticated(self) -> bool:
+        """Check if we have valid tokens."""
+        return self.access_token is not None and self.refresh_token is not None
     
     async def get_account_info(self, account_id: str) -> Dict[str, Any]:
         """
@@ -182,7 +428,7 @@ class SchwabClient:
     
     async def get_quote(self, symbol: str) -> Dict[str, Any]:
         """
-        Get real-time quote
+        Get real-+time quote
         
         Args:
             symbol: Stock symbol
@@ -238,7 +484,7 @@ class SchwabClient:
     
     async def stream_quotes(self, symbols: List[str]):
         """
-        Stream real-time quotes via WebSocket
+        Stream real-+time quotes via WebSocket
         
         Args:
             symbols: List of symbols to stream

@@ -1,7 +1,9 @@
 # MisMartera System Architecture
 
-**Version:** 1.0  
-**Last Updated:** 2025-11-18
+**Version:** 1.1  
+**Last Updated:** 2025-11-20
+
+**Major Update (v1.1):** Added SystemManager as central coordinator and single source of truth for operation mode
 
 ## Overview
 
@@ -22,20 +24,32 @@ MisMartera is a day trading application with a **strictly layered architecture**
             │  │  API Calls ONLY (no direct DB/integration access)
             ▼  ▼
 ┌───────────────────────────────────────────────────────────────────────┐
+│                    SYSTEM COORDINATOR                                 │
+│  ┌─────────────────────────────────────────────────────────────────┐  │
+│  │  🎛️ SystemManager (Central Coordinator - NEW v1.1)             │  │
+│  │                                                                  │  │
+│  │  • Owns operation mode (live/backtest) - SINGLE SOURCE OF TRUTH │  │
+│  │  • Controls system state (stopped/running/paused)               │  │
+│  │  • Creates and manages all manager singletons                   │  │
+│  │  • Provides inter-manager communication                         │  │
+│  │  • start() / pause() / resume() / stop() / set_mode()          │  │
+│  └───────────────────────────┬──────────────────────────────────────┘  │
+└───────────────────────────────┼─────────────────────────────────────────┘
+                                │ Creates & References
+                ┌───────────────┼───────────────┐
+                ▼               ▼               ▼
+┌───────────────────────────────────────────────────────────────────────┐
 │                    TOP-LEVEL MODULE APIs                              │
 │  ┌─────────────────┐  ┌──────────────────┐  ┌───────────────────┐     │
 │  │  📊 DataManager │  │ 📈 ExecutionMgr  │  │ 🧠 AnalysisEngine │     │
-│  │                 │  │                  │  │                   │     │
+│  │  system_manager │  │  system_manager  │  │  system_manager   │     │
+│  │       ↑         │  │       ↑          │  │       ↑           │     │
 │  │ • get_time()    │  │ • place_order()  │  │ • analyze()       │     │
 │  │ • get_bars()    │  │ • cancel_order() │  │ • optimize()      │     │
 │  │ • get_ticks()   │  │ • get_orders()   │  │ • evaluate()      │     │
 │  │ • trading_hrs() │  │ • get_balance()  │  │ • decide()        │     │
 │  │ • get_holidays()│  │ • get_pnl()      │  │                   │     │
 │  │ • import_data() │  │                  │  │                   │     │
-│  │                 │  │                  │  │                   │     │
-│  │ Modes:          │  │ Modes:           │  │ Modes:            │     │
-│  │ • Real          │  │ • Real           │  │ • Real            │     │
-│  │ • Backtest      │  │ • Backtest       │  │ • Backtest        │     │
 │  └────────┬────────┘  └────────┬─────────┘  └─────────┬─────────┘     │
 └───────────┼────────────────────┼──────────────────────┼──────────────┘
             │                    │                      │
@@ -72,6 +86,9 @@ Legend:
 ```
 backend/app/
 ├── managers/                       # 🔥 Top-level Modules
+│   ├── system_manager.py           # 🎛️ SystemManager (NEW v1.1)
+│   │                               # Central coordinator, owns mode & state
+│   │
 │   ├── data_manager/               # 📊 DataManager
 │   │   ├── api.py                  # Public API
 │   │   ├── time_provider.py        # Time & trading hours
@@ -137,10 +154,13 @@ backend/app/
 ### 1. **API-First CLI**
 The CLI must **only** execute commands by interacting with the externally exposed APIs of the top-level modules. Direct database or integration access is **strictly forbidden**.
 
-✅ **Correct:**
+✅ **Correct (v1.1 - SystemManager-based):**
 ```python
-# CLI command
-data_manager = DataManager()
+# CLI command - Use SystemManager to get managers
+from app.managers import get_system_manager
+
+system_mgr = get_system_manager()
+data_manager = system_mgr.get_data_manager()
 bars = await data_manager.get_bars(session, symbol, start, end)
 ```
 
@@ -148,6 +168,9 @@ bars = await data_manager.get_bars(session, symbol, start, end)
 ```python
 # CLI command - NEVER do this!
 bars = await MarketDataRepository.get_bars_by_symbol(...)
+
+# Also DEPRECATED (v1.0 pattern):
+data_manager = DataManager()  # Don't instantiate directly
 ```
 
 ### 2. **Strict Layering**
@@ -158,26 +181,102 @@ CLI/API Routes → Manager APIs → Repositories/Integrations → Database/Exter
 Each layer can only call the layer directly below it.
 
 ### 3. **Single Source of Truth**
+- **SystemManager** is the single source for operation mode (live/backtest) and system state (NEW v1.1)
 - **DataManager** is the single source for ALL data (time, bars, ticks, holidays)
 - **ExecutionManager** is the single source for ALL order/account operations
 - **AnalysisEngine** consumes data from DataManager and executes via ExecutionManager
+- All managers receive SystemManager reference for mode queries and inter-manager communication
 
-### 4. **Operating Modes**
-All three core modules support two modes:
-- **Real Mode:** Live trading with real data and actual brokers
+### 4. **Operating Modes (Managed by SystemManager)**
+SystemManager owns the operation mode state. All managers query SystemManager.mode:
+- **Live Mode:** Live trading with live data and actual brokers
 - **Backtest Mode:** Historical simulation with database data
+
+Mode can only be changed when system is in STOPPED state via `system_mgr.set_mode()`
+
+## 🎛️ SystemManager (NEW v1.1)
+
+**Responsibility:** Central coordinator and single source of truth for operation mode and system state.
+
+### Key Concepts
+
+- **Singleton Pattern:** Only one SystemManager instance exists per application
+- **Owns Operation Mode:** Live vs Backtest mode stored in `SystemManager.mode`
+- **Manages System State:** STOPPED, RUNNING, PAUSED states
+- **Creates Managers:** DataManager, ExecutionManager, AnalysisEngine created via SystemManager
+- **Inter-Manager Communication:** Managers access each other via SystemManager reference
+
+### Key Methods
+```python
+# System Lifecycle
+start() -> None                     # Start the system (enter RUNNING state)
+pause() -> None                     # Pause the system (backtest time stops advancing)
+resume() -> None                    # Resume from paused state
+stop() -> None                      # Stop the system (return to STOPPED state)
+
+# Mode Management
+set_mode(mode: str) -> bool        # Set mode ("live" or "backtest") - only when STOPPED
+mode: OperationMode                 # Current mode (read-only property)
+is_live_mode() -> bool
+is_backtest_mode() -> bool
+
+# State Management  
+state: SystemState                  # Current state (read-only property)
+is_running() -> bool
+is_paused() -> bool
+is_stopped() -> bool
+
+# Manager Access
+get_data_manager() -> DataManager
+get_execution_manager() -> ExecutionManager
+get_analysis_engine() -> AnalysisEngine
+```
+
+### State Transitions
+```
+STOPPED ──start()──> RUNNING ──pause()──> PAUSED
+   ↑                    │                    │
+   │                    │                    │
+   └────────stop()──────┴────────resume()────┘
+```
+
+### Usage Example
+```python
+from app.managers import get_system_manager
+
+# Get singleton instance
+system_mgr = get_system_manager()
+
+# Set mode (only when stopped)
+system_mgr.set_mode("backtest")
+
+# Get managers (created with SystemManager reference)
+data_mgr = system_mgr.get_data_manager()
+exec_mgr = system_mgr.get_execution_manager()
+
+# Control system
+system_mgr.start()   # Begin processing
+system_mgr.pause()   # Pause (backtest time stops)
+system_mgr.resume()  # Continue
+system_mgr.stop()    # Full stop
+```
 
 ## 📊 DataManager
 
 **Responsibility:** Single source of truth for all datasets.
 
+**Architecture:** Receives SystemManager reference. Queries mode via `system_manager.mode.value`.
+
 ### Key Methods
 ```python
-# Time & Status
-get_current_time() -> datetime
+# Time & Status (mode-aware via SystemManager)
+get_current_time() -> datetime              # Live: system time | Backtest: simulated time
 is_market_open(timestamp) -> bool
 get_trading_hours(date) -> TradingHours
 get_holidays(start_date, end_date) -> List[Holiday]
+
+# Mode Query (delegates to SystemManager)
+system_manager.mode.value -> str            # "live" or "backtest"
 
 # Market Data (Bars)
 get_bars(symbol, start, end, interval) -> List[BarData]
@@ -207,6 +306,8 @@ All data sources implement `DataSourceInterface`:
 ## 📈 ExecutionManager
 
 **Responsibility:** All order execution and account management.
+
+**Architecture:** Receives SystemManager reference for mode queries and inter-manager access.
 
 ### Key Methods
 ```python
@@ -239,6 +340,8 @@ All brokerages implement `BrokerageInterface`:
 ## 🧠 AnalysisEngine
 
 **Responsibility:** AI-powered trading analysis and decision making.
+
+**Architecture:** Receives SystemManager reference for mode queries and accessing DataManager/ExecutionManager.
 
 ### Key Methods
 ```python
@@ -293,22 +396,31 @@ class AnalysisLog:
 ### Example: Analyzing a Stock and Placing an Order
 
 ```python
-# 1. Initialize managers
-data_manager = DataManager(mode="real")
-execution_manager = ExecutionManager(mode="real", brokerage="schwab")
-analysis_engine = AnalysisEngine(data_manager, execution_manager, mode="real")
+# 1. Get SystemManager and set mode
+from app.managers import get_system_manager
 
-# 2. Get current bar from DataManager
+system_mgr = get_system_manager()
+system_mgr.set_mode("live")  # Set operation mode
+
+# 2. Get managers from SystemManager (all have system_manager reference)
+data_manager = system_mgr.get_data_manager()
+execution_manager = system_mgr.get_execution_manager()
+analysis_engine = system_mgr.get_analysis_engine()
+
+# 3. Start the system
+system_mgr.start()
+
+# 4. Get current bar from DataManager
 current_bar = await data_manager.get_latest_bar(session, "AAPL")
 
-# 3. Get recent bars for context
+# 5. Get recent bars for context
 start_time = current_bar.timestamp - timedelta(minutes=50)
 recent_bars = await data_manager.get_bars(session, "AAPL", start_time, current_bar.timestamp)
 
-# 4. Analyze with AnalysisEngine
+# 6. Analyze with AnalysisEngine
 analysis = await analysis_engine.analyze_bar(session, "AAPL", current_bar, recent_bars)
 
-# 5. If decision is BUY, place order via ExecutionManager
+# 7. If decision is BUY, place order via ExecutionManager
 if analysis["decision"]["action"] == "BUY":
     order = await execution_manager.place_order(
         session=session,
@@ -320,28 +432,61 @@ if analysis["decision"]["action"] == "BUY":
     )
 ```
 
-## 🎛️ Operating Modes
+## 🎛️ Operating Modes (SystemManager-Controlled)
 
-### Real Mode
-- Time: `datetime.now()`
-- Data: Live streams from data providers
+### Live Mode
+- Time: `datetime.now()` (Eastern Time)
+- Data: Live streams from data providers (Alpaca, etc.)
 - Orders: Submitted to actual brokerage
+- State: SystemManager controls when system is running/paused
 
 ### Backtest Mode
-- Time: From 1-minute bar timestamp being processed
+- Time: Simulated time advanced by BacktestStreamCoordinator
 - Data: Historical bars from database
-- Orders: Simulated with configurable execution logic
+- Orders: Simulated with configurable execution logic  
+- State: SystemManager.pause() stops time advancement
 
-### Switching Modes
+### Switching Modes (v1.1)
 ```python
-# Initialize in backtest mode
-data_manager = DataManager(mode="backtest")
+from app.managers import get_system_manager
 
-# Set backtest time for each bar
+# Get SystemManager singleton
+system_mgr = get_system_manager()
+
+# Mode can only be changed when STOPPED
+system_mgr.stop()  # Ensure stopped
+system_mgr.set_mode("backtest")  # Change mode
+
+# Get DataManager (has system_manager reference)
+data_mgr = system_mgr.get_data_manager()
+
+# Start processing
+system_mgr.start()
+
+# Process bars (time advanced by BacktestStreamCoordinator)
 for bar in historical_bars:
-    data_manager.time_provider.set_backtest_time(bar.timestamp)
-    # Process bar...
+    # Time is automatically advanced by stream coordinator
+    # System can be paused/resumed via system_mgr
+    await process_bar(bar)
+
+# Control system state
+system_mgr.pause()   # Pause backtest (time stops advancing)
+system_mgr.resume()  # Resume
+system_mgr.stop()    # Stop completely
 ```
+
+### Architecture Notes (v1.1)
+
+**Single Source of Truth:**
+- `SystemManager.mode` is the ONLY source for operation mode
+- `DataManager.get_mode()` delegates to SystemManager (deprecated pattern)
+- `TimeProvider` requires SystemManager reference
+- No direct access to `settings.SYSTEM_OPERATING_MODE` in production code
+
+**State-Aware Streaming:**
+- `BacktestStreamCoordinator` checks `SystemManager.is_running()`
+- If system is paused, time advancement halts
+- Allows inspection/debugging during backtest execution
 
 ## 🔒 Security & Best Practices
 

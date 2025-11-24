@@ -1,0 +1,36 @@
+{
+  "session_name": "Live Trading Session",
+  "mode": "live",
+  "data_streams": [
+    {
+      "type": "bars",
+      "symbol": "SPY",
+      "interval": "1m"
+    },
+    {
+      "type": "ticks",
+      "symbol": "SPY"
+    },
+    {
+      "type": "quotes",
+      "symbol": "SPY"
+    }
+  ],
+  "trading_config": {
+    "max_buying_power": 50000.0,
+    "max_per_trade": 5000.0,
+    "max_per_symbol": 10000.0,
+    "max_open_positions": 3,
+    "paper_trading": true
+  },
+  "api_config": {
+    "data_api": "alpaca",
+    "trade_api": "alpaca",
+    "account_id": "paper_live_trading"
+  },
+  "metadata": {
+    "created_by": "user",
+    "description": "Live paper trading session for SPY",
+    "strategy": "day_trading"
+  }
+}

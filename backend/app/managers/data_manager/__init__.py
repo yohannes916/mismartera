@@ -5,7 +5,7 @@ Single source of truth for all datasets.
 Provides data to all other modules.
 
 Responsibilities:
-- Current date/time (real or backtest mode)
+- Current date/time (live or backtest mode)
 - Trading hours and status
 - 1-minute bar data stream
 - Tick data stream

@@ -22,7 +22,7 @@ class Account(Base):
     
     # Account status
     is_active = Column(Integer, default=1)  # SQLite doesn't have Boolean
-    mode = Column(String(20), nullable=False, default="real")  # real, backtest
+    mode = Column(String(20), nullable=False, default="live")  # live, backtest
     
     # Current balances (updated periodically)
     cash_balance = Column(Float, default=0.0)

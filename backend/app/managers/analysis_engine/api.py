@@ -33,7 +33,7 @@ class AnalysisEngine:
         self,
         data_manager: DataManager,
         execution_manager: ExecutionManager,
-        mode: str = "real",
+        mode: str = "live",
         llm_provider: str = "claude"
     ):
         """
@@ -42,7 +42,7 @@ class AnalysisEngine:
         Args:
             data_manager: DataManager instance
             execution_manager: ExecutionManager instance
-            mode: Operating mode - "real" or "backtest"
+            mode: Operating mode - "live" or "backtest"
             llm_provider: LLM provider - "claude", "gpt4", etc.
         """
         self.data_manager = data_manager

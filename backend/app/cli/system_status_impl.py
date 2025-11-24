@@ -1,0 +1,542 @@
+"""Comprehensive System Status Implementation
+
+This module contains the detailed implementation for the 'system status' command.
+"""
+from rich.console import Console
+from rich.table import Table
+from rich import box
+from datetime import datetime, date
+from typing import Optional
+
+from app.managers.system_manager import get_system_manager, SystemState
+from app.managers.data_manager.session_data import get_session_data
+from app.managers.data_manager.backtest_stream_coordinator import get_coordinator
+from app.models.database import AsyncSessionLocal
+from app.config import settings
+from app.logger import logger
+
+
+console = Console()
+
+
+async def show_comprehensive_status() -> None:
+    """Display comprehensive system status with all details."""
+    
+    system_mgr = get_system_manager()
+    data_mgr = system_mgr.get_data_manager() if hasattr(system_mgr, 'get_data_manager') else None
+    session_data = get_session_data()
+    
+    # Auto-initialize backtest if in backtest mode and not initialized
+    if data_mgr and system_mgr.mode.value == "backtest" and data_mgr.backtest_start_date is None:
+        try:
+            async with AsyncSessionLocal() as session:
+                await data_mgr.init_backtest(session)
+                logger.info("Auto-initialized backtest for system status display")
+        except Exception as e:
+            logger.warning(f"Could not auto-initialize backtest: {e}")
+    
+    # Title
+    console.print("\n")
+    console.print("═" * 73, style="cyan")
+    console.print("SYSTEM STATUS".center(73), style="bold cyan")
+    console.print("═" * 73, style="cyan")
+    console.print()
+    
+    # ==================== SYSTEM MANAGER ====================
+    sys_table = Table(title="System Manager", show_header=True, header_style="bold cyan", box=box.ROUNDED)
+    sys_table.add_column("Property", style="cyan", width=25)
+    sys_table.add_column("Value", style="white")
+    
+    # State
+    state_color = {
+        SystemState.RUNNING: "green",
+        SystemState.PAUSED: "yellow",
+        SystemState.STOPPED: "red",
+    }.get(system_mgr.state, "white")
+    sys_table.add_row("State", f"[{state_color}]{system_mgr.state.value.upper()}[/{state_color}]")
+    
+    # Operation mode
+    mode_color = "cyan" if system_mgr.mode.value == "backtest" else "green"
+    sys_table.add_row("Mode", f"[{mode_color}]{system_mgr.mode.value.upper()}[/{mode_color}]")
+    
+    # Initialized
+    init_status = "Yes" if system_mgr.is_initialized else "No"
+    init_color = "green" if system_mgr.is_initialized else "yellow"
+    sys_table.add_row("Initialized", f"[{init_color}]{init_status}[/{init_color}]")
+    
+    # Current time (TimeProvider is always available as single source of truth)
+    if data_mgr:
+        current_time = data_mgr.get_current_time()
+        time_str = current_time.strftime("%Y-%m-%d %H:%M:%S ET")
+        if system_mgr.mode.value == "backtest":
+            time_str += " [dim](simulated)[/dim]"
+        sys_table.add_row("System Time", time_str)
+    else:
+        sys_table.add_row("System Time", "[yellow]DataManager not initialized[/yellow]")
+    
+    console.print(sys_table)
+    console.print()
+    
+    # ==================== MANAGERS STATUS ====================
+    mgr_table = Table(title="Managers Status", show_header=True, header_style="bold magenta", box=box.ROUNDED)
+    mgr_table.add_column("Manager", style="magenta", width=20)
+    mgr_table.add_column("Status", style="white", width=15)
+    mgr_table.add_column("Details", style="dim")
+    
+    # DataManager
+    if system_mgr._data_manager is not None:
+        # Do real-time connection check
+        dm_connected = False
+        if data_mgr.data_api.lower() == "alpaca":
+            from app.integrations.alpaca_client import alpaca_client
+            try:
+                dm_connected = await alpaca_client.validate_connection()
+            except Exception:
+                dm_connected = False
+        elif data_mgr.data_api.lower() == "schwab":
+            from app.integrations.schwab_client import schwab_client
+            try:
+                dm_connected = await schwab_client.validate_connection()
+            except Exception:
+                dm_connected = False
+        
+        dm_connected_str = "Yes" if dm_connected else "No"
+        mgr_table.add_row(
+            "DataManager",
+            "[green]✓ ACTIVE[/green]",
+            f"Provider: {data_mgr.data_api}, Connected: {dm_connected_str}"
+        )
+    else:
+        mgr_table.add_row("DataManager", "[red]✗ INACTIVE[/red]", "Not initialized")
+    
+    # ExecutionManager
+    if system_mgr._execution_manager is not None:
+        mgr_table.add_row("ExecutionManager", "[yellow]⚠ STUB[/yellow]", "Not yet implemented")
+    else:
+        mgr_table.add_row("ExecutionManager", "[red]✗ INACTIVE[/red]", "Not initialized")
+    
+    # AnalysisEngine
+    if system_mgr._analysis_engine is not None:
+        mgr_table.add_row("AnalysisEngine", "[yellow]⚠ STUB[/yellow]", "Not yet implemented")
+    else:
+        mgr_table.add_row("AnalysisEngine", "[red]✗ INACTIVE[/red]", "Not initialized")
+    
+    console.print(mgr_table)
+    console.print()
+    
+    # ==================== DATA MANAGER DETAILS ====================
+    if data_mgr is not None:
+        await _show_data_manager_details(data_mgr, system_mgr)
+    
+    # ==================== MARKET STATUS ====================
+    if data_mgr is not None:
+        await _show_market_status(data_mgr)
+    
+    # ==================== SESSION DATA ====================
+    await _show_session_data(session_data)
+    
+    # ==================== BACKTEST COORDINATOR ====================
+    if system_mgr.mode.value == "backtest" and data_mgr:
+        await _show_coordinator_status(system_mgr)
+    
+    # ==================== CONFIGURATION FLAGS ====================
+    _show_configuration_flags()
+    
+    # ==================== HEALTH INDICATORS ====================
+    await _show_health_indicators(system_mgr, data_mgr, session_data)
+    
+    # ==================== HINTS ====================
+    _show_hints(system_mgr)
+
+
+async def _show_data_manager_details(data_mgr, system_mgr):
+    """Display Data Manager details."""
+    dm_table = Table(title="Data Manager Details", show_header=True, header_style="bold blue", box=box.ROUNDED)
+    dm_table.add_column("Property", style="blue", width=25)
+    dm_table.add_column("Value", style="white")
+    
+    # Provider info
+    dm_table.add_row("Data API Provider", data_mgr.data_api)
+    
+    # Do real-time connection check instead of relying on stale variable
+    provider_connected = False
+    if data_mgr.data_api.lower() == "alpaca":
+        from app.integrations.alpaca_client import alpaca_client
+        try:
+            provider_connected = await alpaca_client.validate_connection()
+        except Exception:
+            provider_connected = False
+    elif data_mgr.data_api.lower() == "schwab":
+        from app.integrations.schwab_client import schwab_client
+        try:
+            provider_connected = await schwab_client.validate_connection()
+        except Exception:
+            provider_connected = False
+    
+    provider_status = "[green]Yes[/green]" if provider_connected else "[red]No[/red]"
+    dm_table.add_row("Provider Connected", provider_status)
+    dm_table.add_row("Operation Mode", system_mgr.mode.value.upper())
+    
+    # Current time (TimeProvider is always available)
+    current_time = data_mgr.get_current_time()
+    time_str = current_time.strftime("%Y-%m-%d %H:%M:%S ET")
+    if system_mgr.mode.value == "backtest":
+        time_str += " [dim](simulated)[/dim]"
+    dm_table.add_row("Current Time", time_str)
+    
+    # Backtest configuration
+    if system_mgr.mode.value == "backtest":
+        dm_table.add_row("", "")  # Spacing
+        dm_table.add_row("[bold]Backtest Configuration[/bold]", "")
+        dm_table.add_row("  └─ Days", f"{data_mgr.backtest_days} trading days")
+        dm_table.add_row("  └─ Start Date", data_mgr.backtest_start_date.strftime("%Y-%m-%d"))
+        dm_table.add_row("  └─ End Date", data_mgr.backtest_end_date.strftime("%Y-%m-%d"))
+        dm_table.add_row("  └─ Speed Multiplier", f"{settings.DATA_MANAGER_BACKTEST_SPEED}x")
+    
+    # Active streams
+    dm_table.add_row("", "")  # Spacing
+    dm_table.add_row("[bold]Active Streams[/bold]", "")
+    
+    bar_stream_count = len(data_mgr._bar_stream_cancel_tokens)
+    if bar_stream_count > 0:
+        stream_list = ", ".join([k for k in data_mgr._bar_stream_cancel_tokens.keys()])
+        dm_table.add_row("  └─ Bar Streams", f"{bar_stream_count} active ({stream_list})")
+    else:
+        dm_table.add_row("  └─ Bar Streams", "0 active")
+    
+    tick_stream_count = len(data_mgr._tick_stream_cancel_tokens)
+    dm_table.add_row("  └─ Tick Streams", f"{tick_stream_count} active")
+    
+    quote_stream_count = len(data_mgr._quote_stream_cancel_tokens)
+    dm_table.add_row("  └─ Quote Streams", f"{quote_stream_count} active")
+    
+    console.print(dm_table)
+    console.print()
+
+
+async def _show_market_status(data_mgr):
+    """Display market status."""
+    try:
+        async with AsyncSessionLocal() as session:
+            market_info = await data_mgr.get_current_day_market_info(session)
+        
+        market_table = Table(title="Market Status", show_header=True, header_style="bold green", box=box.ROUNDED)
+        market_table.add_column("Property", style="green", width=25)
+        market_table.add_column("Value", style="white")
+        
+        # Format time helper
+        def format_time(dt_val):
+            if dt_val is None:
+                return "N/A"
+            if isinstance(dt_val, datetime):
+                return dt_val.strftime("%H:%M:%S")
+            else:
+                return dt_val.strftime("%H:%M:%S")
+        
+        market_table.add_row("Current Time", f"{format_time(market_info.now)} ET")
+        market_table.add_row("Date", f"{market_info.date.strftime('%Y-%m-%d')} ({market_info.date.strftime('%a')})")
+        
+        # Market day type
+        if market_info.is_weekend:
+            market_table.add_row("Today", "Weekend")
+        elif market_info.is_holiday:
+            market_table.add_row("Today", f"Holiday: {market_info.holiday_name or 'Market Closed'}")
+        else:
+            market_table.add_row("Today", "Regular trading day")
+        
+        # Market hours
+        if market_info.trading_hours:
+            open_time = format_time(market_info.trading_hours.open_time)
+            close_time = format_time(market_info.trading_hours.close_time)
+            market_table.add_row("Market Hours", f"{open_time} - {close_time} ET")
+        
+        # Market status
+        if market_info.is_market_open:
+            market_table.add_row("Market Status", "[green]✓ OPEN[/green]")
+        else:
+            market_table.add_row("Market Status", "[red]✗ CLOSED[/red]")
+        
+        console.print(market_table)
+        console.print()
+    
+    except Exception as e:
+        logger.error(f"Error getting market status: {e}", exc_info=True)
+        console.print(f"[red]✗ Error getting market status: {str(e)}[/red]\n")
+
+
+async def _show_session_data(session_data):
+    """Display session data details."""
+    if not session_data:
+        return
+    
+    session_table = Table(title="Session Data", show_header=True, header_style="bold yellow", box=box.ROUNDED)
+    session_table.add_column("Property", style="yellow", width=25)
+    session_table.add_column("Value", style="white")
+    
+    # Session date and time (from TimeProvider, single source of truth)
+    current_date = session_data.get_current_session_date()
+    is_active = session_data.is_session_active()
+    
+    # Get current time from TimeProvider
+    try:
+        from app.managers.data_manager.time_provider import get_time_provider
+        time_provider = get_time_provider()
+        current_time = time_provider.get_current_time()
+        session_time_str = current_time.strftime("%H:%M:%S")
+    except Exception as e:
+        session_time_str = "N/A"
+    
+    if current_date:
+        session_table.add_row("Session Date", current_date.strftime("%Y-%m-%d"))
+        session_table.add_row("Session Time", session_time_str)
+        session_table.add_row("Session Active", "[green]Yes[/green]" if is_active else "[yellow]No[/yellow]")
+    else:
+        session_table.add_row("Session Date", "[yellow]No active session[/yellow]")
+        session_table.add_row("Session Time", session_time_str)
+        session_table.add_row("Session Active", "[red]No[/red]")
+    
+    session_table.add_row("Session Ended", "Yes" if session_data.session_ended else "No")
+    
+    # Active symbols
+    active_symbols = session_data.get_active_symbols()
+    session_table.add_row("Active Symbols", f"{len(active_symbols)} symbols")
+    
+    # Per-symbol details
+    if active_symbols:
+        session_table.add_row("", "")  # Spacing
+        session_table.add_row("[bold]Symbol Details[/bold]", "")
+        
+        for symbol in sorted(active_symbols):
+            try:
+                symbol_data = await session_data.get_symbol_data(symbol)
+                if symbol_data:
+                    session_table.add_row(f"  ┌─ {symbol}", "")
+                    
+                    # Current session bars (bars_1m)
+                    current_bars = symbol_data.get_bar_count(1)
+                    session_table.add_row(f"  │  └─ Current Session Bars", f"{current_bars} bars")
+                    
+                    # Historical bars count
+                    hist_bar_count = 0
+                    hist_days_count = 0
+                    if hasattr(symbol_data, 'historical_bars') and 1 in symbol_data.historical_bars:
+                        hist_days_count = len(symbol_data.historical_bars[1])
+                        for date_bars in symbol_data.historical_bars[1].values():
+                            hist_bar_count += len(date_bars)
+                    
+                    if hist_bar_count > 0:
+                        session_table.add_row(f"  │  └─ Historical Bars", f"{hist_bar_count} bars ({hist_days_count} days)")
+                    
+                    session_table.add_row(f"  │  └─ Session Volume", f"{symbol_data.session_volume:,}")
+                    
+                    if symbol_data.session_high:
+                        session_table.add_row(f"  │  └─ Session High", f"{symbol_data.session_high:.2f}")
+                    if symbol_data.session_low:
+                        session_table.add_row(f"  │  └─ Session Low", f"{symbol_data.session_low:.2f}")
+                    
+                    quality_color = "green" if symbol_data.bar_quality >= 95 else "yellow" if symbol_data.bar_quality >= 80 else "red"
+                    session_table.add_row(f"  │  └─ Bar Quality", f"[{quality_color}]{symbol_data.bar_quality:.1f}%[/{quality_color}]")
+                    
+                    if symbol_data.last_update:
+                        session_table.add_row(f"  │  └─ Last Update", symbol_data.last_update.strftime("%H:%M:%S"))
+            except Exception as e:
+                logger.debug(f"Error getting symbol data for {symbol}: {e}")
+    
+    # Historical bars configuration
+    if hasattr(session_data, 'historical_bars_trailing_days'):
+        session_table.add_row("", "")  # Spacing
+        session_table.add_row("[bold]Historical Bars Config[/bold]", "")
+        session_table.add_row("  └─ Trailing Days", f"{session_data.historical_bars_trailing_days} days")
+        
+        if hasattr(session_data, 'historical_bars_intervals') and session_data.historical_bars_intervals:
+            intervals_str = ", ".join([f"{i}m" for i in session_data.historical_bars_intervals])
+            session_table.add_row("  └─ Intervals", intervals_str)
+        
+        if settings.HISTORICAL_BARS_AUTO_LOAD:
+            session_table.add_row("  └─ Auto-load", "[green]Enabled[/green]")
+        else:
+            session_table.add_row("  └─ Auto-load", "[yellow]Disabled[/yellow]")
+        
+        # Count total historical bars across all symbols
+        total_bars = 0
+        total_days = set()
+        for symbol in active_symbols:
+            try:
+                symbol_data = await session_data.get_symbol_data(symbol)
+                if symbol_data and hasattr(symbol_data, 'historical_bars'):
+                    for interval_bars in symbol_data.historical_bars.values():
+                        for bar_date, date_bars in interval_bars.items():
+                            total_bars += len(date_bars)
+                            total_days.add(bar_date)
+            except:
+                pass
+        
+        if total_bars > 0:
+            session_table.add_row("  └─ Total Loaded", f"{total_bars:,} bars ({len(total_days)} unique dates)")
+    
+    console.print(session_table)
+    console.print()
+
+
+async def _show_coordinator_status(system_mgr):
+    """Display backtest stream coordinator status."""
+    try:
+        coordinator = get_coordinator(system_mgr)
+        
+        coord_table = Table(title="Backtest Stream Coordinator", show_header=True, header_style="bold purple", box=box.ROUNDED)
+        coord_table.add_column("Property", style="purple", width=25)
+        coord_table.add_column("Value", style="white")
+        
+        # Worker status
+        if hasattr(coordinator, '_worker_thread') and coordinator._worker_thread and coordinator._worker_thread.is_alive():
+            coord_table.add_row("Worker Thread", "[green]Running[/green]")
+        else:
+            coord_table.add_row("Worker Thread", "[red]Stopped[/red]")
+        
+        # Active streams
+        if hasattr(coordinator, '_active_streams'):
+            active_count = len(coordinator._active_streams)
+            coord_table.add_row("Active Streams", f"{active_count} streams")
+            
+            if active_count > 0:
+                for (symbol, stream_type), _ in list(coordinator._active_streams.items())[:5]:  # Show first 5
+                    coord_table.add_row(f"  └─ {symbol} ({stream_type.value})", "Active")
+        
+        # Time advancement
+        if system_mgr.is_running():
+            coord_table.add_row("Time Advancement", "[green]Active (respects system state)[/green]")
+        else:
+            coord_table.add_row("Time Advancement", "[yellow]Paused (system not running)[/yellow]")
+        
+        # Data upkeep status
+        if hasattr(coordinator, '_upkeep_thread') and coordinator._upkeep_thread:
+            upkeep = coordinator._upkeep_thread
+            if hasattr(upkeep, '_running') and upkeep._running:
+                coord_table.add_row("Data Upkeep Thread", "[green]Running[/green]")
+            else:
+                coord_table.add_row("Data Upkeep Thread", "[red]Stopped[/red]")
+        
+        console.print(coord_table)
+        console.print()
+    
+    except Exception as e:
+        logger.debug(f"Error getting coordinator status: {e}")
+
+
+def _show_configuration_flags():
+    """Display configuration flags."""
+    config_table = Table(title="Configuration Flags", show_header=True, header_style="bold white", box=box.ROUNDED)
+    config_table.add_column("Category", style="white", width=25)
+    config_table.add_column("Value", style="dim")
+    
+    # System
+    config_table.add_row("[bold]System[/bold]", "")
+    config_table.add_row("  └─ Operating Mode", settings.SYSTEM_OPERATING_MODE)
+    config_table.add_row("  └─ Debug Mode", "True" if settings.DEBUG else "False")
+    config_table.add_row("  └─ Paper Trading", "True" if settings.PAPER_TRADING else "False")
+    
+    # Session Boundaries
+    config_table.add_row("", "")
+    config_table.add_row("[bold]Session Boundaries[/bold]", "")
+    config_table.add_row("  └─ Auto-roll", "Enabled" if settings.SESSION_AUTO_ROLL else "Disabled")
+    config_table.add_row("  └─ Timeout", f"{settings.SESSION_TIMEOUT_SECONDS} seconds")
+    config_table.add_row("  └─ Check Interval", f"{settings.SESSION_BOUNDARY_CHECK_INTERVAL} seconds")
+    config_table.add_row("  └─ Post-market Delay", f"{settings.SESSION_POST_MARKET_ROLL_DELAY} minutes")
+    
+    # Data Quality
+    config_table.add_row("", "")
+    config_table.add_row("[bold]Data Quality[/bold]", "")
+    config_table.add_row("  └─ Upkeep Enabled", "Yes" if settings.DATA_UPKEEP_ENABLED else "No")
+    config_table.add_row("  └─ Gap Filling", "Automatic" if settings.DATA_UPKEEP_RETRY_MISSING_BARS else "Manual")
+    config_table.add_row("  └─ Derived Bars", "Auto-compute" if settings.DATA_UPKEEP_AUTO_COMPUTE_DERIVED else "Manual")
+    
+    # Historical Data
+    config_table.add_row("", "")
+    config_table.add_row("[bold]Historical Data[/bold]", "")
+    config_table.add_row("  └─ Enabled", "Yes" if settings.HISTORICAL_BARS_ENABLED else "No")
+    config_table.add_row("  └─ Trailing Days", f"{settings.HISTORICAL_BARS_TRAILING_DAYS}")
+    config_table.add_row("  └─ Auto-load", "Yes" if settings.HISTORICAL_BARS_AUTO_LOAD else "No")
+    
+    # Prefetch
+    config_table.add_row("", "")
+    config_table.add_row("[bold]Prefetch[/bold]", "")
+    config_table.add_row("  └─ Enabled", "Yes" if settings.PREFETCH_ENABLED else "No")
+    config_table.add_row("  └─ Window", f"{settings.PREFETCH_WINDOW_MINUTES} minutes before session")
+    config_table.add_row("  └─ Auto-activate", "Yes" if settings.PREFETCH_AUTO_ACTIVATE else "No")
+    
+    console.print(config_table)
+    console.print()
+
+
+async def _show_health_indicators(system_mgr, data_mgr, session_data):
+    """Display health indicators."""
+    health_table = Table(title="Health Indicators", show_header=False, box=box.ROUNDED)
+    health_table.add_column("Status", style="white")
+    
+    # Check system state
+    if system_mgr.state == SystemState.RUNNING:
+        health_table.add_row("[green]✓ System is running[/green]")
+    elif system_mgr.state == SystemState.PAUSED:
+        health_table.add_row("[yellow]⚠ System is paused[/yellow]")
+    else:
+        health_table.add_row("[yellow]⚠ System is stopped[/yellow]")
+    
+    # Check initialization
+    if system_mgr.is_initialized:
+        health_table.add_row("[green]✓ All managers initialized[/green]")
+    else:
+        health_table.add_row("[yellow]⚠ Managers not fully initialized[/yellow]")
+    
+    # Check data provider with real-time check
+    provider_connected = False
+    if data_mgr:
+        if data_mgr.data_api.lower() == "alpaca":
+            from app.integrations.alpaca_client import alpaca_client
+            try:
+                provider_connected = await alpaca_client.validate_connection()
+            except Exception:
+                provider_connected = False
+        elif data_mgr.data_api.lower() == "schwab":
+            from app.integrations.schwab_client import schwab_client
+            try:
+                provider_connected = await schwab_client.validate_connection()
+            except Exception:
+                provider_connected = False
+    
+    if provider_connected:
+        health_table.add_row("[green]✓ Data provider connected[/green]")
+    else:
+        health_table.add_row("[yellow]⚠ Data provider not connected[/yellow]")
+    
+    # TimeProvider is always available (singleton, single source of truth)
+    # No need to check - it's always initialized
+    
+    # Check session data
+    if session_data and session_data.is_session_active():
+        health_table.add_row("[green]✓ Session active[/green]")
+    else:
+        health_table.add_row("[yellow]⚠ No active session[/yellow]")
+    
+    # Check streams
+    if data_mgr and len(data_mgr._bar_stream_cancel_tokens) > 0:
+        health_table.add_row("[green]✓ Streams active and flowing[/green]")
+    
+    console.print(health_table)
+    console.print()
+
+
+def _show_hints(system_mgr):
+    """Display action hints based on system state."""
+    console.print("[bold]Hints:[/bold]")
+    
+    if system_mgr.state == SystemState.STOPPED:
+        console.print("  • Use [cyan]'system start'[/cyan] to start the system")
+    elif system_mgr.state == SystemState.RUNNING:
+        console.print("  • Use [cyan]'system pause'[/cyan] to pause streaming")
+        console.print("  • Use [cyan]'system stop'[/cyan] to stop all operations")
+        console.print("  • Use [cyan]'data stop-all-streams'[/cyan] to stop streams manually")
+    elif system_mgr.state == SystemState.PAUSED:
+        console.print("  • Use [cyan]'system resume'[/cyan] to continue operations")
+        console.print("  • Use [cyan]'system stop'[/cyan] to stop completely")
+    
+    console.print()

@@ -1,0 +1,14 @@
+# MisMartera Startup Script
+# Run this at startup: run startup_script.txt
+# Note: Backtest auto-initializes on first access, no manual init needed!
+
+# Clear screen
+clear
+
+# Show system status (auto-initializes backtest if needed)
+system status
+
+# Show market status  
+market status
+
+# Ready to go!

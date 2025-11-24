@@ -5,6 +5,7 @@ Provides a session-based interactive command interface
 import sys
 import os
 import atexit
+from datetime import datetime
 from typing import Optional
 from rich.console import Console
 from rich.panel import Panel
@@ -31,6 +32,17 @@ from app.services.claude_usage_tracker import usage_tracker
 from app.models.database import AsyncSessionLocal
 from app.services.csv_import_service import csv_import_service
 from app.repositories.market_data_repository import MarketDataRepository
+from app.cli.command_registry import (
+    DATA_COMMANDS,
+    HOLIDAY_COMMANDS,
+    MARKET_COMMANDS,
+    SYSTEM_COMMANDS,
+    GENERAL_COMMANDS,
+    ADMIN_COMMANDS,
+    CLAUDE_COMMANDS,
+    ALPACA_COMMANDS,
+    SCHWAB_COMMANDS,
+)
 
 
 class CommandCompleter:
@@ -39,20 +51,28 @@ class CommandCompleter:
     """
     
     def __init__(self):
-        # Main commands
-        self.commands = [
-            'help', 'status', 'exit', 'logout', 'history',
-            'data', 'list', 'info', 'quality', 'delete',
-            'claude', 'ask', 'analyze', 'usage', 'llm-history',
-            'alpaca',  # Alpaca integration commands
-        ]
+        # Build main command list and subcommand lists from registries (single source of truth)
+        self.commands = []
         
-        # Subcommands by context
-        self.data_commands = [
-            'import-file', 'list', 'info', 'quality', 'delete', 'delete-all',
-            'mode', 'api', 'import-api',
-        ]
-        self.claude_commands = ['ask', 'analyze', 'status', 'usage', 'llm-history']
+        # Add all main commands from registries
+        self.commands.extend([meta.name for meta in GENERAL_COMMANDS])
+        self.commands.extend([meta.name for meta in ADMIN_COMMANDS])
+        
+        # Add command namespaces
+        self.commands.extend(['data', 'holidays', 'market', 'system'])
+        self.commands.extend(['claude', 'alpaca', 'schwab'])
+        
+        # Add standalone commands (direct shortcuts)
+        self.commands.extend(['ask', 'analyze'])
+        
+        # Build subcommand lists from registries
+        self.data_commands = [meta.name for meta in DATA_COMMANDS]
+        self.holiday_commands = [meta.name for meta in HOLIDAY_COMMANDS]
+        self.market_commands = [meta.name for meta in MARKET_COMMANDS]
+        self.system_commands = [meta.name for meta in SYSTEM_COMMANDS]
+        self.claude_commands = [meta.name for meta in CLAUDE_COMMANDS]
+        self.alpaca_commands = [meta.name for meta in ALPACA_COMMANDS]
+        self.schwab_commands = [meta.name for meta in SCHWAB_COMMANDS]
         
         # Cache for symbols (loaded on first use)
         self.cached_symbols = []
@@ -63,11 +83,11 @@ class CommandCompleter:
             try:
                 # This will be populated by the CLI when logged in
                 import asyncio
-                from app.managers import DataManager
+                from app.cli.data_commands import get_data_manager
                 from app.models.database import AsyncSessionLocal
                 
                 async def _fetch():
-                    data_manager = DataManager(mode="real")
+                    data_manager = get_data_manager()
                     async with AsyncSessionLocal() as session:
                         return await data_manager.get_symbols(session)
                 
@@ -111,10 +131,36 @@ class CommandCompleter:
                 if first_word == 'data':
                     if len(words) == 1 or (len(words) == 2 and not line.endswith(' ')):
                         matches = [cmd + ' ' for cmd in self.data_commands if cmd.startswith(text)]
-                    # After 'data info' or 'data quality', suggest symbols
-                    elif words[1] in ['info', 'quality', 'analyze'] and len(words) >= 2:
-                        symbols = self.get_symbols()
-                        matches = [s + ' ' for s in symbols if s.startswith(text.upper())]
+                    # Enumerated value completion for certain subcommands
+                    elif len(words) >= 2 and words[1] == 'backtest-speed':
+                        # data backtest-speed <numeric multiplier> - suggest common values
+                        choices = ['0', '0.5', '1.0', '2.0', '5.0', '10.0']
+                        matches = [c + ' ' for c in choices if c.startswith(text)]
+                    elif len(words) >= 2 and words[1] == 'mode':
+                        # data mode <backtest|live>
+                        choices = ['backtest', 'live']
+                        matches = [c + ' ' for c in choices if c.startswith(text)]
+                    # Use registry metadata to decide when to suggest symbols
+                    elif len(words) >= 2:
+                        subcmd = words[1]
+                        # Find metadata for this subcommand, if any
+                        meta = next((m for m in DATA_COMMANDS if m.name == subcmd), None)
+                        if meta and meta.suggests_symbols_at is not None:
+                            # words: ['data', subcmd, arg1, arg2, ...]
+                            # arg index (0-based) = current word index - 1
+                            current_arg_index = len(words) - 1
+                            if current_arg_index - 1 == meta.suggests_symbols_at:
+                                symbols = self.get_symbols()
+                                matches = [s + ' ' for s in symbols if s.startswith(text.upper())]
+                            else:
+                                matches = []
+                    else:
+                        matches = []
+                
+                # System subcommands
+                elif first_word == 'system':
+                    if len(words) == 1 or (len(words) == 2 and not line.endswith(' ')):
+                        matches = [cmd + ' ' for cmd in self.system_commands if cmd.startswith(text)]
                     else:
                         matches = []
                 
@@ -137,10 +183,31 @@ class CommandCompleter:
                     else:
                         matches = []
                 
-                # Import command - file path completion handled by readline default
+                # Alpaca subcommands
                 elif first_word == 'alpaca':
                     if len(words) == 1 or (len(words) == 2 and not line.endswith(' ')):
-                        matches = ['connect ', 'disconnect ']  # Alpaca subcommands
+                        matches = [cmd + ' ' for cmd in self.alpaca_commands if cmd.startswith(text)]
+                    else:
+                        matches = []
+                
+                # Schwab subcommands
+                elif first_word == 'schwab':
+                    if len(words) == 1 or (len(words) == 2 and not line.endswith(' ')):
+                        matches = [cmd + ' ' for cmd in self.schwab_commands if cmd.startswith(text)]
+                    else:
+                        matches = []
+                
+                # Holidays subcommands
+                elif first_word == 'holidays':
+                    if len(words) == 1 or (len(words) == 2 and not line.endswith(' ')):
+                        matches = [cmd + ' ' for cmd in self.holiday_commands if cmd.startswith(text)]
+                    else:
+                        matches = []
+                
+                # Market subcommands
+                elif first_word == 'market':
+                    if len(words) == 1 or (len(words) == 2 and not line.endswith(' ')):
+                        matches = [cmd + ' ' for cmd in self.market_commands if cmd.startswith(text)]
                     else:
                         matches = []
                 
@@ -168,6 +235,9 @@ class InteractiveCLI:
         self.session_token: Optional[str] = None
         self.current_user: Optional[dict] = None
         self.running = False
+        # Use singleton DataManager to share state with all commands
+        from app.cli.data_commands import get_data_manager
+        self.data_manager = get_data_manager()
         
         # Set up command history and tab completion
         self.history_file = os.path.expanduser("~/.mismartera_history")
@@ -253,6 +323,30 @@ class InteractiveCLI:
         Returns:
             True if login successful, False otherwise
         """
+        # When login requirement is disabled, run as system user without prompts
+        if settings.DISABLE_CLI_LOGIN_REQUIREMENT:
+            self.current_user = {
+                "username": "system",
+                "role": "admin",
+                "email": "system@mismartera.com",
+            }
+            # Create an in-memory session so validate_session calls succeed
+            self.session_token = auth_service.create_session(
+                self.current_user["username"], self.current_user
+            )
+            self.console.print(
+                "[yellow]Authentication disabled for CLI. "
+                "Running as system user.[/yellow]\n"
+            )
+            self.console.print(
+                f"[green]✓[/green] Welcome, [bold]{self.current_user['username']}[/bold]!"
+            )
+            self.console.print(
+                f"[dim]Role: {self.current_user.get('role', 'admin')}[/dim]\n"
+            )
+            logger.info("CLI started with authentication disabled (system user)")
+            return True
+
         self.console.print("[yellow]Please login to continue[/yellow]\n")
         
         max_attempts = 3
@@ -301,27 +395,20 @@ class InteractiveCLI:
             self.current_user = None
     
     def show_help(self):
-        """Display available commands"""
+        """Display available commands (auto-generated from registries)"""
         table = Table(title="Available Commands", box=box.ROUNDED)
         table.add_column("Command", style="cyan", no_wrap=True)
         table.add_column("Description", style="white")
         
-        # General commands
-        table.add_row("help", "Show this help message")
-        table.add_row("history [n]", "Show command history (last n commands, default 50)")
-        table.add_row("status", "Show application status")
-        table.add_row("clear", "Clear the screen")
-        table.add_row("whoami", "Show current user information")
-        table.add_row("logout", "Logout and exit")
-        table.add_row("exit", "Exit the application")
-        table.add_row("quit", "Exit the application")
+        # General commands (from registry)
+        for meta in GENERAL_COMMANDS:
+            table.add_row(meta.usage, meta.description)
         
-        # Admin commands
+        # Admin commands (from registry)
         table.add_section()
         table.add_row("[bold cyan]ADMIN COMMANDS[/bold cyan]", "", style="cyan")
-        table.add_row("log-level <level>", "Change log level (DEBUG, INFO, WARNING, ERROR)")
-        table.add_row("log-level-get", "Get current log level")
-        table.add_row("sessions", "List active sessions (admin only)")
+        for meta in ADMIN_COMMANDS:
+            table.add_row(meta.usage, meta.description)
         
         # Account commands
         table.add_section()
@@ -333,49 +420,49 @@ class InteractiveCLI:
         # Trading commands
         table.add_section()
         table.add_row("[bold cyan]TRADING COMMANDS[/bold cyan]", "", style="cyan")
-        table.add_row("quote <symbol>", "Get real-time quote")
+        table.add_row("quote <symbol>", "Get real-+time quote")
         table.add_row("buy <symbol> <qty>", "Place buy order")
         table.add_row("sell <symbol> <qty>", "Place sell order")
         table.add_row("orders", "View order history")
         
+        # System management commands
+        table.add_section()
+        table.add_row("[bold cyan]SYSTEM MANAGEMENT[/bold cyan]", "", style="cyan")
+        for meta in SYSTEM_COMMANDS:
+            table.add_row(meta.usage, meta.description)
+        
         # Data commands
         table.add_section()
         table.add_row("[bold cyan]DATA COMMANDS[/bold cyan]", "", style="cyan")
-        table.add_row("data list", "List all symbols in database")
-        table.add_row("data info <symbol>", "Show data info for symbol")
-        table.add_row("data quality <symbol>", "Check data quality for symbol")
-        table.add_row("data delete <symbol>", "Delete all data for symbol ⚠️")
-        table.add_row("data delete-all", "Delete ALL data ⚠️")
-        table.add_row("data mode <realtime|backtest>", "Set DataManager operating mode")
-        table.add_row("data api <provider>", "Select data API provider (alpaca, schwab, etc)")
-        table.add_row("data import-api <type> <symbol> <start> <end>", "Import data from external API via DataManager")
-        table.add_row("data import-file <file> <symbol> \\[start] \\[end]", "Import CSV data with optional date range (YYYY-MM-DD)")
-        table.add_row("holidays import <file>", "Import market holiday schedule")
-        table.add_row("holidays list [YYYY]", "List market holidays for year YYYY")
-        table.add_row("holidays delete [YYYY]", "Delete market holidays for year YYYY")
-        table.add_row("market status", "Check market hours")
+        for meta in DATA_COMMANDS:
+            table.add_row(meta.usage, meta.description)
+        for meta in HOLIDAY_COMMANDS:
+            table.add_row(meta.usage, meta.description)
+        for meta in MARKET_COMMANDS:
+            table.add_row(meta.usage, meta.description)
         
-        # Claude AI commands
+        # Claude AI commands (from registry)
         table.add_section()
         table.add_row("[bold cyan]CLAUDE AI COMMANDS[/bold cyan]", "", style="cyan")
-        table.add_row("ask <question>", "Ask Claude a question")
-        table.add_row("analyze <symbol>", "Analyze a stock with Claude AI")
-        table.add_row("claude status", "Check Claude API configuration")
-        table.add_row("claude usage", "View your Claude API usage and costs")
-        table.add_row("claude history", "View recent Claude API usage history")
+        for meta in CLAUDE_COMMANDS:
+            table.add_row(meta.usage, meta.description)
         
-        # Alpaca integration commands
+        # Alpaca integration commands (from registry)
         table.add_section()
         table.add_row("[bold cyan]ALPACA COMMANDS[/bold cyan]", "", style="cyan")
-        table.add_row("alpaca connect", "Test Alpaca API connectivity")
-        table.add_row("alpaca disconnect", "Show how to logically disconnect Alpaca")
+        for meta in ALPACA_COMMANDS:
+            table.add_row(meta.usage, meta.description)
+        
+        # Schwab integration commands (from registry)
+        table.add_section()
+        table.add_row("[bold cyan]SCHWAB COMMANDS[/bold cyan]", "", style="cyan")
+        for meta in SCHWAB_COMMANDS:
+            table.add_row(meta.usage, meta.description)
         
         self.console.print(table)
     
     def show_status(self):
         """Show application status"""
-        from rich.table import Table
-        
         table = Table(title="System Status", box=box.ROUNDED)
         table.add_column("Property", style="cyan")
         table.add_column("Value", style="green")
@@ -417,9 +504,94 @@ class InteractiveCLI:
         self.console.print(f"\n[dim]Total commands in history: {history_length}[/dim]")
         self.console.print(f"[dim]History file: {self.history_file}[/dim]\n")
     
+    async def run_script(self, script_path: str) -> None:
+        """Execute commands from a script file.
+        
+        Args:
+            script_path: Path to the script file
+        """
+        # Expand home directory if needed
+        script_path = os.path.expanduser(script_path)
+        
+        # Check if file exists
+        if not os.path.exists(script_path):
+            self.console.print(f"[red]✗[/red] Script file not found: {script_path}")
+            return
+        
+        if not os.path.isfile(script_path):
+            self.console.print(f"[red]✗[/red] Not a file: {script_path}")
+            return
+        
+        # Read the script file
+        try:
+            with open(script_path, 'r') as f:
+                lines = f.readlines()
+        except Exception as e:
+            self.console.print(f"[red]✗[/red] Error reading script file: {e}")
+            return
+        
+        # Display script info
+        self.console.print(f"\n[cyan]Running script:[/cyan] {script_path}")
+        self.console.print(f"[dim]Lines: {len(lines)}[/dim]\n")
+        
+        # Execute commands
+        executed = 0
+        skipped = 0
+        errors = 0
+        
+        for line_num, line in enumerate(lines, 1):
+            # Strip whitespace
+            line = line.strip()
+            
+            # Skip empty lines
+            if not line:
+                continue
+            
+            # Skip comments (lines starting with #)
+            if line.startswith('#'):
+                skipped += 1
+                self.console.print(f"[dim]{line_num:3d}:[/dim] [dim]{line}[/dim]")
+                continue
+            
+            # Display the command being executed
+            self.console.print(f"[dim]{line_num:3d}:[/dim] [yellow]{line}[/yellow]")
+            
+            # Execute the command
+            try:
+                # Check if we should exit (execute_command returns False to exit)
+                should_continue = await self.execute_command(line)
+                if not should_continue:
+                    self.console.print(f"\n[yellow]Script execution stopped by exit/logout command at line {line_num}[/yellow]")
+                    break
+                executed += 1
+            except KeyboardInterrupt:
+                self.console.print(f"\n[yellow]Script execution interrupted by user at line {line_num}[/yellow]")
+                break
+            except Exception as e:
+                errors += 1
+                self.console.print(f"[red]✗[/red] Error executing line {line_num}: {e}")
+                logger.error(f"Script error at line {line_num}: {e}", exc_info=True)
+        
+        # Summary
+        self.console.print(f"\n[cyan]Script execution completed[/cyan]")
+        self.console.print(f"[green]✓[/green] Executed: {executed}")
+        if skipped > 0:
+            self.console.print(f"[dim]○[/dim] Skipped (comments/empty): {skipped}")
+        if errors > 0:
+            self.console.print(f"[red]✗[/red] Errors: {errors}")
+        self.console.print()
+    
     async def execute_command(self, command: str) -> bool:
         """
         Execute a user command
+        
+        Commands are defined in command registries (single source of truth):
+        - GENERAL_COMMANDS: help, history, run, status, clear, etc.
+        - ADMIN_COMMANDS: log-level, sessions, etc.
+        - SYSTEM_COMMANDS: system start/stop/pause/resume/mode/status
+        - DATA_COMMANDS: data list/import/export/stream/etc.
+        - MARKET_COMMANDS: market status
+        - HOLIDAY_COMMANDS: holidays import/list/delete
         
         Args:
             command: Command string to execute
@@ -435,13 +607,13 @@ class InteractiveCLI:
         args = parts[1:] if len(parts) > 1 else []
         
         try:
-            # System commands
+            # ==================== GENERAL COMMANDS (from GENERAL_COMMANDS registry) ====================
+            
             if cmd in ['exit', 'quit']:
                 if Confirm.ask("\n[yellow]Are you sure you want to exit?[/yellow]"):
                     return False
                 return True
             
-            # Basic commands
             if cmd == 'help':
                 self.show_help()
             
@@ -470,7 +642,28 @@ class InteractiveCLI:
                     return False
                 return True
             
-            # Admin commands
+            elif cmd == 'run':
+                # Execute commands from a script file
+                if not args:
+                    self.console.print("[red]Usage: run <script_file>[/red]")
+                else:
+                    script_file = ' '.join(args)  # Join in case of spaces in path
+                    await self.run_script(script_file)
+            
+            elif cmd == 'delay':
+                # Pause execution for specified milliseconds
+                if not args:
+                    self.console.print("[red]Usage: delay <milliseconds>[/red]")
+                elif not args[0].isdigit():
+                    self.console.print("[red]Error: milliseconds must be a positive integer[/red]")
+                else:
+                    ms = int(args[0])
+                    self.console.print(f"[dim]Pausing for {ms}ms...[/dim]")
+                    await asyncio.sleep(ms / 1000.0)
+                    self.console.print(f"[green]✓[/green] Resumed after {ms}ms")
+            
+            # ==================== ADMIN COMMANDS (from ADMIN_COMMANDS registry) ====================
+            
             elif cmd == 'log-level':
                 if args:
                     from app.logger import logger as app_logger
@@ -552,39 +745,174 @@ class InteractiveCLI:
                 self.console.print("[yellow]Fetching order history...[/yellow]")
                 self.console.print("[dim]No orders found (API not configured)[/dim]")
             
-            # Market commands
+            # ==================== MARKET COMMANDS (from MARKET_COMMANDS registry) ====================
+            
             elif cmd == 'market':
                 if args and args[0].lower() == 'status':
                     self.console.print("[yellow]Checking market status...[/yellow]")
-                    self.console.print("[dim]Market data not available (API not configured)[/dim]")
+
+                    try:
+                        async with AsyncSessionLocal() as session:
+                            # In backtest mode, ensure the backtest window and
+                            # clock are initialized before reading time.
+                            if self.data_manager.system_manager.mode.value == "backtest" and self.data_manager.backtest_start_date is None:
+                                await self.data_manager.init_backtest(session)
+
+                            # Aggregate market info for the current date/time
+                            info = await self.data_manager.get_current_day_market_info(session)
+
+                        # All DataManager times are expressed in canonical
+                        # trading timezone (ET). For display, we optionally
+                        # convert to the local system timezone.
+                        from datetime import datetime as _dt
+                        from zoneinfo import ZoneInfo as _ZoneInfo
+
+                        trading_tz = _ZoneInfo(settings.TRADING_TIMEZONE)
+                        local_tz = _ZoneInfo(settings.LOCAL_TIMEZONE)
+
+                        def _to_display(dt_val: _dt) -> tuple[str, str]:
+                            """Return (formatted_time, tz_label).
+
+                            dt_val is a naive datetime representing Eastern
+                            Time wall-clock. To get correct DST behavior, we
+                            construct a new aware datetime in the trading
+                            timezone rather than using replace(tzinfo=...).
+                            """
+                            aware_et = _dt(
+                                dt_val.year,
+                                dt_val.month,
+                                dt_val.day,
+                                dt_val.hour,
+                                dt_val.minute,
+                                dt_val.second,
+                                dt_val.microsecond,
+                                tzinfo=trading_tz,
+                            )
+                            if settings.DISPLAY_LOCAL_TIMEZONE and local_tz is not None:
+                                local_dt = aware_et.astimezone(local_tz)
+                                return local_dt.strftime("%H:%M:%S"), local_dt.tzname() or "local"
+                            return aware_et.strftime("%H:%M:%S"), "ET"
+
+                        now = info.now
+                        now_str, now_tz = _to_display(now)
+
+                        table = Table(title="Market Status", box=box.ROUNDED)
+                        table.add_column("Property", style="cyan")
+                        table.add_column("Value", style="green")
+
+                        table.add_row("Mode", self.data_manager.system_manager.mode.value.upper())
+                        table.add_row("Current Time", f"{now_str} {now_tz}")
+                        table.add_row("Date", f"{info.date.isoformat()} ({info.date.strftime('%a')})")
+
+                        # Day classification / holiday details
+                        if info.is_holiday:
+                            if info.is_early_close and info.early_close_time:
+                                # For early close, convert the ET close time
+                                # for display using the same rules.
+                                ec_dt = _dt.combine(info.date, info.early_close_time)
+                                ec_str, ec_tz = _to_display(ec_dt)
+                                desc = f"Early close at {ec_str} {ec_tz}"
+                            else:
+                                desc = "Closed"
+                            table.add_row("Today", "Holiday")
+                            if info.holiday_name:
+                                table.add_row("Holiday Name", info.holiday_name)
+                            table.add_row("Holiday Type", desc)
+                        elif info.is_weekend:
+                            table.add_row("Today", "Weekend")
+                        else:
+                            table.add_row("Today", "Regular trading day")
+
+                        # Trading hours for today (if any). On a full-day
+                        # holiday (closed), we omit Market Hours entirely to
+                        # avoid redundant "Closed all day".
+                        if info.is_holiday and not info.is_early_close:
+                            pass
+                        elif info.trading_hours:
+                            open_dt = _dt.combine(info.date, info.trading_hours.open_time)
+                            close_dt = _dt.combine(info.date, info.trading_hours.close_time)
+                            open_str, open_tz = _to_display(open_dt)
+                            close_str, close_tz = _to_display(close_dt)
+                            table.add_row("Market Open", f"{open_str} {open_tz}")
+                            table.add_row("Market Close", f"{close_str} {close_tz}")
+                        else:
+                            table.add_row("Market Hours", "Closed all day")
+
+                        table.add_row("Market Is Open", "YES" if info.is_market_open else "NO")
+
+                        self.console.print(table)
+                    except Exception as e:  # noqa: BLE001
+                        logger.error(f"Market status error: {e}")
+                        self.console.print(f"[red]✗ Error checking market status: {e}[/red]")
                 else:
-                    self.console.print("[red]Usage: market status[/red]")
+                    # Show available subcommands from registry
+                    subcommands = [meta.name for meta in MARKET_COMMANDS]
+                    self.console.print(f"[red]Usage: market <{' | '.join(subcommands)}>[/red]")
             
             # (watchlist command removed)
             
-            # Holiday calendar commands
+            # ==================== HOLIDAY COMMANDS (from HOLIDAY_COMMANDS registry) ====================
+            
             elif cmd == 'holidays':
                 if args:
                     subcmd = args[0].lower()
                     if subcmd == 'import' and len(args) >= 2:
                         file_path = args[1]
-                        from app.cli.holiday_commands import import_holidays_command
+                        from app.cli.data_commands import import_holidays_command
                         await import_holidays_command(file_path)
                     elif subcmd == 'list':
                         year = int(args[1]) if len(args) >= 2 else None
-                        from app.cli.holiday_commands import list_holidays_command
+                        from app.cli.data_commands import list_holidays_command
                         await list_holidays_command(year)
                     elif subcmd == 'delete' and len(args) >= 2:
                         year = int(args[1])
-                        from app.cli.holiday_commands import delete_holidays_command
+                        from app.cli.data_commands import delete_holidays_command
                         await delete_holidays_command(year)
                     else:
-                        self.console.print("[red]Usage:[/red]")
-                        self.console.print("  holidays import <file>    - Import holiday schedule")
-                        self.console.print("  holidays list [YYYY]      - List holidays for year YYYY (or all if omitted)")
-                        self.console.print("  holidays delete [YYYY]    - Delete holidays for year YYYY")
+                        # Show usage from registry (single source of truth)
+                        self.console.print("[red]Unknown holidays command. Available commands:[/red]\n")
+                        for meta in HOLIDAY_COMMANDS:
+                            self.console.print(f"  [cyan]{meta.usage:<40}[/cyan] {meta.description}")
                 else:
-                    self.console.print("[red]Usage: holidays <import|list|delete>[/red]")
+                    # Show available subcommands from registry
+                    subcommands = [meta.name for meta in HOLIDAY_COMMANDS]
+                    self.console.print(f"[red]Usage: holidays <{' | '.join(subcommands)}>[/red]")
+            
+            # ==================== SYSTEM COMMANDS (from SYSTEM_COMMANDS registry) ====================
+            
+            elif cmd == 'system':
+                if args:
+                    subcmd = args[0].lower()
+                    if subcmd == 'start':
+                        # Use default config if not provided
+                        config_path = args[1] if len(args) >= 2 else "session_configs/example_session.json"
+                        from app.cli.system_commands import start_command
+                        await start_command(config_path)
+                    elif subcmd == 'pause':
+                        from app.cli.system_commands import pause_command
+                        await pause_command()
+                    elif subcmd == 'resume':
+                        from app.cli.system_commands import resume_command
+                        await resume_command()
+                    elif subcmd == 'stop':
+                        from app.cli.system_commands import stop_command
+                        await stop_command()
+                    elif subcmd == 'mode' and len(args) >= 2:
+                        mode = args[1].lower()
+                        from app.cli.system_commands import mode_command
+                        await mode_command(mode)
+                    elif subcmd == 'status':
+                        from app.cli.system_commands import status_command
+                        await status_command()
+                    else:
+                        # Show usage from registry (single source of truth)
+                        self.console.print("[red]Unknown system command. Available commands:[/red]\n")
+                        for meta in SYSTEM_COMMANDS:
+                            self.console.print(f"  [cyan]{meta.usage:<40}[/cyan] {meta.description}")
+                else:
+                    # Show available subcommands from registry
+                    subcommands = [meta.name for meta in SYSTEM_COMMANDS]
+                    self.console.print(f"[red]Usage: system <{' | '.join(subcommands)}>[/red]")
             
             elif cmd == 'data':
                 if args:
@@ -607,10 +935,6 @@ class InteractiveCLI:
                     elif subcmd == 'delete-all':
                         from app.cli.data_commands import delete_all_command
                         await delete_all_command()
-                    elif subcmd == 'mode' and len(args) >= 2:
-                        mode = args[1]
-                        from app.cli.data_commands import set_operating_mode_command
-                        await set_operating_mode_command(mode)
                     elif subcmd == 'api' and len(args) >= 2:
                         api = args[1]
                         from app.cli.data_commands import select_data_api_command
@@ -622,33 +946,378 @@ class InteractiveCLI:
                         end_date = args[4]
                         from app.cli.data_commands import import_from_api_command
                         await import_from_api_command(data_type, symbol, start_date, end_date)
+                    elif subcmd == 'import-file' and len(args) >= 3:
+                        # data import-file <file> <symbol> [start] [end]
+                        file_path = args[1]
+                        symbol = args[2].upper()
+                        start_date = args[3] if len(args) >= 4 else None
+                        end_date = args[4] if len(args) >= 5 else None
+                        from app.cli.data_commands import import_csv_command
+                        await import_csv_command(file_path, symbol, start_date, end_date)
+                    elif subcmd == 'export-csv' and len(args) >= 5:
+                        # data export-csv <type> <symbol> <start> <end?> -f <file>
+                        data_type = args[1]
+                        symbol = args[2].upper()
+                        start_date = args[3]
+                        end_date = args[4] if not args[4].startswith('-') else None
+
+                        # Find -f/--file in remaining args
+                        file_path = None
+                        for i, a in enumerate(args[4:], start=4):
+                            if a in {'-f', '--file'} and i + 1 < len(args):
+                                file_path = args[i + 1]
+                                break
+
+                        if not file_path:
+                            self.console.print("[red]Usage: data export-csv <type> <symbol> <start> [end] -f <file>[/red]")
+                        else:
+                            from app.cli.data_commands import export_csv_command
+                            await export_csv_command(data_type, symbol, start_date, end_date, file_path)
+                    elif subcmd == 'bars' and len(args) >= 4:
+                        # data bars <symbol> <start> <end> [interval]
+                        symbol = args[1].upper()
+                        start_date = args[2]
+                        end_date = args[3]
+                        interval = '1m'
+                        if len(args) >= 5:
+                            interval = args[4]
+
+                        from app.cli.data_commands import on_demand_bars_command
+                        await on_demand_bars_command(symbol, start_date, end_date, interval)
+                    elif subcmd == 'ticks' and len(args) >= 4:
+                        # data ticks <symbol> <start> <end>
+                        symbol = args[1].upper()
+                        start_date = args[2]
+                        end_date = args[3]
+
+                        from app.cli.data_commands import on_demand_ticks_command
+                        await on_demand_ticks_command(symbol, start_date, end_date)
+                    elif subcmd == 'quotes' and len(args) >= 4:
+                        # data quotes <symbol> <start> <end>
+                        symbol = args[1].upper()
+                        start_date = args[2]
+                        end_date = args[3]
+
+                        from app.cli.data_commands import on_demand_quotes_command
+                        await on_demand_quotes_command(symbol, start_date, end_date)
+                    elif subcmd == 'latest-bar' and len(args) >= 2:
+                        # data latest-bar <symbol> [interval]
+                        symbol = args[1].upper()
+                        interval = args[2] if len(args) >= 3 else '1m'
+
+                        async with AsyncSessionLocal() as session:
+                            # Ensure backtest clock is initialized if needed
+                            if self.data_manager.system_manager.mode.value == "backtest" and self.data_manager.backtest_start_date is None:
+                                await self.data_manager.init_backtest(session)
+
+                            bar = await self.data_manager.get_latest_bar(session, symbol, interval)
+
+                        if not bar:
+                            self.console.print(f"[yellow]No bar data found for {symbol} on current date[/yellow]")
+                        else:
+                            table = Table(title=f"Latest bar: {symbol} ({interval})", box=box.ROUNDED)
+                            table.add_column("Timestamp", style="cyan")
+                            table.add_column("Open", justify="right")
+                            table.add_column("High", justify="right")
+                            table.add_column("Low", justify="right")
+                            table.add_column("Close", justify="right")
+                            table.add_column("Volume", justify="right")
+
+                            ts = bar.timestamp.strftime("%Y-%m-%d %H:%M")
+                            table.add_row(
+                                ts,
+                                f"{bar.open:.2f}",
+                                f"{bar.high:.2f}",
+                                f"{bar.low:.2f}",
+                                f"{bar.close:.2f}",
+                                f"{bar.volume:.0f}",
+                            )
+
+                            self.console.print(table)
+                            source = "live API" if self.data_manager.system_manager.mode.value == "live" else "backtest DB"
+                            self.console.print(f"[dim]Source: {source}[/dim]")
+
+                    elif subcmd == 'latest-tick' and len(args) >= 2:
+                        # data latest-tick <symbol>
+                        symbol = args[1].upper()
+
+                        async with AsyncSessionLocal() as session:
+                            if self.data_manager.system_manager.mode.value == "backtest" and self.data_manager.backtest_start_date is None:
+                                await self.data_manager.init_backtest(session)
+
+                            tick = await self.data_manager.get_latest_tick(session, symbol)
+
+                        if not tick:
+                            self.console.print(f"[yellow]No tick data found for {symbol} on current date[/yellow]")
+                        else:
+                            table = Table(title=f"Latest tick: {symbol}", box=box.ROUNDED)
+                            table.add_column("Timestamp", style="cyan")
+                            table.add_column("Price", justify="right")
+                            table.add_column("Size", justify="right")
+
+                            ts = tick.timestamp.strftime("%Y-%m-%d %H:%M:%S")
+                            table.add_row(ts, f"{tick.price:.4f}", f"{tick.size:.0f}")
+
+                            self.console.print(table)
+                            source = "live API" if self.data_manager.system_manager.mode.value == "live" else "backtest DB"
+                            self.console.print(f"[dim]Source: {source}[/dim]")
+
+                    elif subcmd == 'latest-quote' and len(args) >= 2:
+                        # data latest-quote <symbol>
+                        symbol = args[1].upper()
+
+                        async with AsyncSessionLocal() as session:
+                            if self.data_manager.system_manager.mode.value == "backtest" and self.data_manager.backtest_start_date is None:
+                                await self.data_manager.init_backtest(session)
+
+                            quote = await self.data_manager.get_latest_quote(session, symbol)
+
+                        if not quote:
+                            self.console.print(f"[yellow]No quote data found for {symbol} on current date[/yellow]")
+                        else:
+                            table = Table(title=f"Latest quote: {symbol}", box=box.ROUNDED)
+                            table.add_column("Timestamp", style="cyan")
+                            table.add_column("Bid", justify="right")
+                            table.add_column("Ask", justify="right")
+                            table.add_column("BidSize", justify="right")
+                            table.add_column("AskSize", justify="right")
+
+                            ts = quote.timestamp.strftime("%Y-%m-%d %H:%M:%S")
+                            table.add_row(
+                                ts,
+                                f"{quote.bid_price:.4f}",
+                                f"{quote.ask_price:.4f}",
+                                f"{quote.bid_size:.0f}",
+                                f"{quote.ask_size:.0f}",
+                            )
+
+                            self.console.print(table)
+                            source = "live API" if self.data_manager.system_manager.mode.value == "live" else "backtest DB"
+                            self.console.print(f"[dim]Source: {source}[/dim]")
+                    elif subcmd == 'backtest-speed' and len(args) >= 2:
+                        mode = args[1]
+                        from app.cli.data_commands import set_backtest_speed_command
+                        await set_backtest_speed_command(mode)
+                    elif subcmd == 'backtest-window' and len(args) >= 2:
+                        # Parse dates and route directly to the shared
+                        # DataManager instance so that the updated backtest
+                        # window and clock apply to this interactive session.
+                        from datetime import datetime as _dt
+
+                        start_str = args[1]
+                        end_str = args[2] if len(args) >= 3 else None
+
+                        try:
+                            start_dt = _dt.strptime(start_str, "%Y-%m-%d").date()
+                        except ValueError:
+                            self.console.print("[red]Start date must be in YYYY-MM-DD format[/red]")
+                            return True
+
+                        end_dt = None
+                        if end_str:
+                            try:
+                                end_dt = _dt.strptime(end_str, "%Y-%m-%d").date()
+                            except ValueError:
+                                self.console.print("[red]End date must be in YYYY-MM-DD format[/red]")
+                                return True
+
+                        async with AsyncSessionLocal() as session:
+                            await self.data_manager.set_backtest_window(session, start_dt, end_dt)
+
+                        effective_end = self.data_manager.backtest_end_date or start_dt
+
+                        # Show full datetime with market open/close times
+                        from datetime import time as dt_time, datetime as dt
+                        from app.models.trading_calendar import TradingHours
+                        
+                        start_datetime = dt.combine(start_dt, dt_time.fromisoformat(TradingHours.MARKET_OPEN))
+                        end_datetime = dt.combine(effective_end, dt_time.fromisoformat(TradingHours.MARKET_CLOSE))
+
+                        self.console.print("[green]✓[/green] Backtest window updated:")
+                        self.console.print(f"  Start: {start_datetime.strftime('%Y-%m-%d %H:%M:%S')}")
+                        self.console.print(f"  End:   {end_datetime.strftime('%Y-%m-%d %H:%M:%S')}")
+                    elif subcmd == 'stream-bars' and len(args) >= 3:
+                        # data stream-bars <interval> <symbol> [file]
+                        interval = args[1]
+                        symbol = args[2].upper()
+                        file_path = args[3] if len(args) >= 4 else None
+
+                        from app.cli.data_commands import stream_bars_command
+                        # Block during DB fetch, then return after starting stream
+                        await stream_bars_command(symbol, interval, file_path)
+                    elif subcmd == 'stream-ticks' and len(args) >= 2:
+                        # data stream-ticks <symbol> [file]
+                        symbol = args[1].upper()
+                        file_path = args[2] if len(args) >= 3 else None
+
+                        from app.cli.data_commands import stream_ticks_command
+                        # Block during DB fetch, then return after starting stream
+                        await stream_ticks_command(symbol, file_path)
+                    elif subcmd == 'stream-quotes' and len(args) >= 2:
+                        # data stream-quotes <symbol> [file]
+                        symbol = args[1].upper()
+                        file_path = args[2] if len(args) >= 3 else None
+
+                        from app.cli.data_commands import stream_quotes_command
+                        # Block during DB fetch, then return after starting stream
+                        await stream_quotes_command(symbol, file_path)
+                    elif subcmd == 'stop-stream-bars':
+                        # data stop-stream-bars [id]
+                        stream_id = args[1] if len(args) >= 2 else None
+
+                        from app.cli.data_commands import stop_bars_stream_command
+                        await stop_bars_stream_command(stream_id)
+                    elif subcmd == 'stop-stream-ticks':
+                        # data stop-stream-ticks [id]
+                        stream_id = args[1] if len(args) >= 2 else None
+
+                        from app.cli.data_commands import stop_ticks_stream_command
+                        await stop_ticks_stream_command(stream_id)
+                    elif subcmd == 'stop-stream-quotes':
+                        # data stop-stream-quotes [id]
+                        stream_id = args[1] if len(args) >= 2 else None
+
+                        from app.cli.data_commands import stop_quotes_stream_command
+                        await stop_quotes_stream_command(stream_id)
+                    elif subcmd == 'stop-all-streams':
+                        # data stop-all-streams
+                        from app.cli.data_commands import stop_all_streams_command
+                        await stop_all_streams_command()
+                    elif subcmd == 'snapshot' and len(args) >= 2:
+                        # data snapshot <symbol>
+                        symbol = args[1].upper()
+                        from app.cli.data_commands import snapshot_command
+                        await snapshot_command(symbol)
+                    elif subcmd == 'session-volume' and len(args) >= 2:
+                        # data session-volume <symbol>
+                        symbol = args[1].upper()
+                        from app.cli.data_commands import session_volume_command
+                        await session_volume_command(symbol)
+                    elif subcmd == 'session-high-low' and len(args) >= 2:
+                        # data session-high-low <symbol>
+                        symbol = args[1].upper()
+                        from app.cli.data_commands import session_high_low_command
+                        await session_high_low_command(symbol)
+                    elif subcmd == 'avg-volume' and len(args) >= 3:
+                        # data avg-volume <symbol> <days>
+                        symbol = args[1].upper()
+                        try:
+                            days = int(args[2])
+                            from app.cli.data_commands import avg_volume_command
+                            await avg_volume_command(symbol, days)
+                        except ValueError:
+                            self.console.print("[red]Days must be an integer[/red]")
+                    elif subcmd == 'high-low' and len(args) >= 3:
+                        # data high-low <symbol> <days>
+                        symbol = args[1].upper()
+                        try:
+                            days = int(args[2])
+                            from app.cli.data_commands import high_low_command
+                            await high_low_command(symbol, days)
+                        except ValueError:
+                            self.console.print("[red]Days must be an integer[/red]")
+                    elif subcmd == 'session':
+                        # data session [refresh_seconds] [csv_file] [--duration/-d <seconds>] [--no-live]
+                        refresh_seconds = None
+                        csv_file = None
+                        duration_seconds = None
+                        no_live = False
+                        
+                        i = 1
+                        while i < len(args):
+                            arg = args[i]
+                            
+                            # Check for duration flag
+                            if arg in ['--duration', '-d']:
+                                if i + 1 < len(args) and args[i + 1].isdigit():
+                                    duration_seconds = int(args[i + 1])
+                                    i += 2
+                                    continue
+                                else:
+                                    self.console.print("[red]Error: --duration/-d requires a number[/red]")
+                                    return True
+                            
+                            # Check for no-live flag
+                            if arg == '--no-live':
+                                no_live = True
+                                i += 1
+                                continue
+                            
+                            # Parse positional args
+                            if refresh_seconds is None and arg.isdigit():
+                                refresh_seconds = int(arg)
+                            elif csv_file is None:
+                                csv_file = arg
+                            
+                            i += 1
+                        
+                        from app.cli.session_data_display import data_session_command
+                        await data_session_command(refresh_seconds, csv_file, duration_seconds, no_live)
+                    elif subcmd == 'validate':
+                        # data validate [csv_file] [--config config_file] [--db-check]
+                        csv_file = None
+                        config_file = None
+                        db_check = False
+                        
+                        i = 1
+                        while i < len(args):
+                            if args[i] == '--config' and i + 1 < len(args):
+                                config_file = args[i + 1]
+                                i += 2
+                            elif args[i] == '--db-check':
+                                db_check = True
+                                i += 1
+                            elif not csv_file:
+                                csv_file = args[i]
+                                i += 1
+                            else:
+                                i += 1
+                        
+                        import subprocess
+                        from pathlib import Path
+                        
+                        script_path = Path("validation/validate_session_dump.py")
+                        if not script_path.exists():
+                            self.console.print("[red]Error: Validation script not found[/red]")
+                            return True
+                        
+                        cmd = ["python", str(script_path)]
+                        if csv_file:
+                            cmd.append(csv_file)
+                        if config_file:
+                            cmd.extend(["--config", config_file])
+                        if db_check:
+                            cmd.append("--db-check")
+                        
+                        subprocess.run(cmd)
                     else:
-                        self.console.print("[red]Usage:[/red]")
-                        self.console.print("  data list                      - List all symbols")
-                        self.console.print("  data info <symbol>             - Show symbol info")
-                        self.console.print("  data quality <symbol>          - Check data quality")
-                        self.console.print("  data delete <symbol>           - Delete symbol data")
-                        self.console.print("  data delete-all                - Delete ALL data (⚠️ dangerous!)")
-                        self.console.print("  data mode <realtime|backtest>  - Set DataManager operating mode")
-                        self.console.print("  data api <provider>            - Select data API provider")
-                        self.console.print("  data import-api <type> <symbol> <start> <end>")
+                        from app.cli.data_commands import print_data_usage
+                        print_data_usage(self.console)
                 else:
-                    self.console.print("[red]Usage: data <list|info|quality|delete|delete-all|mode|api|import-api>[/red]")
+                    self.console.print("[red]Usage: data <subcommand>[/red]")
+                    self.console.print("[dim]Run 'data' with no arguments to see all subcommands.[/dim]")
             
-            # Claude AI commands
+            # ==================== CLAUDE AI COMMANDS (from CLAUDE_COMMANDS registry) ====================
+            
             elif cmd == 'ask':
                 if args:
                     question = ' '.join(args)
                     await self.ask_claude(question)
                 else:
-                    self.console.print("[red]Usage: ask <your question>[/red]")
+                    # Get usage from registry
+                    cmd_meta = next((m for m in CLAUDE_COMMANDS if m.name == 'ask'), None)
+                    usage = cmd_meta.usage if cmd_meta else "ask <question>"
+                    self.console.print(f"[red]Usage: {usage}[/red]")
             
             elif cmd == 'analyze':
                 if args:
                     symbol = args[0].upper()
                     await self.analyze_stock(symbol)
                 else:
-                    self.console.print("[red]Usage: analyze <SYMBOL>[/red]")
+                    # Get usage from registry
+                    cmd_meta = next((m for m in CLAUDE_COMMANDS if m.name == 'analyze'), None)
+                    usage = cmd_meta.usage if cmd_meta else "analyze <symbol>"
+                    self.console.print(f"[red]Usage: {usage}[/red]")
             
             elif cmd == 'claude':
                 if args:
@@ -660,15 +1329,22 @@ class InteractiveCLI:
                     elif subcmd == 'history':
                         self.show_claude_history()
                     else:
-                        self.console.print(f"[red]Unknown claude command: {subcmd}[/red]")
-                        self.console.print("[dim]Try: claude status, claude usage, claude history[/dim]")
+                        # Show usage from registry (single source of truth)
+                        self.console.print("[red]Unknown claude command. Available commands:[/red]\n")
+                        for meta in CLAUDE_COMMANDS:
+                            self.console.print(f"  [cyan]{meta.usage:<40}[/cyan] {meta.description}")
                 else:
-                    self.console.print("[red]Usage: claude <status|usage|history>[/red]")
+                    # Show available subcommands from registry
+                    subcommands = [meta.name for meta in CLAUDE_COMMANDS]
+                    self.console.print(f"[red]Usage: claude <{' | '.join(subcommands)}>[/red]")
             
-            # Alpaca integration commands
+            # ==================== ALPACA COMMANDS (from ALPACA_COMMANDS registry) ====================
+            
             elif cmd == 'alpaca':
                 if not args:
-                    self.console.print("[red]Usage: alpaca <connect|disconnect>[/red]")
+                    # Show available subcommands from registry
+                    subcommands = [meta.name for meta in ALPACA_COMMANDS]
+                    self.console.print(f"[red]Usage: alpaca <{' | '.join(subcommands)}>[/red]")
                 else:
                     subcmd = args[0].lower()
                     if subcmd == 'connect':
@@ -708,8 +1384,198 @@ class InteractiveCLI:
                             )
                         )
                     else:
-                        self.console.print(f"[red]Unknown alpaca command: {subcmd}[/red]")
-                        self.console.print("[dim]Try: alpaca connect or alpaca disconnect[/dim]")
+                        # Show usage from registry (single source of truth)
+                        self.console.print("[red]Unknown alpaca command. Available commands:[/red]\n")
+                        for meta in ALPACA_COMMANDS:
+                            self.console.print(f"  [cyan]{meta.usage:<40}[/cyan] {meta.description}")
+            
+            # ==================== SCHWAB COMMANDS (from SCHWAB_COMMANDS registry) ====================
+            
+            elif cmd == 'schwab':
+                if not args:
+                    # Show available subcommands from registry
+                    subcommands = [meta.name for meta in SCHWAB_COMMANDS]
+                    self.console.print(f"[red]Usage: schwab <{' | '.join(subcommands)}>[/red]")
+                else:
+                    subcmd = args[0].lower()
+                    if subcmd == 'connect':
+                        self.console.print("[yellow]Testing Charles Schwab API connection...[/yellow]")
+                        try:
+                            from app.integrations.schwab_client import schwab_client
+                            ok = await schwab_client.validate_connection()
+                        except Exception as e:
+                            logger.error(f"Schwab connection error: {e}")
+                            ok = False
+                        if ok:
+                            self.console.print(
+                                Panel.fit(
+                                    "[green]✓ Schwab connection successful[/green]\n"
+                                    "[dim]Configuration validated. Note: Full OAuth authentication "
+                                    "requires user authorization flow.[/dim]",
+                                    box=box.ROUNDED,
+                                    border_style="green",
+                                )
+                            )
+                        else:
+                            self.console.print(
+                                Panel.fit(
+                                    "[red]✗ Schwab connection failed[/red]\n"
+                                    "[dim]Check SCHWAB_APP_KEY, SCHWAB_APP_SECRET, SCHWAB_API_BASE_URL, "
+                                    "and SCHWAB_CALLBACK_URL in your environment.[/dim]",
+                                    box=box.ROUNDED,
+                                    border_style="red",
+                                )
+                            )
+                    elif subcmd == 'auth-start':
+                        from app.integrations.schwab_client import schwab_client
+                        from app.cli.schwab_helpers import oauth_server
+                        import webbrowser
+                        
+                        self.console.print("[cyan]Starting Schwab OAuth 2.0 authorization flow...[/cyan]\n")
+                        
+                        # Auto-start OAuth server if not running
+                        if not oauth_server.is_server_running():
+                            self.console.print("[dim]Starting OAuth callback server...[/dim]")
+                            if oauth_server.start_server():
+                                self.console.print("[green]✓ OAuth server ready[/green]\n")
+                            else:
+                                self.console.print("[yellow]⚠ OAuth server failed to start - manual callback required[/yellow]\n")
+                        else:
+                            self.console.print("[dim]OAuth server already running[/dim]\n")
+                        
+                        auth_url, state = schwab_client.generate_authorization_url()
+                        
+                        self.console.print(f"[bold]Authorization URL:[/bold]")
+                        self.console.print(f"{auth_url}\n")
+                        self.console.print(f"[dim]State (for verification): {state[:16]}...[/dim]\n")
+                        
+                        # Try to open browser
+                        try:
+                            webbrowser.open(auth_url)
+                            self.console.print("[green]✓ Opened browser for authorization[/green]\n")
+                        except:
+                            self.console.print("[yellow]⚠ Could not open browser automatically[/yellow]")
+                            self.console.print("[yellow]Please open the URL above in your browser[/yellow]\n")
+                        
+                        self.console.print("[bold]Next steps:[/bold]")
+                        self.console.print("  1. Authorize the application in the browser")
+                        if oauth_server.is_server_running():
+                            self.console.print("  2. Authorization will complete automatically!")
+                            self.console.print("  3. Check status with: schwab auth-status")
+                        else:
+                            self.console.print("  2. You'll be redirected to the callback URL")
+                            self.console.print("  3. Copy the 'code' parameter from the URL")
+                            self.console.print("  4. Run: schwab auth-callback <code>")
+                    
+                    elif subcmd == 'auth-callback':
+                        if len(args) < 2:
+                            self.console.print("[red]Usage: schwab auth-callback <authorization_code>[/red]")
+                            return True
+                        
+                        from app.integrations.schwab_client import schwab_client
+                        auth_code = args[1]
+                        
+                        self.console.print("[yellow]Exchanging authorization code for access token...[/yellow]")
+                        try:
+                            await schwab_client.exchange_code_for_token(auth_code)
+                            self.console.print(
+                                Panel.fit(
+                                    "[green]✓ Authorization successful![/green]\n"
+                                    "[dim]Access token obtained and saved.[/dim]\n"
+                                    "[dim]You can now use Schwab for data imports.[/dim]",
+                                    box=box.ROUNDED,
+                                    border_style="green",
+                                )
+                            )
+                        except Exception as e:
+                            self.console.print(f"[red]✗ Authorization failed: {e}[/red]")
+                            logger.error(f"Auth callback error: {e}")
+                    
+                    elif subcmd == 'auth-status':
+                        from app.integrations.schwab_client import schwab_client
+                        from rich.table import Table
+                        import json
+                        from pathlib import Path
+                        
+                        # Reload tokens from disk in case they were saved after instance was created
+                        schwab_client._load_tokens()
+                        
+                        table = Table(title="Schwab OAuth Status", box=box.ROUNDED)
+                        table.add_column("Property", style="cyan")
+                        table.add_column("Value", style="white")
+                        
+                        is_auth = schwab_client.is_authenticated()
+                        table.add_row("Authenticated", "[green]Yes[/green]" if is_auth else "[red]No[/red]")
+                        
+                        if is_auth:
+                            # Access Token Status
+                            table.add_row("Access Token", f"{schwab_client.access_token[:20]}..." if schwab_client.access_token else "N/A")
+                            if schwab_client.token_expires_at:
+                                expires_in = (schwab_client.token_expires_at - datetime.now()).total_seconds()
+                                if expires_in > 0:
+                                    minutes = int(expires_in / 60)
+                                    table.add_row("Access Token Expires", f"[green]{minutes} minutes[/green]")
+                                else:
+                                    table.add_row("Access Token Expires", "[yellow]Expired (will auto-refresh)[/yellow]")
+                            
+                            # Refresh Token Status
+                            token_file = Path.home() / ".mismartera" / "schwab_tokens.json"
+                            if token_file.exists():
+                                try:
+                                    with open(token_file) as f:
+                                        data = json.load(f)
+                                    saved_at = datetime.fromisoformat(data["saved_at"])
+                                    age_seconds = (datetime.now() - saved_at).total_seconds()
+                                    age_days = int(age_seconds / 86400)
+                                    age_hours = int((age_seconds % 86400) / 3600)
+                                    
+                                    days_remaining = 7 - age_days
+                                    
+                                    if days_remaining > 1:
+                                        table.add_row("Refresh Token", f"[green]Valid ({days_remaining} days remaining)[/green]")
+                                    elif days_remaining == 1:
+                                        table.add_row("Refresh Token", f"[yellow]Expires in {days_remaining} day[/yellow]")
+                                    elif days_remaining == 0:
+                                        table.add_row("Refresh Token", f"[red]Expires today! Re-authorize soon.[/red]")
+                                    else:
+                                        table.add_row("Refresh Token", f"[red]Expired - run 'schwab auth-start'[/red]")
+                                    
+                                    table.add_row("Token Age", f"{age_days}d {age_hours}h")
+                                except:
+                                    pass
+                            
+                            table.add_row("Token File", str(schwab_client._token_file))
+                        else:
+                            table.add_row("Status", "[yellow]Not authorized[/yellow]")
+                            table.add_row("Next Step", "Run 'schwab auth-start'")
+                        
+                        self.console.print(table)
+                    
+                    elif subcmd == 'auth-logout':
+                        from app.integrations.schwab_client import schwab_client
+                        
+                        if Confirm.ask("[yellow]Clear Schwab OAuth tokens?[/yellow]"):
+                            schwab_client.clear_tokens()
+                            self.console.print("[green]✓ Tokens cleared[/green]")
+                        else:
+                            self.console.print("[dim]Cancelled[/dim]")
+                    
+                    elif subcmd == 'disconnect':
+                        self.console.print("[yellow]Disconnecting Schwab (logical only)...[/yellow]")
+                        self.console.print(
+                            Panel.fit(
+                                "[cyan]Schwab uses OAuth 2.0 authentication.[/cyan]\n"
+                                "[dim]To fully disconnect, use 'schwab auth-logout' to clear tokens, "
+                                "or revoke authorization through Schwab's developer portal.[/dim]",
+                                box=box.ROUNDED,
+                                border_style="cyan",
+                            )
+                        )
+                    else:
+                        # Show usage from registry (single source of truth)
+                        self.console.print("[red]Unknown schwab command. Available commands:[/red]\n")
+                        for meta in SCHWAB_COMMANDS:
+                            self.console.print(f"  [cyan]{meta.usage:<40}[/cyan] {meta.description}")
             
             else:
                 self.console.print(f"[red]Unknown command: {cmd}[/red]")
@@ -798,7 +1664,7 @@ class InteractiveCLI:
         self.console.print(f"\n[yellow]Analyzing {symbol} with Claude AI...[/yellow]\n")
         
         try:
-            # Use placeholder market data since we don't have real data yet
+            # Use placeholder market data since we don't have live data yet
             market_data = {
                 "note": "Using Claude's knowledge base and recent market context"
             }

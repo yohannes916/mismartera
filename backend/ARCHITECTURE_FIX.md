@@ -107,7 +107,7 @@ Or via managers:
 ```python
 from app.managers import ExecutionManager
 
-execution_manager = ExecutionManager(mode="real")
+execution_manager = ExecutionManager(mode="live")
 order = await execution_manager.place_order(...)
 ```
 

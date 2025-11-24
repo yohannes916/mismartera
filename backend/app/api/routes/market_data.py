@@ -12,6 +12,7 @@ from app.models import get_db
 from app.repositories.market_data_repository import MarketDataRepository
 from app.services.csv_import_service import csv_import_service
 from app.api.middleware.auth import get_current_user, get_admin_user
+from app.managers import DataManager
 from app.logger import logger
 
 router = APIRouter(prefix="/api/market-data", tags=["Market Data"])
@@ -55,6 +56,55 @@ class SymbolInfo(BaseModel):
     bar_count: int
     start_date: Optional[str] = None
     end_date: Optional[str] = None
+
+
+class OnDemandBar(BaseModel):
+    """On-demand bar record."""
+    timestamp: datetime
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float
+
+
+class OnDemandBarsResponse(BaseModel):
+    """On-demand bar response wrapper."""
+    symbol: str
+    interval: str
+    count: int
+    bars: List[OnDemandBar]
+
+
+class OnDemandTick(BaseModel):
+    """On-demand tick record."""
+    timestamp: datetime
+    price: float
+    size: float
+
+
+class OnDemandTicksResponse(BaseModel):
+    """On-demand tick response wrapper."""
+    symbol: str
+    count: int
+    ticks: List[OnDemandTick]
+
+
+class OnDemandQuote(BaseModel):
+    """On-demand quote record."""
+    timestamp: datetime
+    bid_price: float
+    bid_size: float
+    ask_price: float
+    ask_size: float
+    exchange: Optional[str] = None
+
+
+class OnDemandQuotesResponse(BaseModel):
+    """On-demand quote response wrapper."""
+    symbol: str
+    count: int
+    quotes: List[OnDemandQuote]
 
 
 @router.post("/import", response_model=ImportResponse, status_code=status.HTTP_201_CREATED)
@@ -218,6 +268,164 @@ async def get_bars(
             for bar in bars
         ]
     }
+
+
+@router.get("/on-demand/bars", response_model=OnDemandBarsResponse)
+async def get_on_demand_bars(
+    symbol: str,
+    start: datetime,
+    end: datetime,
+    interval: str = "1m",
+    limit: Optional[int] = 1000,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db),
+):
+    """On-demand 1m/tick bars for a symbol via DataManager.
+
+    This reads from the local database only (no live provider call).
+    """
+    if start >= end:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="start must be before end",
+        )
+
+    if limit and limit > 10000:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="limit cannot exceed 10000",
+        )
+
+    dm = DataManager()
+    bars = await dm.get_bars(session, symbol.upper(), start, end, interval=interval)
+
+    if limit is not None:
+        bars = bars[: limit]
+
+    if not bars:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No bar data found for {symbol.upper()}",
+        )
+
+    return OnDemandBarsResponse(
+        symbol=symbol.upper(),
+        interval=interval,
+        count=len(bars),
+        bars=[
+            OnDemandBar(
+                timestamp=b.timestamp,
+                open=b.open,
+                high=b.high,
+                low=b.low,
+                close=b.close,
+                volume=b.volume,
+            )
+            for b in bars
+        ],
+    )
+
+
+@router.get("/on-demand/ticks", response_model=OnDemandTicksResponse)
+async def get_on_demand_ticks(
+    symbol: str,
+    start: datetime,
+    end: datetime,
+    limit: Optional[int] = 10000,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db),
+):
+    """On-demand tick data via DataManager.get_ticks.
+
+    Uses stored tick data (interval='tick') and does not call external APIs.
+    """
+    if start >= end:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="start must be before end",
+        )
+
+    if limit and limit > 50000:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="limit cannot exceed 50000",
+        )
+
+    dm = DataManager()
+    ticks = await dm.get_ticks(session, symbol.upper(), start, end)
+
+    if limit is not None:
+        ticks = ticks[: limit]
+
+    if not ticks:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No tick data found for {symbol.upper()}",
+        )
+
+    return OnDemandTicksResponse(
+        symbol=symbol.upper(),
+        count=len(ticks),
+        ticks=[
+            OnDemandTick(
+                timestamp=t.timestamp,
+                price=t.price,
+                size=t.size,
+            )
+            for t in ticks
+        ],
+    )
+
+
+@router.get("/on-demand/quotes", response_model=OnDemandQuotesResponse)
+async def get_on_demand_quotes(
+    symbol: str,
+    start: datetime,
+    end: datetime,
+    limit: Optional[int] = 10000,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db),
+):
+    """On-demand bid/ask quotes via DataManager.get_quotes."""
+    if start >= end:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="start must be before end",
+        )
+
+    if limit and limit > 50000:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="limit cannot exceed 50000",
+        )
+
+    dm = DataManager()
+    quotes = await dm.get_quotes(session, symbol.upper(), start, end)
+
+    if limit is not None:
+        quotes = quotes[: limit]
+
+    if not quotes:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No quote data found for {symbol.upper()}",
+        )
+
+    return OnDemandQuotesResponse(
+        symbol=symbol.upper(),
+        count=len(quotes),
+        quotes=[
+            OnDemandQuote(
+                timestamp=q.timestamp,
+                bid_price=q.bid_price,
+                bid_size=q.bid_size,
+                ask_price=q.ask_price,
+                ask_size=q.ask_size,
+                exchange=getattr(q, "exchange", None),
+            )
+            for q in quotes
+        ],
+    )
 
 
 @router.delete("/{symbol}", status_code=status.HTTP_204_NO_CONTENT)

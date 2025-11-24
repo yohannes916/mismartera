@@ -10,7 +10,7 @@ from app.models.database import Base
 class Order(Base):
     """
     Order tracking table
-    Records all orders (real and backtest)
+    Records all orders (live and backtest)
     """
     __tablename__ = "orders"
     
@@ -43,7 +43,7 @@ class Order(Base):
     cancelled_at = Column(DateTime, nullable=True)
     
     # Metadata
-    mode = Column(String(20), nullable=False, default="real")  # real, backtest
+    mode = Column(String(20), nullable=False, default="live")  # live, backtest
     brokerage = Column(String(50), nullable=True)  # schwab, paper, etc.
     error_message = Column(String(500), nullable=True)
     

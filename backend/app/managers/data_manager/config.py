@@ -13,9 +13,9 @@ class DataManagerConfig:
     """Configuration for DataManager behavior.
 
     Attributes:
-        operating_mode: "backtest" or "realtime".
         data_api: Name of the data provider (e.g. "alpaca", "schwab").
+        backtest_days: Number of trading days to include in backtest window.
     """
 
-    operating_mode: str = settings.DATA_MANAGER_OPERATING_MODE
     data_api: str = settings.DATA_MANAGER_DATA_API
+    backtest_days: int = settings.DATA_MANAGER_BACKTEST_DAYS

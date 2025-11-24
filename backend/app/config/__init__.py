@@ -16,5 +16,5 @@ __all__ = [
     "ClaudeConfig",
     "ClaudeUsageMode",
     "PRESET_CONFIGS",
-    "load_config"
+    "load_config",
 ]

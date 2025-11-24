@@ -18,7 +18,7 @@ class AnalysisLog(Base):
     # Analysis identification
     timestamp = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
     symbol = Column(String(20), nullable=False, index=True)
-    mode = Column(String(20), nullable=False, default="real")  # real, backtest
+    mode = Column(String(20), nullable=False, default="live")  # live, backtest
     
     # Bar data at time of analysis
     bar_timestamp = Column(DateTime, nullable=False, index=True)

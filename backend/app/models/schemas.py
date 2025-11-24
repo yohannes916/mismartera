@@ -105,6 +105,27 @@ class MarketData(Base):
     )
 
 
+class QuoteData(Base):
+    """Bid/ask quote ticks for backtesting and analysis."""
+
+    __tablename__ = "quotes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    symbol = Column(String(10), index=True, nullable=False)
+    timestamp = Column(DateTime(timezone=True), index=True, nullable=False)
+    bid_price = Column(Float, nullable=True)
+    bid_size = Column(Float, nullable=True)
+    ask_price = Column(Float, nullable=True)
+    ask_size = Column(Float, nullable=True)
+    exchange = Column(String(10), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        Index("ix_quotes_symbol_timestamp", "symbol", "timestamp", unique=True),
+        {"sqlite_autoincrement": True},
+    )
+
+
 class Analysis(Base):
     """AI analysis results from Claude"""
     __tablename__ = "analysis"

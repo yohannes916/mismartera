@@ -87,7 +87,7 @@ account positions        # Display current positions
 
 #### Trading Commands
 ```bash
-quote <SYMBOL>           # Get real-time quote
+quote <SYMBOL>           # Get real-+time quote
 buy <SYMBOL> <QTY>       # Place buy order
 sell <SYMBOL> <QTY>      # Place sell order
 orders                   # View order history

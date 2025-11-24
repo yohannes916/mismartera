@@ -1,6 +1,6 @@
 # Claude API Usage Tracking
 
-Monitor your Claude API token consumption and estimated costs in real-time.
+Monitor your Claude API token consumption and estimated costs in real-+time.
 
 ## 🔍 Features
 
@@ -226,7 +226,7 @@ If analyzing multiple stocks, consider if you really need AI for each one.
    - Input/output tokens
    - Timestamp
    - Estimated cost
-4. **Stats updated** in real-time
+4. **Stats updated** in real-+time
 5. **User can view** via CLI or API
 
 ## 📈 Monitoring Best Practices

@@ -182,7 +182,7 @@ class SchwabClient:
     
     async def get_quote(self, symbol: str) -> Dict[str, Any]:
         """
-        Get real-time quote
+        Get real-+time quote
         
         Args:
             symbol: Stock symbol
@@ -238,7 +238,7 @@ class SchwabClient:
     
     async def stream_quotes(self, symbols: List[str]):
         """
-        Stream real-time quotes via WebSocket
+        Stream real-+time quotes via WebSocket
         
         Args:
             symbols: List of symbols to stream

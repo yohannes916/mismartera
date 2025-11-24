@@ -1,0 +1,73 @@
+{
+  "session_name": "Example Trading Session",
+  "mode": "backtest",
+  "data_streams": [
+    {
+      "type": "bars",
+      "symbol": "X",
+      "interval": "1m"
+    },
+    {
+      "type": "bars",
+      "symbol": "Y",
+      "interval": "1m"
+    },
+    {
+      "type": "bars",
+      "symbol": "Z",
+      "interval": "5m"
+    },
+    {
+      "type": "quotes",
+      "symbol": "Z"
+    }
+  ],
+  "trading_config": {
+    "max_buying_power": 100000.0,
+    "max_per_trade": 10000.0,
+    "max_per_symbol": 20000.0,
+    "max_open_positions": 5,
+    "paper_trading": true
+  },
+  "api_config": {
+    "data_api": "alpaca",
+    "trade_api": "alpaca",
+    "account_id": "paper_account_123"
+  },
+  "backtest_config": {
+    "start_date": "2025-07-02",
+    "end_date": "2025-07-07",
+    "speed_multiplier": 60.0
+  },
+  "session_data_config": {
+    "historical_bars": {
+      "enabled": true,
+      "trailing_days": 3,
+      "intervals": [1, 5],
+      "auto_load": true
+    },
+    "data_upkeep": {
+      "enabled": true,
+      "check_interval_seconds": 60,
+      "retry_missing_bars": true,
+      "max_retries": 5,
+      "derived_intervals": [5, 15],
+      "auto_compute_derived": true
+    },
+    "prefetch": {
+      "enabled": true,
+      "window_minutes": 60,
+      "check_interval_minutes": 5,
+      "auto_activate": true
+    },
+    "session_boundary": {
+      "auto_roll": true,
+      "preserve_historical_days": 5
+    }
+  },
+  "metadata": {
+    "created_by": "user",
+    "description": "Example session configuration for testing",
+    "strategy": "momentum_scalping"
+  }
+}

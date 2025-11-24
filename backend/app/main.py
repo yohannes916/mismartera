@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from app.config import settings
 from app.logger import logger
 from app.models import init_db, close_db
-from app.api.routes import admin, auth, claude, users, market_data
+from app.api.routes import admin, auth, claude, users, market_data, schwab_oauth
 
 
 @asynccontextmanager
@@ -54,24 +54,24 @@ app.add_middleware(
 
 
 # Include routers
-app.include_router(auth.router)  # Authentication routes (public)
-app.include_router(users.router)  # User management routes
-app.include_router(market_data.router)  # Market data import/management (requires auth)
-app.include_router(claude.router)  # Claude AI routes (requires auth)
-app.include_router(admin.router)  # Admin routes (requires auth)
+app.include_router(admin.router, prefix="/api/admin", tags=["admin"])
+app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
+app.include_router(claude.router, prefix="/api/claude", tags=["claude"])
+app.include_router(users.router, prefix="/api/users", tags=["users"])
+app.include_router(market_data.router, prefix="/api/market-data", tags=["market-data"])
+app.include_router(schwab_oauth.router, tags=["schwab"])  # No prefix - callback must be at root /callback
 
 
 @app.get("/")
 async def root():
     """Root endpoint"""
-    logger.debug("Root endpoint accessed")
     return {
         "app": settings.APP_NAME,
         "version": settings.APP_VERSION,
         "status": "running",
         "message": "Authentication required. Login at /auth/login",
         "docs": "/docs",
-        "redoc": "/redoc"
+        "redoc": "/redoc",
     }
 
 

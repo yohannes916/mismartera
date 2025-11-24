@@ -1,0 +1,65 @@
+{
+  "session_name": "Validation Test Session",
+  "mode": "backtest",
+  "data_streams": [
+    {
+      "type": "bars",
+      "symbol": "AAPL",
+      "interval": "1m"
+    },
+    {
+      "type": "bars",
+      "symbol": "RIVN",
+      "interval": "1m"
+    }
+  ],
+  "trading_config": {
+    "max_buying_power": 100000.0,
+    "max_per_trade": 10000.0,
+    "max_per_symbol": 20000.0,
+    "max_open_positions": 5,
+    "paper_trading": true
+  },
+  "api_config": {
+    "data_api": "alpaca",
+    "trade_api": "alpaca",
+    "account_id": "paper_account_123"
+  },
+  "backtest_config": {
+    "start_date": "2025-11-18",
+    "end_date": "2025-11-18",
+    "speed_multiplier": 60.0,
+    "comment": "Speed 60x = fast replay (validation is speed-agnostic)"
+  },
+  "session_data_config": {
+    "historical_bars": {
+      "enabled": true,
+      "trailing_days": 2,
+      "intervals": [1, 5],
+      "auto_load": true
+    },
+    "data_upkeep": {
+      "enabled": true,
+      "check_interval_seconds": 60,
+      "retry_missing_bars": true,
+      "max_retries": 5,
+      "derived_intervals": [5, 15],
+      "auto_compute_derived": true
+    },
+    "prefetch": {
+      "enabled": true,
+      "window_minutes": 60,
+      "check_interval_minutes": 5,
+      "auto_activate": true
+    },
+    "session_boundary": {
+      "auto_roll": true,
+      "preserve_historical_days": 5
+    }
+  },
+  "metadata": {
+    "created_by": "validation_framework",
+    "description": "Session configuration optimized for validation testing with slow playback",
+    "purpose": "Verify stream coordinator, session_data, and queue behavior correctness"
+  }
+}

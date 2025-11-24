@@ -64,7 +64,7 @@ risk_limit_pct = 70.0     # Force exit if 70%+ chance of hitting stop-loss
 
 2. **Latency**
    - 1-3 second response time per request
-   - Not suitable for real-time sub-second trading
+   - Not suitable for real-+time sub-second trading
    - Better for minute-bar or higher timeframes
 
 3. **Consistency**

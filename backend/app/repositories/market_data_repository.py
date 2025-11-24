@@ -304,96 +304,54 @@ class MarketDataRepository:
         session: AsyncSession,
         symbol: str,
         interval: str = "1m",
-        use_trading_calendar: bool = True
+        use_cache: bool = True
     ) -> Dict:
-        """
-        Check data quality for a symbol
+        """Check data quality for a symbol using centralized quality checker.
+        
+        This method now delegates to the unified quality_checker module which:
+        - Uses trading calendar to accurately count expected trading minutes
+        - Accounts for holidays and early closes
+        - Caches expected minute counts for performance
+        - Assumes off-hours data is already filtered during import
         
         Args:
             session: Database session
             symbol: Stock symbol
-            interval: Time interval
-            use_trading_calendar: Use trading calendar for accurate calculation
+            interval: Time interval (only "1m" is validated)
+            use_cache: Whether to use cached expected minute counts
             
         Returns:
             Dictionary with quality metrics
         """
+        # Only 1m bars are validated with calendar-aware logic
+        if interval != "1m":
+            raise ValueError(f"Quality checking only supports '1m' interval, got: {interval}")
+        
+        # Fetch all bars for the symbol
         bars = await MarketDataRepository.get_bars_by_symbol(
             session, symbol, interval=interval
         )
         
-        if not bars:
-            return {
-                "total_bars": 0,
-                "expected_bars": 0,
-                "missing_bars": 0,
-                "duplicate_timestamps": 0,
-                "quality_score": 0.0
-            }
+        # Use centralized quality checker
+        from app.managers.data_manager.quality_checker import check_bar_quality
         
-        total_bars = len(bars)
+        metrics = await check_bar_quality(
+            session,
+            symbol,
+            bars,
+            use_cache=use_cache
+        )
         
-        # Check for duplicates (shouldn't exist with unique constraint)
-        timestamps = [b.timestamp for b in bars]
-        duplicate_timestamps = len(timestamps) - len(set(timestamps))
-        
-        # Calculate expected bars
-        if len(bars) > 1 and use_trading_calendar:
-            from app.repositories.trading_calendar_repository import TradingCalendarRepository
-            from app.models.trading_calendar import TradingHours
-            
-            start_date = bars[0].timestamp.date()
-            end_date = bars[-1].timestamp.date()
-            
-            if interval == "1m":
-                # Use trading calendar with holidays and early closes from DB
-                expected_bars = 0
-                current = start_date
-                while current <= end_date:
-                    # Combine date with standard market open
-                    open_dt = datetime.combine(
-                        current,
-                        time.fromisoformat(TradingHours.MARKET_OPEN),
-                    )
-                    # Only count minutes for actual trading days
-                    if await TradingCalendarRepository.is_trading_day(session, open_dt):
-                        close_time = await TradingCalendarRepository.get_market_close_time(
-                            session, open_dt
-                        )
-                        close_dt = datetime.combine(current, close_time)
-                        minutes = int((close_dt - open_dt).total_seconds() / 60)
-                        if minutes > 0:
-                            expected_bars += minutes
-                    current += timedelta(days=1)
-            else:
-                # For other intervals, fall back to simple calculation using timestamps
-                time_diff = (bars[-1].timestamp - bars[0].timestamp).total_seconds() / 60
-                expected_bars = int(time_diff) + 1
-        elif len(bars) > 1:
-            # Simple calculation without trading calendar (less accurate)
-            time_diff = (bars[-1].timestamp - bars[0].timestamp).total_seconds() / 60
-            expected_bars = int(time_diff) + 1
-        else:
-            expected_bars = 1
-        
-        missing_bars = max(0, expected_bars - total_bars)
-        
-        # Quality score (0-1)
-        if expected_bars > 0:
-            completeness = total_bars / expected_bars
-        else:
-            completeness = 1.0
-        
-        quality_score = min(1.0, completeness) * (1.0 if duplicate_timestamps == 0 else 0.9)
-        
+        # Convert to dictionary format for backward compatibility
         return {
-            "total_bars": total_bars,
-            "expected_bars": expected_bars,
-            "missing_bars": missing_bars,
-            "duplicate_timestamps": duplicate_timestamps,
-            "quality_score": round(quality_score, 3),
+            "total_bars": metrics.total_bars,
+            "expected_bars": metrics.expected_minutes,
+            "missing_bars": metrics.missing_minutes,
+            "duplicate_timestamps": metrics.duplicate_count,
+            "quality_score": metrics.quality_score,
+            "completeness_pct": metrics.completeness_pct,
             "date_range": {
-                "start": bars[0].timestamp.isoformat(),
-                "end": bars[-1].timestamp.isoformat()
+                "start": metrics.date_range_start.isoformat() if metrics.total_bars > 0 else None,
+                "end": metrics.date_range_end.isoformat() if metrics.total_bars > 0 else None
             }
         }

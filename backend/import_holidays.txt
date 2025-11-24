@@ -1,0 +1,12 @@
+holidays import ./data/holidays/2015_Holiday_Schedule.csv
+holidays import ./data/holidays/2016_Holiday_Schedule.csv
+holidays import ./data/holidays/2017_Holiday_Schedule.csv
+holidays import ./data/holidays/2018_Holiday_Schedule.csv
+holidays import ./data/holidays/2019_Holiday_Schedule.csv
+holidays import ./data/holidays/2020_Holiday_Schedule.csv
+holidays import ./data/holidays/2021_Holiday_Schedule.csv
+holidays import ./data/holidays/2022_Holiday_Schedule.csv
+holidays import ./data/holidays/2023_Holiday_Schedule.csv
+holidays import ./data/holidays/2024_Holiday_Schedule.csv
+holidays import ./data/holidays/2025_Holiday_Schedule.csv
+holidays import ./data/holidays/2026_Holiday_Schedule.csv

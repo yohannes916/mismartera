@@ -23,7 +23,8 @@ async def import_data(file_path, symbol):
 from app.managers.data_manager.api import DataManager
 
 async def import_data(file_path, symbol):
-    data_manager = DataManager(mode="real")
+    # DataManager uses SYSTEM_OPERATING_MODE from settings
+    data_manager = DataManager()
     async with AsyncSessionLocal() as session:
         result = await data_manager.import_csv(session, file_path, symbol)
 ```
@@ -42,13 +43,13 @@ async def import_data(file_path, symbol):
 ```python
 from app.managers import DataManager
 
-# Initialize
-data_manager = DataManager(mode="real")
+# Initialize (mode is controlled globally via SYSTEM_OPERATING_MODE)
+data_manager = DataManager()
 
 # Get data
 bars = await data_manager.get_bars(session, "AAPL", start, end)
 current_time = data_manager.get_current_time()
-is_open = await data_manager.is_market_open(session)
+is_open = data_manager.check_market_open()  # Synchronous, cached
 ```
 
 ### 2. ExecutionManager (`app/managers/execution_manager/`)
@@ -65,7 +66,7 @@ is_open = await data_manager.is_market_open(session)
 from app.managers import ExecutionManager
 
 # Initialize
-execution_manager = ExecutionManager(mode="real", brokerage="schwab")
+execution_manager = ExecutionManager(mode="live", brokerage="schwab")
 
 # Place order
 order = await execution_manager.place_order(
@@ -97,9 +98,9 @@ balance = await execution_manager.get_balance(session)
 from app.managers import DataManager, ExecutionManager, AnalysisEngine
 
 # Initialize (note: depends on other managers)
-data_manager = DataManager(mode="real")
-execution_manager = ExecutionManager(mode="real")
-analysis_engine = AnalysisEngine(data_manager, execution_manager, mode="real")
+data_manager = DataManager(mode="live")
+execution_manager = ExecutionManager(mode="live")
+analysis_engine = AnalysisEngine(data_manager, execution_manager, mode="live")
 
 # Analyze
 analysis = await analysis_engine.analyze_bar(session, "AAPL", current_bar, recent_bars)
@@ -128,7 +129,7 @@ async def list_symbols():
 from app.managers import DataManager
 
 async def list_symbols():
-    data_manager = DataManager(mode="real")
+    data_manager = DataManager()
     async with AsyncSessionLocal() as session:
         # Via manager API - CORRECT!
         symbols = await data_manager.get_symbols(session)
@@ -161,7 +162,7 @@ async def get_bars(symbol: str, session: AsyncSession = Depends(get_db)):
 from app.managers import DataManager
 
 # Initialize manager (could be done at module level)
-data_manager = DataManager(mode="real")
+data_manager = DataManager()
 
 @router.get("/bars/{symbol}")
 async def get_bars(symbol: str, session: AsyncSession = Depends(get_db)):
@@ -235,7 +236,7 @@ await client.place_order(...)
 ```python
 # CORRECT - Via manager API
 from app.managers import ExecutionManager
-execution_manager = ExecutionManager(mode="real", brokerage="schwab")
+execution_manager = ExecutionManager(mode="live", brokerage="schwab")
 await execution_manager.place_order(...)
 ```
 
@@ -244,23 +245,28 @@ await execution_manager.place_order(...)
 The new architecture fully supports backtest mode:
 
 ```python
-# Initialize in backtest mode
-data_manager = DataManager(mode="backtest")
+# Configure global mode in your .env (or environment):
+# SYSTEM_OPERATING_MODE=backtest
+
+from app.managers import DataManager, ExecutionManager, AnalysisEngine
+
+# Initialize managers (DataManager reads SYSTEM_OPERATING_MODE internally)
+data_manager = DataManager()
 execution_manager = ExecutionManager(mode="backtest")
 analysis_engine = AnalysisEngine(
-    data_manager, 
-    execution_manager, 
-    mode="backtest"
+    data_manager,
+    execution_manager,
+    mode="backtest",
 )
 
-# Process historical bars
-for bar in historical_bars:
-    # Set backtest time
-    data_manager.time_provider.set_backtest_time(bar.timestamp)
+# Stream historical bars (time advances automatically via BacktestStreamCoordinator)
+async for bar in data_manager.stream_bars(session, [symbol], interval='1m'):
+    # BacktestStreamCoordinator automatically advances time as bars are yielded
+    # No need to manually call set_backtest_time() here
     
     # Analyze
     analysis = await analysis_engine.analyze_bar(session, symbol, bar, recent_bars)
-    
+
     # Execute if decision is made
     if analysis["decision"]["action"] == "BUY":
         order = await execution_manager.place_order(...)
@@ -312,8 +318,8 @@ from app.managers import DataManager, ExecutionManager, AnalysisEngine
 from app.models.database import AsyncSessionLocal
 
 async def test():
-    data_manager = DataManager(mode="real")
-    execution_manager = ExecutionManager(mode="real")
+    data_manager = DataManager(mode="live")
+    execution_manager = ExecutionManager(mode="live")
     analysis_engine = AnalysisEngine(data_manager, execution_manager)
     
     async with AsyncSessionLocal() as session:

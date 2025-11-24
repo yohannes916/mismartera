@@ -1,3 +1,5 @@
+https://www.backtestmarket.com/en/btm-historical-data-complete-pack
+
 Pricing for Claude Opus 4.1 starts at $15 per million input tokens and $75 per million output tokens, 
 with up to 90% cost savings with prompt caching and 50% cost savings with batch processing. 
 To learn more, check out our pricing page.
@@ -19,3 +21,182 @@ TODO:
 - [ ] Add support for batch processing
 - [ ] Add support for prompt caching
 
+
+- Time & Status APIs
+- Bar Data APIs
+- Tick Data APIs
+- Quote Data APIs
+- Volume Analytics APIs
+- Price Analytics APIs
+- Trading Calendar APIs
+- Streaming APIs
+- Data Import APIs
+
+The Data Manager will be responsible for supplying the following data points and functionalities across all modules:
+Information Provided by Data Manager
+Description
+Streaming Data (quote, Tick, 1m, Custom Intervals)	Provides both real-+time streams and on-demand historical data access. This includes variations like 2m, 3m, or any other interval derived from the 1m base data.
+Average Volume (Specified Periods)	Calculates and supplies the average volume for a symbol over a specified number of full trading days.
+Current Session Volume	Tracks and updates the cumulative trading volume for the current active session, advancing in real-+time as new data is streamed out.
+Time-Specific Average Volume	Supplies the average volume for a symbol up to a specific time of day, calculated over a historical period of x number of days.
+Historical High and Low Data	Provides the highest and lowest prices of a symbol, looking back over a specified number of trading days or years.
+Current Day High and Low	Tracks and updates the highest and lowest prices reached during the current trading session as data streams in.
+Current Date Time	The authoritative source for the system's current time (either system time in "live" mode or simulated time in "backtest" mode).
+Market Status	A simple boolean flag or status indicating whether the market is currently open or closed.
+Holiday Information	Identifies if the current day is a market holiday (Yes/No) and provides the specific holiday name.
+Session Times	Provides the precise market opening time and closing time for the current day, accounting for standard hours, half-days, or closures.
+By centralizing these functions, the Data Manager ensures consistency and reliability across the entire application, preventing different modules from calculating or retrieving conflicting information independently.
+
+
+
+
+
+
+
+
+
+----
+
+## Stream Coordinator Architecture Update
+
+We are updating the stream coordinator architecture by introducing a **singleton** object, **`session_data`**, which will manage all market data for a single trading session. The session boundaries and historical data requirements will be configurable via:
+
+* **start-time** (default: 09:30)
+* **end-time** (default: 16:00)
+* **historical-bars-trailing-days** (default: 0 days, number of days trailing current session)
+* **historical-bars-types** (default: [], i.e: [1,5]): 
+
+---
+
+## Overview of `session_data`
+
+`session_data` is a **singleton** object created and managed by the **system_manager**, which exposes it globally as:
+`system_manager.session_data`.
+
+The **`session_data`** object holds **per-symbol data structures** that store various requested data types for each symbol. These data types include:
+
+* **session_ended flag** (indicates if the session is over; by default, this flag is cleared)
+* **1-minute bars** (required if any derivative bars are requested)
+* **Derived bars** (e.g., 5-minute bars, which rely on 1-minute bars as input)
+* **bar_quality (%)** (indicates the completeness of the bars)
+* **Quotes**
+* **Ticks**
+* **Session volume** (updated continuously during the session by the second stream coordinator thread (data-upkeep-thread)
+* **Session high/low** (updated continuously during the session by data-upkeep-thread)
+* **Updated flags** for each data type (set by the main thread when new data is inserted)
+
+### Bar Completeness Requirement
+
+For each symbol, the following rules apply:
+
+* A **1-minute bar stream must always be active** if any derivative bar (e.g., 5-minute) is requested.
+* If streaming for a symbol begins mid-session:
+
+  * The main thread **starts the live stream immediately**.
+  * The **data-upkeep-thread** (see below) will:
+
+    * Fetch historical **1-minute bars** from the session start to the current time.
+    * Recompute any missing derived bars (e.g., 5-minute bars).
+    * Ensure that the **historical-bars-trailing-days** requirement is met.
+
+**Important notes:**
+
+* Stream start APIs need to be modified to only fetch data for the current session (from `system_manager.session_data.start_time` to `end_time`).
+* The **historical-bars-trailing-days** value does not need to be explicitly requested. The stream coordinator (via the Data Integrity Thread) will automatically fill this data based on configuration.
+
+---
+
+## Stream Coordinator Responsibilities
+
+The stream coordinator’s primary responsibility is to **stream data into `session_data` in chronological order**, without additional processing. Other duties include:
+
+* **Respecting the configured replay speed** in backtesting.
+* **Fast-forwarding**: If the oldest incoming data is behind the current time (as indicated by the TimeProvider), the stream coordinator will immediately push all stale data to catch up. Once caught up, it will proceed at the configured replay rate.
+
+---
+
+## Thread Model
+
+The stream coordinator runs with **two dedicated threads** that operate for the entire lifetime of the application:
+
+### **1. Main Coordinator Thread**
+
+Responsibilities:
+
+1. **Chronological Data Delivery**
+
+   * Streams data into `session_data` in the correct time order.
+   * In **backtesting mode**, enforces the configured replay speed.
+   * In **live mode**, pushes data as quickly as possible, while still respecting chronological order.
+
+2. **Session Completion Detection**
+
+   * **In live mode**: The main thread will indicate the end of the session when the current time exceeds `end-time`.
+   * **In backtesting mode**: The session is considered complete when:
+
+     * The current time is within a minute of `end-time` and there's no more data that falls within the session, **or**
+     * All data for the session has been streamed, and a configurable 60-second timeout expires with no new data.
+     * If the timeout expires unexpectedly, the main thread will signal an error (a flag maintained by system_manager.stream_coordinator_timer_expired) and end the current session, then advance to the next session (if any).
+
+3. **Advancing to the Next Session (Backtesting Only)**
+
+   * After signaling the **session_ended** flag, it advances the current time to the start time of the next session (if any).
+   * The **data-upkeep-thread**, upon detecting that the session has ended, and session_data holds stale data:
+
+     * Ensure its prefetched data matches the current time.
+     * Loads prefetched data into the stream coordinator's incoming data queues.
+     * Reset the **session_ended** flag.
+  
+
+---
+
+### **2. data-upkeep-thread**
+
+Responsibilities:
+
+1. **Ensuring Bar Completeness (1-minute bars)**
+
+   * Continuously checks for gaps between session start time and the current time.
+   * If gaps are detected, it:
+
+     * Fetches missing **1-minute bar** data.
+     * Inserts the missing bars into `session_data`.
+     * Updates **bar_quality** if data cannot be found.
+     * Retries fetching missing data once per minute until completed.
+   * Once **1-minute bars** are complete, it automatically recomputes any missing **derived bars** (e.g., 5-minute bars).
+
+2. **Ensuring Historical Bars for Trailing Days**
+
+   * Verifies that the **historical-bars-trailing-days** and **historical-bars-types**requirement is met by ensuring all historical data for the trailing days is available.
+   * Fetches missing data as needed to meet this requirement.
+
+3. **Backtesting Data Prefetch**
+
+   * Looks ahead based on:
+
+     * Current datetime
+     * `data_manager.backtest_end`
+   * If future sessions remain:
+
+     * Prefetches all required data for the next session.
+     * Prepares derived data (e.g., 5-minute bars) for the upcoming session.
+     * Prepares **historical-bars** for the next session, by correctly removing oldest day and concatenating current session bars.
+
+4. **Refilling Stream Queues for Next Session**
+
+   * After the main thread signals the session end and advances current time to next session opening time:
+
+     * The Data Integrity Thread loads the prefetched data into the stream coordinator’s incoming data queues.
+   * The main thread waits for up to 60 seconds to receive the first piece of data for the next session. If the **system_manager.state** is not **running**, the timer pauses and resets until the system resumes.
+
+---
+
+### Key Points for Further Consideration:
+
+1. **Concurrency Control:** We need to ensure that both threads (Main Coordinator and data-upkeep-thread) are properly synchronized to avoid race conditions when updating or accessing `session_data`.
+
+2. **Error Handling:** We should define clear error handling strategies in case historical data fetches fail, or when timeouts occur.
+
+3. **Performance Optimization:** While fast-forwarding during backtesting, the system should be optimized to minimize any delays in catching up with the data stream, especially in high-frequency scenarios.
+
+---

@@ -29,12 +29,12 @@ class ExecutionManager:
     Supports both Real and Backtest modes.
     """
     
-    def __init__(self, mode: str = "real", brokerage: str = "schwab"):
+    def __init__(self, mode: str = "live", brokerage: str = "schwab"):
         """
         Initialize ExecutionManager
         
         Args:
-            mode: Operating mode - "real" or "backtest"
+            mode: Operating mode - "live" or "backtest"
             brokerage: Brokerage to use - "schwab", "paper", etc.
         """
         self.mode = mode
@@ -118,8 +118,8 @@ class ExecutionManager:
             order.filled_at = datetime.utcnow()
             await session.commit()
         
-        # In real mode, submit to brokerage
-        elif self.mode == "real":
+        # In live mode, submit to brokerage
+        elif self.mode == "live":
             # TODO: Submit to actual brokerage
             logger.warning("Real mode order execution not yet implemented")
             order.status = "PENDING"

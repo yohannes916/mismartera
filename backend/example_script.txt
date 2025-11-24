@@ -1,0 +1,19 @@
+# Example Script for MisMartera CLI
+# This script demonstrates how to use the 'run' command
+# Lines starting with '#' are comments and will be skipped
+
+# Clear the screen
+clear
+
+# Start the session
+system start
+
+# Start the session data collection
+# With 60x speed: 6.5 hour session / 60 = 6.5 minutes = 390 seconds
+# Duration is in SECONDS (not milliseconds)
+# Use --no-live flag when running from script to avoid display jumping
+data session --duration 39 --no-live
+
+# Validate the session data
+data validate
+

@@ -180,7 +180,7 @@ python run_cli.py data quote AAPL TSLA NVDA
 # Get historical data
 python run_cli.py data history MSFT --days 30 --interval 1d
 
-# Stream real-time quotes
+# Stream real-+time quotes
 python run_cli.py data stream AAPL GOOGL
 ```
 
@@ -283,7 +283,7 @@ The application uses SQLAlchemy with async SQLite:
 
 1. **Account Module**: Authentication, balance, account info
 2. **Execution Module**: Order placement, position management
-3. **Data Module**: Historical data, real-time quotes, WebSocket streaming
+3. **Data Module**: Historical data, real-+time quotes, WebSocket streaming
 4. **Analysis Engine**: Claude AI integration for trading insights
 
 ### Technology Stack

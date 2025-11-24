@@ -9,11 +9,11 @@ from app.services.auth_service import auth_service
 from app.logger import logger
 
 # HTTP Bearer token security scheme
-security = HTTPBearer()
+security = HTTPBearer(auto_error=False)
 
 
 async def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Security(security)
+    credentials: Optional[HTTPAuthorizationCredentials] = Security(security)
 ) -> Dict[str, Any]:
     """
     Dependency to get current authenticated user from bearer token
@@ -27,6 +27,14 @@ async def get_current_user(
     Raises:
         HTTPException: If authentication fails
     """
+    if credentials is None:
+        logger.warning(f"Missing authentication credentials")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication credentials were not provided",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
     token = credentials.credentials
     
     # Validate session

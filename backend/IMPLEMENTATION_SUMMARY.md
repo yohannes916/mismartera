@@ -214,7 +214,8 @@ make run-cli ARGS="init-db"
 ```python
 from app.managers import DataManager
 
-data_manager = DataManager(mode="real")
+# DataManager reads SYSTEM_OPERATING_MODE from settings
+data_manager = DataManager()
 # Test basic functionality
 ```
 
