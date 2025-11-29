@@ -1,9 +1,8 @@
-"""Alpaca market data integration for DataManager.
+"""Alpaca Data Integration
 
 Provides helpers to fetch bars (1-minute, daily), trade ticks, and bid/ask
 quotes from Alpaca and map them into our internal dictionary format
-used by MarketDataRepository (for bars/ticks) and QuoteRepository
-for quotes.
+for storage in Parquet files.
 """
 from __future__ import annotations
 
@@ -23,8 +22,8 @@ async def fetch_1m_bars(
 ) -> List[Dict]:
     """Fetch 1-minute bars for a symbol from Alpaca REST API.
 
-    Returns a list of bar dicts with keys matching MarketDataRepository
-    expectations: symbol, timestamp, interval, open, high, low, close, volume.
+    Returns a list of bar dicts for Parquet storage:
+    symbol, timestamp, interval, open, high, low, close, volume.
     """
     if not settings.ALPACA_API_KEY_ID or not settings.ALPACA_API_SECRET_KEY:
         raise RuntimeError("Alpaca API credentials are missing")
@@ -32,11 +31,11 @@ async def fetch_1m_bars(
     # Use Alpaca historical data endpoint base URL
     base_url = settings.ALPACA_DATA_BASE_URL.rstrip("/")
 
-    # Alpaca expects RFC 3339 / ISO timestamps in UTC
+    # Alpaca expects RFC 3339 / ISO timestamps
     def _to_alpaca_ts(dt: datetime) -> str:
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone(timezone.utc).isoformat()
+            raise ValueError("Datetime must be timezone-aware")
+        return dt.isoformat()
 
     params = {
         "timeframe": "1Min",
@@ -67,11 +66,7 @@ async def fetch_1m_bars(
                 params.pop("page_token", None)
 
             logger.info(
-                "Requesting Alpaca 1m bars: symbol=%s start=%s end=%s page=%s",
-                symbol.upper(),
-                params["start"],
-                params["end"],
-                page,
+                f"[Alpaca] Requesting 1m bars for {symbol.upper()} (page {page}, total fetched: {len(all_bars)}) | Range: {params['start']} to {params['end']}"
             )
 
             resp = await client.get(url, headers=headers, params=params)
@@ -88,6 +83,11 @@ async def fetch_1m_bars(
 
             data = resp.json()
             bars = data.get("bars", [])
+            bars_in_page = len(bars)
+            
+            logger.info(
+                f"[Alpaca] Received {bars_in_page} bars in page {page} for {symbol.upper()}"
+            )
 
             for bar in bars:
                 try:
@@ -111,9 +111,16 @@ async def fetch_1m_bars(
 
             next_page_token = data.get("next_page_token")
             if not next_page_token:
+                logger.info(
+                    f"[Alpaca] ✓ Completed pagination for {symbol.upper()} (total: {len(all_bars)} bars from {page} pages)"
+                )
                 break
+            else:
+                logger.info(
+                    f"[Alpaca] → More data available, fetching next page for {symbol.upper()}..."
+                )
 
-    logger.info("Fetched %s 1m bars from Alpaca for %s", len(all_bars), symbol.upper())
+    logger.info(f"[Alpaca] ✓ Final: Fetched {len(all_bars)} 1m bars from Alpaca for {symbol.upper()}")
     return all_bars
 
 
@@ -124,8 +131,8 @@ async def fetch_1d_bars(
 ) -> List[Dict]:
     """Fetch daily bars for a symbol from Alpaca REST API.
 
-    Returns a list of bar dicts with keys matching MarketDataRepository
-    expectations: symbol, timestamp, interval, open, high, low, close, volume.
+    Returns a list of bar dicts for Parquet storage:
+    symbol, timestamp, interval, open, high, low, close, volume.
     """
     if not settings.ALPACA_API_KEY_ID or not settings.ALPACA_API_SECRET_KEY:
         raise RuntimeError("Alpaca API credentials are missing")
@@ -133,11 +140,11 @@ async def fetch_1d_bars(
     # Use Alpaca historical data endpoint base URL
     base_url = settings.ALPACA_DATA_BASE_URL.rstrip("/")
 
-    # Alpaca expects RFC 3339 / ISO timestamps in UTC
+    # Alpaca expects RFC 3339 / ISO timestamps
     def _to_alpaca_ts(dt: datetime) -> str:
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone(timezone.utc).isoformat()
+            raise ValueError("Datetime must be timezone-aware")
+        return dt.isoformat()
 
     params = {
         "timeframe": "1Day",
@@ -168,11 +175,7 @@ async def fetch_1d_bars(
                 params.pop("page_token", None)
 
             logger.info(
-                "Requesting Alpaca daily bars: symbol=%s start=%s end=%s page=%s",
-                symbol.upper(),
-                params["start"],
-                params["end"],
-                page,
+                f"[Alpaca] Requesting daily bars for {symbol.upper()} (page {page}, total fetched: {len(all_bars)}) | Range: {params['start']} to {params['end']}"
             )
 
             resp = await client.get(url, headers=headers, params=params)
@@ -189,6 +192,11 @@ async def fetch_1d_bars(
 
             data = resp.json()
             bars = data.get("bars", [])
+            bars_in_page = len(bars)
+            
+            logger.info(
+                f"[Alpaca] Received {bars_in_page} daily bars in page {page} for {symbol.upper()}"
+            )
 
             for bar in bars:
                 try:
@@ -212,9 +220,16 @@ async def fetch_1d_bars(
 
             next_page_token = data.get("next_page_token")
             if not next_page_token:
+                logger.info(
+                    f"[Alpaca] ✓ Completed pagination for {symbol.upper()} daily bars (total: {len(all_bars)} bars from {page} pages)"
+                )
                 break
+            else:
+                logger.info(
+                    f"[Alpaca] → More daily data available, fetching next page for {symbol.upper()}..."
+                )
 
-    logger.info("Fetched %s daily bars from Alpaca for %s", len(all_bars), symbol.upper())
+    logger.info(f"[Alpaca] ✓ Final: Fetched {len(all_bars)} daily bars from Alpaca for {symbol.upper()}")
     return all_bars
 
 
@@ -236,8 +251,8 @@ async def fetch_ticks(
 
     def _to_alpaca_ts(dt: datetime) -> str:
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone(timezone.utc).isoformat()
+            raise ValueError("Datetime must be timezone-aware")
+        return dt.isoformat()
 
     params = {
         "start": _to_alpaca_ts(start),
@@ -265,12 +280,8 @@ async def fetch_ticks(
             else:
                 params.pop("page_token", None)
 
-            logger.info(
-                "Requesting Alpaca ticks: symbol=%s start=%s end=%s page=%s",
-                symbol.upper(),
-                params["start"],
-                params["end"],
-                page,
+            logger.debug(
+                f"[Alpaca] Requesting ticks for {symbol.upper()} (page {page}, total fetched: {len(ticks)}) | Range: {params['start']} to {params['end']}"
             )
 
             resp = await client.get(url, headers=headers, params=params)
@@ -287,6 +298,11 @@ async def fetch_ticks(
 
             data = resp.json()
             trades = data.get("trades", [])
+            trades_in_page = len(trades)
+            
+            logger.debug(
+                f"[Alpaca] Received {trades_in_page} ticks in page {page} for {symbol.upper()}"
+            )
 
             for trade in trades:
                 try:
@@ -312,9 +328,16 @@ async def fetch_ticks(
 
             next_page_token = data.get("next_page_token")
             if not next_page_token:
+                logger.info(
+                    f"[Alpaca] ✓ Completed pagination for {symbol.upper()} ticks (total: {len(ticks)} ticks from {page} pages)"
+                )
                 break
+            else:
+                logger.debug(
+                    f"[Alpaca] → More tick data available, fetching next page for {symbol.upper()}..."
+                )
 
-    logger.info("Fetched %s ticks from Alpaca for %s", len(ticks), symbol.upper())
+    logger.info(f"[Alpaca] ✓ Final: Fetched {len(ticks)} ticks from Alpaca for {symbol.upper()}")
     return ticks
 
 
@@ -325,7 +348,7 @@ async def fetch_quotes(
 ) -> List[Dict]:
     """Fetch historical bid/ask quotes for a symbol from Alpaca REST API.
 
-    Returns a list of dicts suitable for QuoteRepository.bulk_create_quotes
+    Returns a list of dicts for Parquet storage
     with keys: symbol, timestamp, bid_price, bid_size, ask_price, ask_size,
     exchange.
     """
@@ -336,8 +359,8 @@ async def fetch_quotes(
 
     def _to_alpaca_ts(dt: datetime) -> str:
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone(timezone.utc).isoformat()
+            raise ValueError("Datetime must be timezone-aware")
+        return dt.isoformat()
 
     params = {
         "start": _to_alpaca_ts(start),
@@ -366,11 +389,7 @@ async def fetch_quotes(
                 params.pop("page_token", None)
 
             logger.info(
-                "Requesting Alpaca quotes: symbol=%s start=%s end=%s page=%s",
-                symbol.upper(),
-                params["start"],
-                params["end"],
-                page,
+                f"[Alpaca] Requesting quotes for {symbol.upper()} (page {page}, total fetched: {len(quotes)}) | Range: {params['start']} to {params['end']}"
             )
 
             resp = await client.get(url, headers=headers, params=params)
@@ -387,6 +406,11 @@ async def fetch_quotes(
 
             data = resp.json()
             quote_items = data.get("quotes") or []
+            quotes_in_page = len(quote_items)
+            
+            logger.info(
+                f"[Alpaca] Received {quotes_in_page} quotes in page {page} for {symbol.upper()}"
+            )
 
             for q in quote_items:
                 try:
@@ -409,9 +433,16 @@ async def fetch_quotes(
 
             next_page_token = data.get("next_page_token")
             if not next_page_token:
+                logger.info(
+                    f"[Alpaca] ✓ Completed pagination for {symbol.upper()} quotes (total: {len(quotes)} quotes from {page} pages)"
+                )
                 break
+            else:
+                logger.info(
+                    f"[Alpaca] → More quote data available, fetching next page for {symbol.upper()}..."
+                )
 
-    logger.info("Fetched %s quotes from Alpaca for %s", len(quotes), symbol.upper())
+    logger.info(f"[Alpaca] ✓ Final: Fetched {len(quotes)} quotes from Alpaca for {symbol.upper()}")
     return quotes
 
 
@@ -545,8 +576,14 @@ async def fetch_session_data(symbol: str, session_date: date) -> Optional[Dict]:
     url = f"{base_url}/v2/stocks/{symbol.upper()}/bars"
     
     # Request daily bar for specific session
-    start_dt = datetime.combine(session_date, time.min, tzinfo=timezone.utc)
-    end_dt = datetime.combine(session_date, time.max, tzinfo=timezone.utc)
+    # Get system timezone from SystemManager
+    from app.managers.system_manager import get_system_manager
+    from zoneinfo import ZoneInfo
+    system_mgr = get_system_manager()
+    system_tz = ZoneInfo(system_mgr.timezone)
+    
+    start_dt = datetime.combine(session_date, time.min, tzinfo=system_tz)
+    end_dt = datetime.combine(session_date, time.max, tzinfo=system_tz)
     
     params = {
         "timeframe": "1Day",

@@ -25,8 +25,6 @@ class User(Base):
     
     # Relationships - defined lazily to avoid circular imports
     # These will be populated when other models are loaded
-    orders = relationship("OrderLegacy", back_populates="user", lazy="dynamic")
-    positions = relationship("PositionLegacy", back_populates="user", lazy="dynamic")
     account_info = relationship("AccountInfo", back_populates="user", uselist=False)
     
     def __repr__(self):

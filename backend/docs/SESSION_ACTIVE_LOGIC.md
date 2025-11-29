@@ -188,7 +188,7 @@ Session Data
 # Check if can analyze current market
 if session_data.is_session_active():
     # Market is open, system running, analyze!
-    latest_bar = await session_data.get_latest_bar("AAPL")
+    latest_bar = session_data.get_latest_bar("AAPL")
     analyze(latest_bar)
 else:
     # Market closed or system not running
@@ -200,7 +200,7 @@ else:
 # Check if can place trades
 if session_data.is_session_active():
     # All conditions met, can trade
-    await execution_manager.place_order(order)
+    execution_manager.place_order(order)
 else:
     # Don't trade when session inactive
     logger.warning("Session inactive, cannot place order")
@@ -211,7 +211,7 @@ else:
 # Check if should process real-time data
 if session_data.is_session_active():
     # Process incoming bars
-    await process_bars()
+    process_bars()
 else:
     # Pause data processing
     logger.info("Session inactive, pausing data processing")
@@ -223,7 +223,7 @@ else:
 if not session_data.is_session_active():
     # Market closed, check if should roll
     if should_roll_session():
-        await session_data.roll_session(next_date)
+        session_data.roll_session(next_date)
 ```
 
 ## Compared to Previous Logic

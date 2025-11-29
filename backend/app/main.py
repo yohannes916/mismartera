@@ -20,15 +20,16 @@ async def lifespan(app: FastAPI):
     logger.info(f"Debug mode: {settings.DEBUG}")
     logger.info(f"Paper trading: {settings.PAPER_TRADING}")
     
-    # Initialize database
-    await init_db()
+    # Initialize database (now sync, run in thread pool)
+    import asyncio
+    await asyncio.to_thread(init_db)
     logger.success("Application startup complete")
     
     yield
     
     # Shutdown
     logger.info("Shutting down application...")
-    await close_db()
+    await asyncio.to_thread(close_db)
     logger.success("Application shutdown complete")
 
 

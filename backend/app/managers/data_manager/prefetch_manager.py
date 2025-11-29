@@ -160,7 +160,7 @@ class PrefetchManager:
         finally:
             loop.close()
     
-    async def _check_and_prefetch(self) -> None:
+    def _check_and_prefetch(self) -> None:
         """Check if prefetch needed and execute."""
         # Don't prefetch if already in progress
         if self._prefetch_in_progress:
@@ -185,9 +185,9 @@ class PrefetchManager:
             logger.debug(f"Already prefetched for {next_session}")
             return
         
-        # Should prefetch now? Use TimeProvider as single source of truth
-        from app.managers.data_manager.time_provider import get_time_provider
-        now = get_time_provider().get_current_time()
+        # Should prefetch now? Use TimeManager as single source of truth
+        time_mgr = self._system_manager.get_time_manager()
+        now = time_mgr.get_current_time()
         if not self._detector.should_prefetch(now, next_session):
             # Not time yet
             time_until = self._detector.get_time_until_next_session(now, current_session)
@@ -200,9 +200,9 @@ class PrefetchManager:
         
         # Execute prefetch
         logger.info(f"Starting prefetch for session: {next_session}")
-        await self._execute_prefetch(next_session)
+        self._execute_prefetch(next_session)
     
-    async def _execute_prefetch(self, session_date: date) -> None:
+    def _execute_prefetch(self, session_date: date) -> None:
         """Execute prefetch for given session.
         
         Args:
@@ -228,7 +228,7 @@ class PrefetchManager:
             success_count = 0
             for symbol in symbols:
                 try:
-                    await self._prefetch_symbol(symbol, session_date)
+                    self._prefetch_symbol(symbol, session_date)
                     success_count += 1
                 except Exception as e:
                     logger.error(f"Error prefetching {symbol}: {e}", exc_info=True)
@@ -248,7 +248,7 @@ class PrefetchManager:
         finally:
             self._prefetch_in_progress = False
     
-    async def _prefetch_symbol(
+    def _prefetch_symbol(
         self,
         symbol: str,
         session_date: date
@@ -276,7 +276,7 @@ class PrefetchManager:
         for interval in intervals:
             try:
                 # Query database
-                bars_db = await self._session_data._query_historical_bars(
+                bars_db = self._session_data._query_historical_bars(
                     self._data_repository,
                     symbol,
                     start_date,
@@ -319,15 +319,15 @@ class PrefetchManager:
         
         # Store in cache
         if historical_bars:
-            from app.managers.data_manager.time_provider import get_time_provider
+            time_mgr = self._system_manager.get_time_manager()
             self._prefetch_cache[symbol] = SymbolPrefetchData(
                 symbol=symbol,
                 session_date=session_date,
                 historical_bars=historical_bars,
-                prefetch_time=get_time_provider().get_current_time()
+                prefetch_time=time_mgr.get_current_time()
             )
     
-    async def activate_prefetch(self, target_session: Optional[date] = None) -> bool:
+    def activate_prefetch(self, target_session: Optional[date] = None) -> bool:
         """Activate prefetched data for current session.
         
         Swaps prefetch cache into session_data for instant access.
@@ -357,12 +357,12 @@ class PrefetchManager:
         
         # Swap cache into session_data
         activated_count = 0
-        async with self._session_data._lock:
+        with self._session_data._lock:
             for symbol, prefetch_data in self._prefetch_cache.items():
                 try:
                     # Get or create symbol data
                     if symbol not in self._session_data._active_symbols:
-                        await self._session_data.register_symbol(symbol)
+                        self._session_data.register_symbol(symbol)
                     
                     symbol_data = self._session_data._symbols[symbol]
                     

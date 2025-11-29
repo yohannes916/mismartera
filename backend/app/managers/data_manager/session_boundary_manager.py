@@ -17,7 +17,7 @@ from app.config import settings
 from app.logger import logger
 from app.managers.data_manager.session_state import SessionState, is_valid_transition
 from app.managers.data_manager.session_detector import SessionDetector
-from app.managers.data_manager.time_provider import get_time_provider
+# Time manager is accessed via system_manager
 
 
 class SessionBoundaryManager:
@@ -92,8 +92,11 @@ class SessionBoundaryManager:
             self._transition_state(old_state, new_state)
             return new_state
         
-        # Use TimeProvider as single source of truth for time
-        now = get_time_provider().get_current_time()
+        # Use TimeManager as single source of truth for time
+        from app.managers.system_manager import get_system_manager
+        system_mgr = get_system_manager()
+        time_mgr = system_mgr.get_time_manager()
+        now = time_mgr.get_current_time()
         current_date = now.date()
         session_date = self._session_data.current_session_date
         
@@ -143,7 +146,10 @@ class SessionBoundaryManager:
         
         # Update state
         self._current_state = new_state
-        self._last_state_change = get_time_provider().get_current_time()
+        from app.managers.system_manager import get_system_manager
+        system_mgr = get_system_manager()
+        time_mgr = system_mgr.get_time_manager()
+        self._last_state_change = time_mgr.get_current_time()
     
     def should_roll_session(self) -> bool:
         """Determine if session should be rolled automatically.
@@ -162,7 +168,10 @@ class SessionBoundaryManager:
         
         # Roll if in post-market for configured delay
         if state == SessionState.POST_MARKET:
-            now = get_time_provider().get_current_time()
+            from app.managers.system_manager import get_system_manager
+            system_mgr = get_system_manager()
+            time_mgr = system_mgr.get_time_manager()
+            now = time_mgr.get_current_time()
             
             # Check if we've been in post-market long enough
             if self._last_state_change:
@@ -171,7 +180,7 @@ class SessionBoundaryManager:
         
         return False
     
-    async def check_and_roll(self) -> bool:
+    def check_and_roll(self) -> bool:
         """Check if roll needed and execute.
         
         Returns:
@@ -202,7 +211,7 @@ class SessionBoundaryManager:
                 f"Auto-rolling session: {current_session} → {next_session}"
             )
             
-            await self._session_data.roll_session(next_session)
+            self._session_data.roll_session(next_session)
             
             # Reset state
             self._transition_state(self._current_state, SessionState.NOT_STARTED)
@@ -220,9 +229,12 @@ class SessionBoundaryManager:
         """Record that data was received (for timeout tracking).
         
         Args:
-            timestamp: When data was received (default: current time from TimeProvider)
+            timestamp: When data was received (default: current time from TimeManager)
         """
-        self._last_data_time = timestamp or get_time_provider().get_current_time()
+        from app.managers.system_manager import get_system_manager
+        system_mgr = get_system_manager()
+        time_mgr = system_mgr.get_time_manager()
+        self._last_data_time = timestamp or time_mgr.get_current_time()
         
         # If we were in timeout, recover to active
         if self._current_state == SessionState.TIMEOUT:
@@ -242,12 +254,18 @@ class SessionBoundaryManager:
         if self._last_data_time is None:
             # No data ever received - check if session just started
             if self._last_state_change:
-                elapsed = (get_time_provider().get_current_time() - self._last_state_change).total_seconds()
+                from app.managers.system_manager import get_system_manager
+                system_mgr = get_system_manager()
+                time_mgr = system_mgr.get_time_manager()
+                elapsed = (time_mgr.get_current_time() - self._last_state_change).total_seconds()
                 return elapsed > self._timeout_seconds
             return False
         
         # Check elapsed time since last data
-        now = get_time_provider().get_current_time()
+        from app.managers.system_manager import get_system_manager
+        system_mgr = get_system_manager()
+        time_mgr = system_mgr.get_time_manager()
+        now = time_mgr.get_current_time()
         elapsed = (now - self._last_data_time).total_seconds()
         
         return elapsed > self._timeout_seconds

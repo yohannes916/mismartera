@@ -32,13 +32,13 @@ session_date = current_time.date()
 
 # Initialize session
 session_data = get_session_data()
-await session_data.start_new_session(session_date)
+session_data.start_new_session(session_date)
 ```
 
 ### 2. Register Symbols
 ```python
 # When starting each stream, register with session_data
-await session_data.register_symbol(symbol)
+session_data.register_symbol(symbol)
 ```
 
 ## Changes Made
@@ -68,13 +68,13 @@ coordinator.start_worker()
 session_data = get_session_data()
 current_time = data_manager.get_current_time()
 session_date = current_time.date()
-await session_data.start_new_session(session_date)
+session_data.start_new_session(session_date)
 
 # Start each configured stream
 for stream_config in data_streams:
     # ... start stream
     coordinator.register_stream(symbol, stream_type)
-    await session_data.register_symbol(symbol)  # NEW
+    session_data.register_symbol(symbol)  # NEW
     coordinator.feed_data_list(symbol, stream_type, data)
 ```
 
@@ -103,7 +103,7 @@ Backtest Stream Coordinator
 ### 2. Analysis Engine Can Access Data
 Analysis engine queries session_data for latest bars:
 ```python
-latest_bar = await session_data.get_latest_bar("AAPL")  # Now works!
+latest_bar = session_data.get_latest_bar("AAPL")  # Now works!
 ```
 
 ### 3. Session Boundaries Work

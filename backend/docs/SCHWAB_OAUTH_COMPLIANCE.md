@@ -94,7 +94,7 @@ async def exchange_code_for_token(self, authorization_code: str):
         "redirect_uri": self.callback_url,
     }
     
-    response = await client.post(token_url, headers=headers, data=data)
+    response = client.post(token_url, headers=headers, data=data)
     token_data = response.json()
     
     # Store tokens
@@ -114,14 +114,14 @@ async def exchange_code_for_token(self, authorization_code: str):
 #### **Step 7: Bearer Token Usage** ✅
 ```python
 # app/managers/data_manager/integrations/schwab_data.py:70-73
-access_token = await schwab_client.get_valid_access_token()
+access_token = schwab_client.get_valid_access_token()
 
 headers = {
     "Authorization": f"Bearer {access_token}",
     "Content-Type": "application/json",
 }
 
-response = await client.get(api_url, headers=headers, params=params)
+response = client.get(api_url, headers=headers, params=params)
 ```
 
 **Compliance:**
@@ -153,7 +153,7 @@ async def refresh_access_token(self):
         "refresh_token": self.refresh_token,
     }
     
-    response = await client.post(token_url, headers=headers, data=data)
+    response = client.post(token_url, headers=headers, data=data)
 ```
 
 **Compliance:**
@@ -173,7 +173,7 @@ async def get_valid_access_token(self):
     if self.token_expires_at:
         time_until_expiry = (self.token_expires_at - datetime.now()).total_seconds()
         if time_until_expiry < 300:  # Less than 5 minutes
-            await self.refresh_access_token()
+            self.refresh_access_token()
     
     return self.access_token
 ```
@@ -263,7 +263,7 @@ headers = {
 
 **After (CORRECT):**
 ```python
-access_token = await schwab_client.get_valid_access_token()
+access_token = schwab_client.get_valid_access_token()
 
 headers = {
     "Authorization": f"Bearer {access_token}",  # Proper OAuth access token

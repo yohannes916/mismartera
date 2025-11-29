@@ -1,0 +1,12 @@
+
+data import-api ticks RIVN 2025-06-25 2025-07-11
+data import-api quotes RIVN 2025-06-25 2025-07-11
+data import-api 1d RIVN 2025-06-01 2025-07-31
+data import-api 1m RIVN 2025-06-01 2025-07-31
+
+data import-api ticks AAPL 2025-06-25 2025-07-11
+data import-api quotes AAPL 2025-06-25 2025-07-11
+data import-api 1d AAPL 2025-06-01 2025-07-31
+data import-api 1m AAPL 2025-06-01 2025-07-31
+
+data list 

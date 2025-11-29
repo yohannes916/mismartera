@@ -148,8 +148,8 @@ system_mgr.stop()   # Synchronous
 ### After
 ```python
 # New async API
-await system_mgr.start("session_configs/my_session.json")  # Required path
-await system_mgr.stop()  # Async
+system_mgr.start("session_configs/my_session.json")  # Required path
+system_mgr.stop()  # Async
 ```
 
 ## CLI Changes
@@ -344,7 +344,7 @@ system start config_with_bad_symbol.json
 ### Code Impact
 - Any code calling `system_mgr.start()` must be updated
 - Must now provide configuration file path
-- Must use await (async)
+- Must use (async)
 
 ### Migration Required
 ```python
@@ -352,7 +352,7 @@ system start config_with_bad_symbol.json
 system_mgr.start()
 
 # NEW
-await system_mgr.start("session_configs/my_session.json")
+system_mgr.start("session_configs/my_session.json")
 ```
 
 ### CLI Impact

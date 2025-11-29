@@ -220,7 +220,7 @@ async def test_session_lifecycle(session_data):
     # Start session
     await session_data.start_new_session(session_date)
     assert session_data.current_session_date == session_date
-    assert not session_data.session_ended
+    assert session_data.is_session_active()
     
     # Add some data
     bar = BarData(
@@ -236,7 +236,7 @@ async def test_session_lifecycle(session_data):
     
     # End session
     await session_data.end_session()
-    assert session_data.session_ended
+    assert not session_data.is_session_active()
     
     # Start new session - should clear data
     await session_data.start_new_session(date(2025, 1, 2))

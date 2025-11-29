@@ -70,7 +70,7 @@ from app.managers.data_manager.quality_checker import (
 **Before (WRONG):**
 ```python
 # Counted trading DAYS
-trading_days = await count_trading_days(start_date, end_date)
+trading_days = count_trading_days(start_date, end_date)
 expected_bars = trading_days * 390  # Assumes all days are full
 
 # Problems:
@@ -166,7 +166,7 @@ async def check_data_quality(
     use_trading_calendar: bool = True  # Old parameter
 ) -> Dict:
     # Old logic: counted trading DAYS
-    trading_days = await count_trading_days(...)
+    trading_days = count_trading_days(...)
     expected_bars = trading_days * 390
 ```
 
@@ -179,7 +179,7 @@ async def check_data_quality(
     use_cache: bool = True  # New parameter
 ) -> Dict:
     # New logic: counts trading MINUTES with caching
-    metrics = await check_bar_quality(session, symbol, bars, use_cache)
+    metrics = check_bar_quality(session, symbol, bars, use_cache)
     
     # Returns same format for backward compatibility
     return {
@@ -233,7 +233,7 @@ async with AsyncSessionLocal() as session:
     system_manager = get_system_manager()
     data_manager = system_manager.get_data_manager()
     
-    quality = await data_manager.check_data_quality(
+    quality = data_manager.check_data_quality(
         session,
         symbol="AAPL",
         interval="1m"  # Only 1m supported
@@ -252,7 +252,7 @@ async with AsyncSessionLocal() as session:
 from app.repositories.market_data_repository import MarketDataRepository
 
 async with AsyncSessionLocal() as session:
-    quality = await MarketDataRepository.check_data_quality(
+    quality = MarketDataRepository.check_data_quality(
         session,
         symbol="AAPL",
         interval="1m",
@@ -341,7 +341,7 @@ quality_score = (completeness_score * 0.9) + ((1.0 - duplicate_penalty) * 0.1)
 # Test expected minutes calculation
 async def test_expected_minutes_regular_day():
     # Regular trading day: 9:30 AM to 4:00 PM = 390 minutes
-    minutes = await calculate_expected_trading_minutes(
+    minutes = calculate_expected_trading_minutes(
         session,
         date(2025, 11, 18),  # Regular Monday
         date(2025, 11, 18)
@@ -350,7 +350,7 @@ async def test_expected_minutes_regular_day():
 
 async def test_expected_minutes_early_close():
     # Half-day: 9:30 AM to 1:00 PM = 210 minutes
-    minutes = await calculate_expected_trading_minutes(
+    minutes = calculate_expected_trading_minutes(
         session,
         date(2025, 11, 28),  # Day before Thanksgiving
         date(2025, 11, 28)
@@ -359,7 +359,7 @@ async def test_expected_minutes_early_close():
 
 async def test_expected_minutes_holiday():
     # Market closed: 0 minutes
-    minutes = await calculate_expected_trading_minutes(
+    minutes = calculate_expected_trading_minutes(
         session,
         date(2025, 11, 27),  # Thanksgiving
         date(2025, 11, 27)
@@ -372,10 +372,10 @@ async def test_expected_minutes_holiday():
 ```python
 async def test_quality_check_with_cache():
     # First call: calculates and caches
-    quality1 = await check_bar_quality(session, "AAPL", bars, use_cache=True)
+    quality1 = check_bar_quality(session, "AAPL", bars, use_cache=True)
     
     # Second call: uses cache (faster)
-    quality2 = await check_bar_quality(session, "AAPL", bars, use_cache=True)
+    quality2 = check_bar_quality(session, "AAPL", bars, use_cache=True)
     
     assert quality1.expected_minutes == quality2.expected_minutes
 ```
@@ -404,7 +404,7 @@ quality = calculate_session_quality(session_start, current_time, bar_count)
 
 **Old Code:**
 ```python
-quality = await MarketDataRepository.check_data_quality(
+quality = MarketDataRepository.check_data_quality(
     session,
     symbol,
     interval="1m",
@@ -414,7 +414,7 @@ quality = await MarketDataRepository.check_data_quality(
 
 **New Code:**
 ```python
-quality = await MarketDataRepository.check_data_quality(
+quality = MarketDataRepository.check_data_quality(
     session,
     symbol,
     interval="1m",

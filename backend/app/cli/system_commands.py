@@ -22,7 +22,7 @@ from app.logger import logger
 console = Console()
 
 
-async def start_command(config_file_path: str) -> None:
+def start_command(config_file_path: str) -> None:
     """Start the system run with a configuration file.
     
     Loads session configuration and starts all configured data streams.
@@ -46,7 +46,7 @@ async def start_command(config_file_path: str) -> None:
         console.print(f"[yellow]Starting system with configuration:[/yellow] {config_file_path}")
     
     try:
-        success = await system_mgr.start(config_file_path)
+        success = system_mgr.start(config_file_path)
         
         if success:
             console.print("\n[green]✓ System started successfully[/green]")
@@ -74,7 +74,7 @@ async def start_command(config_file_path: str) -> None:
         logger.error(f"System start command error: {e}", exc_info=True)
 
 
-async def pause_command() -> None:
+def pause_command() -> None:
     """Pause the system run.
     
     Suspends all operations while maintaining state.
@@ -93,7 +93,7 @@ async def pause_command() -> None:
         console.print(f"[yellow]![/yellow] Cannot pause system in state: {system_mgr.state.value}")
 
 
-async def resume_command() -> None:
+def resume_command() -> None:
     """Resume the system from paused state.
     
     Continues operations from where they were paused.
@@ -112,7 +112,7 @@ async def resume_command() -> None:
         console.print(f"[yellow]![/yellow] Cannot resume system in state: {system_mgr.state.value}")
 
 
-async def stop_command() -> None:
+def stop_command() -> None:
     """Stop the system run.
     
     Stops all data streams and transitions to STOPPED state.
@@ -122,7 +122,7 @@ async def stop_command() -> None:
     """
     system_mgr = get_system_manager()
     
-    success = await system_mgr.stop()
+    success = system_mgr.stop()
     
     if success:
         console.print("[green]✓[/green] System stopped")
@@ -132,7 +132,7 @@ async def stop_command() -> None:
         console.print("[yellow]![/yellow] System is already stopped")
 
 
-async def mode_command(mode: str) -> None:
+def mode_command(mode: str) -> None:
     """Set operation mode (live or backtest).
     
     Args:
@@ -155,7 +155,7 @@ async def mode_command(mode: str) -> None:
 
 
 
-async def status_command() -> None:
+def status_command() -> None:
     """Show comprehensive system status.
     
     Displays detailed status of all system components including managers,
@@ -167,4 +167,4 @@ async def status_command() -> None:
     from app.cli.system_status_impl import show_comprehensive_status
     
     # Delegate to the comprehensive implementation
-    await show_comprehensive_status()
+    show_comprehensive_status()

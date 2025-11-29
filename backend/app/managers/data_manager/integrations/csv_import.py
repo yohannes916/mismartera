@@ -1,6 +1,6 @@
 """
 CSV Import Service
-Parse and import historical OHLCV data from CSV files into database
+Parse and import historical OHLCV data from CSV files into Parquet storage
 """
 import csv
 from datetime import datetime
@@ -8,7 +8,7 @@ from typing import List, Dict, Optional
 from pathlib import Path
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.repositories.market_data_repository import MarketDataRepository
+from app.managers.data_manager.parquet_storage import parquet_storage
 from app.logger import logger
 
 
@@ -256,46 +256,36 @@ class CSVImportService:
             )
         
         total_bars = len(bars)
-        imported = 0
         
-        # Import in batches (upsert - insert or update)
-        for i in range(0, total_bars, batch_size):
-            batch = bars[i:i + batch_size]
-            
-            try:
-                batch_imported, _ = await MarketDataRepository.bulk_create_bars(
-                    session,
-                    batch
-                )
-                imported += batch_imported
-                
-                logger.info(
-                    f"Batch {i//batch_size + 1}: "
-                    f"Imported {batch_imported}/{len(batch)} bars"
-                )
-                
-            except Exception as e:
-                logger.error(f"Batch import failed: {e}")
-                if not skip_duplicates:
-                    raise
+        # Write to Parquet (replaces database storage)
+        try:
+            logger.info(f"[Parquet] Writing {len(bars)} bars from CSV for {symbol.upper()}...")
+            imported, files = parquet_storage.write_bars(bars, '1m', symbol.upper(), append=True)
+            logger.info(f"[Parquet] ✓ Successfully wrote {imported} bars to {len(files)} file(s)")
+        except Exception as e:
+            logger.error(f"Parquet write failed: {e}")
+            raise
         
-        # Get data quality metrics
-        quality = await MarketDataRepository.check_data_quality(session, symbol)
+        # Calculate date range
+        timestamps = [b["timestamp"] for b in bars]
+        timestamps.sort()
+        date_range = {
+            "start": timestamps[0].isoformat(),
+            "end": timestamps[-1].isoformat(),
+        }
         
         result = {
             'success': True,
-            'message': f'Successfully imported {imported} bars for {symbol}',
+            'message': f'Successfully imported {imported} bars for {symbol} to Parquet',
             'total_rows': total_bars,
             'imported': imported,
             'symbol': symbol.upper(),
-            'date_range': quality.get('date_range'),
-            'quality_score': quality.get('quality_score'),
-            'missing_bars': quality.get('missing_bars', 0)
+            'date_range': date_range,
+            'storage': 'parquet',
         }
         
         logger.success(
-            f"CSV import complete: {imported}/{total_bars} bars upserted "
-            f"(quality: {quality.get('quality_score', 0):.1%})"
+            f"CSV import complete: {imported} bars written to Parquet"
         )
         
         return result

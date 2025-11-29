@@ -57,7 +57,7 @@ def check_market_open(self, timestamp=None) -> bool:
         # Cache miss → Query database
         async def fetch_holiday():
             async with AsyncSessionLocal() as session:
-                return await TradingCalendarRepository.get_holiday(session, check_date)
+                return TradingCalendarRepository.get_holiday(session, check_date)
         
         # Run async query synchronously
         holiday = asyncio.run(fetch_holiday())
@@ -129,13 +129,13 @@ was_open = data_manager.check_market_open(thanksgiving)
 while True:
     if data_manager.check_market_open():  # Cache hit!
         process_data()
-    await asyncio.sleep(1)
+    asyncio.sleep(1)
 ```
 
 ### Clear Cache
 ```python
 # After updating holidays in database
-await TradingCalendarRepository.insert_holidays(new_holidays)
+TradingCalendarRepository.insert_holidays(new_holidays)
 
 # Clear cache to pick up changes
 data_manager.clear_holiday_cache()
@@ -238,7 +238,7 @@ is_closed, early_close_time = self._holiday_cache[check_date]
 ### Pros
 ✅ **Accurate** - Checks real holidays from database
 ✅ **Fast** - Cached after first query
-✅ **Synchronous** - No await needed
+✅ **Synchronous** - No needed
 ✅ **Simple** - Clean API
 
 ### Cons
@@ -264,7 +264,7 @@ for i in range(1000):
 ### 2. Clear After Updates
 ```python
 # After adding new holidays
-await add_holidays_to_db(...)
+add_holidays_to_db(...)
 data_manager.clear_holiday_cache()  # Pick up changes
 ```
 
@@ -278,7 +278,7 @@ def is_session_active(self) -> bool:
 ## Summary
 
 ✅ **Date-based caching** - One DB query per date
-✅ **Synchronous API** - No await needed
+✅ **Synchronous API** - No needed
 ✅ **Database accurate** - Checks real holidays & early closes
 ✅ **Fast after first call** - Cache hits are instant
 ✅ **Simple to use** - Just call `check_market_open()`

@@ -184,10 +184,10 @@ async def import_from_api(self, session, data_type, symbol, start_date, end_date
             from ...integrations.schwab_data import fetch_1m_bars
         
         # Fetch data
-        bars = await fetch_1m_bars(symbol, start_date, end_date)
+        bars = fetch_1m_bars(symbol, start_date, end_date)
         
         # Import to database (same for all providers)
-        imported, _ = await MarketDataRepository.bulk_create_bars(session, bars)
+        imported, _ = MarketDataRepository.bulk_create_bars(session, bars)
         
         return result
 ```
@@ -431,7 +431,7 @@ Error: No data provider selected. Use 'data api <provider>' first.
 
 3. **Token Exchange**
    ```python
-   await schwab_client.authenticate(auth_code)
+   schwab_client.authenticate(auth_code)
    # Stores access_token and refresh_token
    ```
 

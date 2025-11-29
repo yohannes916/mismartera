@@ -1,9 +1,8 @@
-"""Charles Schwab market data integration for DataManager.
+"""Schwab Data Integration
 
 Provides helpers to fetch bars (1-minute, daily), trade ticks, and bid/ask
 quotes from Schwab and map them into our internal dictionary format
-used by MarketDataRepository (for bars/ticks) and QuoteRepository
-for quotes.
+for storage in Parquet files.
 """
 from __future__ import annotations
 
@@ -23,8 +22,8 @@ async def fetch_1m_bars(
 ) -> List[Dict]:
     """Fetch 1-minute bars for a symbol from Schwab REST API.
 
-    Returns a list of bar dicts with keys matching MarketDataRepository
-    expectations: symbol, timestamp, interval, open, high, low, close, volume.
+    Returns a list of bar dicts for Parquet storage:
+    symbol, timestamp, interval, open, high, low, close, volume.
     
     Note: Schwab uses OAuth 2.0. This requires a valid access token obtained
     through the OAuth authorization flow. Currently this is not fully implemented.
@@ -50,14 +49,11 @@ async def fetch_1m_bars(
     base_url = settings.SCHWAB_API_BASE_URL.rstrip("/")
 
     # Schwab expects Unix timestamps in SECONDS (not milliseconds!)
-    # Input dates should be in ET (Eastern Time), which will be converted to UTC
     def _to_schwab_ts(dt: datetime) -> int:
         if dt.tzinfo is None:
-            # If naive, assume ET (should not happen after CLI parsing fix)
-            from zoneinfo import ZoneInfo
-            dt = dt.replace(tzinfo=ZoneInfo("America/New_York"))
-        # Convert to UTC and get epoch seconds
-        return int(dt.astimezone(timezone.utc).timestamp())
+            raise ValueError("Datetime must be timezone-aware")
+        # timestamp() handles timezone conversion automatically
+        return int(dt.timestamp())
 
     # Schwab limitation: minute data only available for max 10 days per request
     # Need to chunk large date ranges into 10-day segments
@@ -184,8 +180,14 @@ async def fetch_1m_bars(
             for candle in candles:
                 try:
                     # Schwab returns Unix timestamp in milliseconds
+                    # Get system timezone from SystemManager
+                    from app.managers.system_manager import get_system_manager
+                    from zoneinfo import ZoneInfo
+                    system_mgr = get_system_manager()
+                    system_tz = ZoneInfo(system_mgr.timezone)
+                    
                     ts_ms = candle.get("datetime")
-                    ts = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
+                    ts = datetime.fromtimestamp(ts_ms / 1000, tz=system_tz)
                     
                     all_bars.append(
                         {
@@ -220,8 +222,8 @@ async def fetch_1d_bars(
 ) -> List[Dict]:
     """Fetch daily bars for a symbol from Schwab REST API.
 
-    Returns a list of bar dicts with keys matching MarketDataRepository
-    expectations: symbol, timestamp, interval, open, high, low, close, volume.
+    Returns a list of bar dicts for Parquet storage:
+    symbol, timestamp, interval, open, high, low, close, volume.
     
     Args:
         symbol: Stock symbol (e.g., 'AAPL')
@@ -252,14 +254,11 @@ async def fetch_1d_bars(
     base_url = settings.SCHWAB_API_BASE_URL.rstrip("/")
 
     # Schwab expects Unix timestamps in SECONDS (not milliseconds!)
-    # Input dates should be in ET (Eastern Time), which will be converted to UTC
     def _to_schwab_ts(dt: datetime) -> int:
         if dt.tzinfo is None:
-            # If naive, assume ET (should not happen after CLI parsing fix)
-            from zoneinfo import ZoneInfo
-            dt = dt.replace(tzinfo=ZoneInfo("America/New_York"))
-        # Convert to UTC and get epoch seconds
-        return int(dt.astimezone(timezone.utc).timestamp())
+            raise ValueError("Datetime must be timezone-aware")
+        # timestamp() handles timezone conversion automatically
+        return int(dt.timestamp())
 
     # For daily bars, we need periodType=month or year (NOT day)
     # Schwab API: periodType=day only supports frequencyType=minute
@@ -375,8 +374,14 @@ async def fetch_1d_bars(
         for candle in candles:
             try:
                 # Schwab returns Unix timestamp in milliseconds
+                # Get system timezone from SystemManager
+                from app.managers.system_manager import get_system_manager
+                from zoneinfo import ZoneInfo
+                system_mgr = get_system_manager()
+                system_tz = ZoneInfo(system_mgr.timezone)
+                
                 ts_ms = candle.get("datetime")
-                ts = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
+                ts = datetime.fromtimestamp(ts_ms / 1000, tz=system_tz)
                 
                 all_bars.append(
                     {
@@ -408,33 +413,25 @@ async def fetch_ticks(
 ) -> List[Dict]:
     """Fetch trade ticks for a symbol from Schwab REST API.
 
-    Returns a list of tick dicts with keys matching MarketDataRepository
-    expectations: symbol, timestamp, interval="tick", price, volume.
-    """
-    if not settings.SCHWAB_APP_KEY or not settings.SCHWAB_APP_SECRET:
-        raise RuntimeError("Schwab API credentials are missing")
-
-    # Get valid OAuth access token
-    from app.integrations.schwab_client import schwab_client
-    try:
-        access_token = await schwab_client.get_valid_access_token()
-    except RuntimeError as e:
-        raise RuntimeError(
-            f"{str(e)}\n\n"
-            "To authorize Schwab, run 'schwab auth-start'"
-        ) from e
+    Note: Schwab API does not provide historical tick/trade data.
+    Schwab only provides OHLCV bars at various intervals (1m, 5m, etc).
     
-    # Note: Schwab may not have a direct tick/trade endpoint
-    # This needs to be verified with Schwab API documentation
-    logger.warning(
-        "Schwab tick data endpoint not yet verified. "
-        "Check Schwab API documentation for trade/tick endpoints."
+    For tick-level data, use Alpaca API instead.
+    This function returns an error to inform users.
+    
+    Returns:
+        Empty list (not implemented)
+    """
+    logger.error(
+        "Schwab API does not provide historical tick/trade data. "
+        "Only bar data (1m, 5m, daily, etc) is available from Schwab. "
+        "For tick-level data, use Alpaca: 'data api alpaca'"
     )
     
-    # TODO: Implement actual Schwab tick data fetching once endpoint is confirmed
     raise NotImplementedError(
-        "Schwab tick data endpoint not yet implemented.\n"
-        "For now, please use Alpaca for tick data: 'data api alpaca'"
+        "Schwab does not provide historical tick/trade data.\n"
+        "Available from Schwab: 1m bars, 5m bars, daily bars, etc.\n"
+        "For tick data, use: data api alpaca"
     )
 
 
@@ -445,33 +442,24 @@ async def fetch_quotes(
 ) -> List[Dict]:
     """Fetch bid/ask quotes for a symbol from Schwab REST API.
 
-    Returns a list of quote dicts with keys matching QuoteRepository
-    expectations: symbol, timestamp, bid_price, bid_size, ask_price, ask_size.
-    """
-    if not settings.SCHWAB_APP_KEY or not settings.SCHWAB_APP_SECRET:
-        raise RuntimeError("Schwab API credentials are missing")
-
-    # Get valid OAuth access token
-    from app.integrations.schwab_client import schwab_client
-    try:
-        access_token = await schwab_client.get_valid_access_token()
-    except RuntimeError as e:
-        raise RuntimeError(
-            f"{str(e)}\n\n"
-            "To authorize Schwab, run 'schwab auth-start'"
-        ) from e
+    Note: Schwab API does not provide historical bid/ask quote data.
+    Schwab only provides real-time quotes via streaming and OHLCV bars.
     
-    # Note: Schwab may not have historical quotes endpoint
-    # Real-time quotes are available, but historical might not be
-    logger.warning(
-        "Schwab historical quote data not yet verified. "
-        "Quotes are typically available via real-time streaming."
+    For historical quote data, use Alpaca API instead.
+    
+    Returns:
+        Empty list (not implemented)
+    """
+    logger.error(
+        "Schwab API does not provide historical bid/ask quote data. "
+        "Only bar data and real-time streaming quotes are available. "
+        "For historical quotes, use Alpaca: 'data api alpaca'"
     )
     
-    # TODO: Implement if Schwab provides historical quotes
     raise NotImplementedError(
-        "Schwab historical quote data endpoint not yet implemented.\n"
-        "For now, please use Alpaca for quote data: 'data api alpaca'"
+        "Schwab does not provide historical quote data.\n"
+        "Available from Schwab: 1m bars, 5m bars, daily bars, real-time streaming\n"
+        "For historical quotes, use: data api alpaca"
     )
 
 

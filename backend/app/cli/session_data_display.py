@@ -16,19 +16,18 @@ from app.config import settings
 console = Console()
 
 
-async def generate_session_display(compact: bool = True) -> Table:
+def generate_session_display(compact: bool = True) -> Table:
     """Generate the complete session data display table.
     
     Returns:
         Rich Table with all session data information
     """
     from app.managers.data_manager.session_data import get_session_data
-    from app.managers.data_manager.time_provider import get_time_provider
     from app.managers.system_manager import get_system_manager
     
     session_data = get_session_data()
-    time_provider = get_time_provider()
     system_mgr = get_system_manager()
+    time_mgr = system_mgr.get_time_manager()
     
     # Main container - Use more horizontal space
     main_table = Table(
@@ -53,10 +52,28 @@ async def generate_session_display(compact: bool = True) -> Table:
     is_active = session_data.is_session_active()
     
     try:
-        current_time = time_provider.get_current_time()
+        current_time = time_mgr.get_current_time()
         session_time_str = current_time.strftime("%H:%M:%S")
     except Exception:
         session_time_str = "N/A"
+    
+    # Get trading hours for the day
+    trading_hours_str = ""
+    is_early_close = False
+    if current_date:
+        try:
+            from app.models.database import SessionLocal
+            with SessionLocal() as db_session:
+                trading_session = time_mgr.get_trading_session(db_session, current_date)
+                if trading_session and not trading_session.is_holiday:
+                    open_time = trading_session.regular_open.strftime("%H:%M")
+                    close_time = trading_session.regular_close.strftime("%H:%M")
+                    trading_hours_str = f"{open_time}-{close_time}"
+                    is_early_close = trading_session.early_close
+                elif trading_session and trading_session.is_holiday:
+                    trading_hours_str = "Holiday"
+        except Exception:
+            pass
     
     # System state and mode
     state = system_mgr.state.value
@@ -69,10 +86,37 @@ async def generate_session_display(compact: bool = True) -> Table:
     if compact:
         # Compact header: Use multiple rows with 2 columns
         session_status = "[green]✓ Active[/green]" if is_active else "[yellow]⚠ Inactive[/yellow]"
-        if session_data.session_ended:
-            session_status = "[red]✗ Ended[/red]"
         
         date_str = current_date.strftime("%Y-%m-%d") if current_date else "No session"
+        
+        # Calculate overall quality for compact display
+        overall_quality = None
+        if active_symbols:
+            total_quality = 0.0
+            total_weight = 0.0
+            for symbol in active_symbols:
+                symbol_data = session_data.get_symbol_data(symbol)
+                if symbol_data and len(symbol_data.bars_1m) > 0:
+                    total_quality += symbol_data.bar_quality
+                    total_weight += 1.0
+            if total_weight > 0:
+                overall_quality = total_quality / total_weight
+        
+        # Build session info with trading hours and early close indicator
+        session_info_parts = [date_str, session_time_str]
+        if trading_hours_str:
+            session_info_parts.append(f"[dim]({trading_hours_str})[/dim]")
+        if is_early_close:
+            session_info_parts.append("[yellow]⚡Short Day[/yellow]")
+        session_info_parts.append(session_status)
+        session_info_parts.append(f"Symbols: {len(active_symbols)}")
+        
+        # Add overall quality to compact display (fundamental intervals only)
+        if overall_quality is not None:
+            quality_color = "green" if overall_quality >= 95 else "yellow" if overall_quality >= 80 else "red"
+            session_info_parts.append(f"Quality: [{quality_color}]{overall_quality:.1f}%[/{quality_color}] (1m)")
+        
+        session_info = " | ".join(session_info_parts)
         
         main_table.add_row(
             "[bold]SYSTEM[/bold]",
@@ -80,7 +124,7 @@ async def generate_session_display(compact: bool = True) -> Table:
         )
         main_table.add_row(
             "[bold]SESSION[/bold]",
-            f"{date_str} {session_time_str} {session_status} | Symbols: {len(active_symbols)}"
+            session_info
         )
     else:
         # Full mode: Traditional vertical layout
@@ -91,28 +135,51 @@ async def generate_session_display(compact: bool = True) -> Table:
         if current_date:
             main_table.add_row("Session Date", current_date.strftime("%Y-%m-%d"))
             main_table.add_row("Session Time", f"[bold cyan]{session_time_str}[/bold cyan]")
+            if trading_hours_str:
+                hours_display = trading_hours_str
+                if is_early_close:
+                    hours_display += " [yellow]⚡ Early Close[/yellow]"
+                main_table.add_row("Trading Hours", hours_display)
             main_table.add_row("Session Active", "[green]✓ Yes[/green]" if is_active else "[yellow]⚠ No[/yellow]")
         else:
             main_table.add_row("Session Date", "[yellow]No active session[/yellow]")
             main_table.add_row("Session Time", session_time_str)
             main_table.add_row("Session Active", "[red]✗ No[/red]")
         
-        main_table.add_row("Session Ended", "Yes" if session_data.session_ended else "No")
         main_table.add_row("Active Symbols", f"{len(active_symbols)} symbols")
+        
+        # Calculate overall quality (average quality of fundamental intervals across all symbols)
+        # Quality measures consumed bars (1m or 1s) from session_start to current_time
+        if active_symbols:
+            total_quality = 0.0
+            total_weight = 0.0
+            for symbol in active_symbols:
+                symbol_data = session_data.get_symbol_data(symbol)
+                if symbol_data and len(symbol_data.bars_1m) > 0:
+                    # Simple average across all symbols with data
+                    total_quality += symbol_data.bar_quality
+                    total_weight += 1.0
+            
+            if total_weight > 0:
+                overall_quality = total_quality / total_weight
+                quality_color = "green" if overall_quality >= 95 else "yellow" if overall_quality >= 80 else "red"
+                main_table.add_row("Overall Quality", f"[{quality_color}]{overall_quality:.1f}% (1m bars)[/{quality_color}]")
+            else:
+                main_table.add_row("Overall Quality", "[dim]No data yet[/dim]")
     
     # === SECTION 1: STREAM ===
     if compact:
         main_table.add_row("", "")  # Spacing
-        main_table.add_row("[bold green]━━ STREAM ━━[/bold green]", "")
+        main_table.add_row("[bold green]━━ SESSION DATA ━━[/bold green]", "")
     else:
         main_table.add_row("", "")  # Spacing
-        main_table.add_row("[bold green]┌─ STREAM[/bold green]", "")
+        main_table.add_row("[bold green]┌─ SESSION DATA[/bold green]", "")
         main_table.add_row("│", "")
     
     if active_symbols:
         for symbol in sorted(active_symbols):
             try:
-                symbol_data = await session_data.get_symbol_data(symbol)
+                symbol_data = session_data.get_symbol_data(symbol)
                 if symbol_data:
                     # Compact mode: Show symbol data across multiple rows
                     if compact:
@@ -129,16 +196,26 @@ async def generate_session_display(compact: bool = True) -> Table:
                         # Row 2: Volume
                         main_table.add_row("    Volume", f"{symbol_data.session_volume:,.0f}")
                         
-                        # Row 3: 1m bars with quality
+                        # Row 3: 1m bars with quality (quality is for consumed 1m bars only, not derived)
                         quality_color = "green" if symbol_data.bar_quality >= 95 else "yellow" if symbol_data.bar_quality >= 80 else "red"
-                        bar_info = f"[{quality_color}]{current_bars} bars ({symbol_data.bar_quality:.1f}%)[/{quality_color}]"
+                        bar_info = f"{current_bars} bars | Quality: [{quality_color}]{symbol_data.bar_quality:.1f}%[/{quality_color}]"
                         
                         # Add timing info if available
                         if len(symbol_data.bars_1m) > 0:
                             first_bar = symbol_data.bars_1m[0]
                             last_bar = symbol_data.bars_1m[-1]
-                            time_span = (last_bar.timestamp - first_bar.timestamp).total_seconds() / 60
-                            bar_info += f" | Start: {first_bar.timestamp.strftime('%H:%M')} | Last: {last_bar.timestamp.strftime('%H:%M')} | Span: {int(time_span)}min"
+                            
+                            # Convert timestamps to market timezone for display
+                            import pytz
+                            from datetime import datetime
+                            # All timestamps are in system timezone
+                            first_ts = first_bar.timestamp
+                            last_ts = last_bar.timestamp
+                            
+                            # Calculate span from first bar to last bar (data coverage span)
+                            time_span = (last_ts - first_ts).total_seconds() / 60
+                            
+                            bar_info += f" | Start: {first_ts.strftime('%H:%M')} | Last: {last_ts.strftime('%H:%M')} | Span: {int(time_span)}min"
                         
                         main_table.add_row("    1m Bars", bar_info)
                         
@@ -148,7 +225,13 @@ async def generate_session_display(compact: bool = True) -> Table:
                             first_bar_5m = bars_5m[0]
                             last_bar_5m = bars_5m[-1]
                             time_span_5m = (last_bar_5m.timestamp - first_bar_5m.timestamp).total_seconds() / 60
-                            bars_5m_info += f" | Start: {first_bar_5m.timestamp.strftime('%H:%M')} | Last: {last_bar_5m.timestamp.strftime('%H:%M')} | Span: {int(time_span_5m)}min"
+                            
+                            # Convert 5m bar timestamps to market timezone
+                            # All timestamps are in system timezone
+                            first_ts_5m = first_bar_5m.timestamp
+                            last_ts_5m = last_bar_5m.timestamp
+                            
+                            bars_5m_info += f" | Start: {first_ts_5m.strftime('%H:%M')} | Last: {last_ts_5m.strftime('%H:%M')} | Span: {int(time_span_5m)}min"
                             main_table.add_row("    5m Bars", bars_5m_info)
                     else:
                         # Full mode: Show detailed breakdown
@@ -172,10 +255,27 @@ async def generate_session_display(compact: bool = True) -> Table:
                             if len(symbol_data.bars_1m) > 0:
                                 first_bar = symbol_data.bars_1m[0]
                                 last_bar = symbol_data.bars_1m[-1]
-                                time_span = (last_bar.timestamp - first_bar.timestamp).total_seconds() / 60
                                 
-                                main_table.add_row(f"│  │  │  ├─ Start Time", first_bar.timestamp.strftime("%H:%M:%S"))
-                                main_table.add_row(f"│  │  │  ├─ Last Update", last_bar.timestamp.strftime("%H:%M:%S"))
+                                # All timestamps are in system timezone
+                                first_ts = first_bar.timestamp
+                                last_ts = last_bar.timestamp
+                                
+                                # Calculate span from market open to current time
+                                try:
+                                    with SessionLocal() as db_session:
+                                        current_date = session_data.get_current_session_date()
+                                        trading_session = time_mgr.get_trading_session(db_session, current_date)
+                                        if trading_session and not trading_session.is_holiday:
+                                            open_dt = trading_session.get_regular_open_datetime()
+                                            current_time = time_mgr.get_current_time()
+                                            time_span = (current_time - open_dt).total_seconds() / 60
+                                        else:
+                                            time_span = (last_bar.timestamp - first_bar.timestamp).total_seconds() / 60
+                                except Exception:
+                                    time_span = (last_bar.timestamp - first_bar.timestamp).total_seconds() / 60
+                                
+                                main_table.add_row(f"│  │  │  ├─ Start Time", first_ts.strftime("%H:%M:%S"))
+                                main_table.add_row(f"│  │  │  ├─ Last Update", last_ts.strftime("%H:%M:%S"))
                                 main_table.add_row(f"│  │  │  ├─ Time Span", f"{int(time_span)} minutes")
                             
                             quality_color = "green" if symbol_data.bar_quality >= 95 else "yellow" if symbol_data.bar_quality >= 80 else "red"
@@ -211,7 +311,7 @@ async def generate_session_display(compact: bool = True) -> Table:
     total_days = set()
     for symbol in active_symbols:
         try:
-            symbol_data = await session_data.get_symbol_data(symbol)
+            symbol_data = session_data.get_symbol_data(symbol)
             if symbol_data and hasattr(symbol_data, 'historical_bars'):
                 for interval_bars in symbol_data.historical_bars.values():
                     for bar_date, date_bars in interval_bars.items():
@@ -270,7 +370,7 @@ async def generate_session_display(compact: bool = True) -> Table:
     if active_symbols and not compact:
         for symbol in sorted(active_symbols):
             try:
-                symbol_data = await session_data.get_symbol_data(symbol)
+                symbol_data = session_data.get_symbol_data(symbol)
                 if symbol_data and hasattr(symbol_data, 'historical_bars'):
                     # Check if there's any historical data
                     has_hist_data = False
@@ -409,8 +509,13 @@ async def generate_session_display(compact: bool = True) -> Table:
                             info = f"{interval}: [yellow]{queue_size} items[/yellow]"
                             
                             if oldest and newest:
-                                oldest_time = oldest.strftime("%H:%M:%S")
-                                newest_time = newest.strftime("%H:%M:%S")
+                                # Convert UTC timestamps to market timezone for display
+                                # All timestamps are in system timezone
+                                oldest_display = oldest
+                                newest_display = newest
+                                
+                                oldest_time = oldest_display.strftime("%H:%M:%S")
+                                newest_time = newest_display.strftime("%H:%M:%S")
                                 if oldest_time == newest_time:
                                     info += f" ({oldest_time})"
                                 else:
@@ -477,7 +582,7 @@ async def generate_session_display(compact: bool = True) -> Table:
     return main_table
 
 
-async def extract_session_data_for_csv() -> Dict[str, Any]:
+def extract_session_data_for_csv() -> Dict[str, Any]:
     """Extract session data into a flat dictionary for CSV export.
     
     Returns:
@@ -504,21 +609,56 @@ async def extract_session_data_for_csv() -> Dict[str, Any]:
         row["session_date"] = current_date.isoformat() if current_date else "N/A"
         
         try:
-            from app.managers.data_manager.time_provider import get_time_provider
-            time_provider = get_time_provider(system_mgr)
-            current_time = time_provider.get_current_time()
+            time_mgr = system_mgr.get_time_manager()
+            current_time = time_mgr.get_current_time()
             row["session_time"] = current_time.strftime("%H:%M:%S") if current_time else "N/A"
         except:
             row["session_time"] = "N/A"
         
         row["session_active"] = session_data.is_session_active()
-        row["session_ended"] = session_data.session_ended
         row["active_symbols"] = len(session_data.get_active_symbols())
+        
+        # Calculate overall quality (weighted average across all symbols)
+        active_symbols = session_data.get_active_symbols()
+        if active_symbols:
+            total_quality = 0.0
+            total_weight = 0.0
+            for symbol in active_symbols:
+                symbol_data = session_data.get_symbol_data(symbol)
+                if symbol_data and len(symbol_data.bars_1m) > 0:
+                    total_quality += symbol_data.bar_quality
+                    total_weight += 1.0
+            if total_weight > 0:
+                row["overall_quality"] = round(total_quality / total_weight, 1)
+            else:
+                row["overall_quality"] = 0.0
+        else:
+            row["overall_quality"] = 0.0
+        
+        # Trading hours for the session
+        row["trading_hours_open"] = "N/A"
+        row["trading_hours_close"] = "N/A"
+        row["is_early_close"] = False
+        if current_date:
+            try:
+                from app.models.database import SessionLocal
+                with SessionLocal() as db_session:
+                    time_mgr = system_mgr.get_time_manager()
+                    trading_session = time_mgr.get_trading_session(db_session, current_date)
+                    if trading_session and not trading_session.is_holiday:
+                        row["trading_hours_open"] = trading_session.regular_open.strftime("%H:%M")
+                        row["trading_hours_close"] = trading_session.regular_close.strftime("%H:%M")
+                        row["is_early_close"] = trading_session.early_close
+                    elif trading_session and trading_session.is_holiday:
+                        row["trading_hours_open"] = "Holiday"
+                        row["trading_hours_close"] = "Holiday"
+            except Exception as e:
+                logger.debug(f"Error getting trading hours for CSV: {e}")
         
         # Per-symbol data
         active_symbols = session_data.get_active_symbols()
         for symbol in sorted(active_symbols):
-            symbol_data = await session_data.get_symbol_data(symbol)
+            symbol_data = session_data.get_symbol_data(symbol)
             if symbol_data:
                 prefix = f"{symbol}_"
                 row[f"{prefix}volume"] = symbol_data.session_volume
@@ -535,8 +675,16 @@ async def extract_session_data_for_csv() -> Dict[str, Any]:
                 if len(symbol_data.bars_1m) > 0:
                     first_bar = symbol_data.bars_1m[0]
                     last_bar = symbol_data.bars_1m[-1]
-                    row[f"{prefix}first_bar_ts"] = first_bar.timestamp.strftime("%H:%M:%S") if hasattr(first_bar, 'timestamp') else "N/A"
-                    row[f"{prefix}last_bar_ts"] = last_bar.timestamp.strftime("%H:%M:%S") if hasattr(last_bar, 'timestamp') else "N/A"
+                    
+                    # Convert timestamps to market timezone for CSV export
+                    import pytz
+                    market_tz_str = system_mgr.get_time_manager().get_market_timezone()
+                    market_tz = pytz.timezone(market_tz_str)
+                    first_ts = first_bar.timestamp.astimezone(market_tz) if hasattr(first_bar, 'timestamp') and first_bar.timestamp.tzinfo else first_bar.timestamp if hasattr(first_bar, 'timestamp') else None
+                    last_ts = last_bar.timestamp.astimezone(market_tz) if hasattr(last_bar, 'timestamp') and last_bar.timestamp.tzinfo else last_bar.timestamp if hasattr(last_bar, 'timestamp') else None
+                    
+                    row[f"{prefix}first_bar_ts"] = first_ts.strftime("%H:%M:%S") if first_ts else "N/A"
+                    row[f"{prefix}last_bar_ts"] = last_ts.strftime("%H:%M:%S") if last_ts else "N/A"
                 else:
                     row[f"{prefix}first_bar_ts"] = "N/A"
                     row[f"{prefix}last_bar_ts"] = "N/A"
@@ -552,8 +700,21 @@ async def extract_session_data_for_csv() -> Dict[str, Any]:
                     row[f"{prefix}size"] = stats_dict["size"]
                     oldest = stats_dict.get("oldest")
                     newest = stats_dict.get("newest")
-                    row[f"{prefix}oldest"] = oldest.strftime("%H:%M:%S") if oldest else "N/A"
-                    row[f"{prefix}newest"] = newest.strftime("%H:%M:%S") if newest else "N/A"
+                    
+                    # Convert timestamps to market timezone for CSV export
+                    if oldest:
+                        # All timestamps are in system timezone
+                        oldest_display = oldest
+                        row[f"{prefix}oldest"] = oldest_display.strftime("%H:%M:%S")
+                    else:
+                        row[f"{prefix}oldest"] = "N/A"
+                    
+                    if newest:
+                        # All timestamps are in system timezone
+                        newest_display = newest
+                        row[f"{prefix}newest"] = newest_display.strftime("%H:%M:%S")
+                    else:
+                        row[f"{prefix}newest"] = "N/A"
             
             # INTERNAL STATE: Stream coordinator pending_items (staging area for chronological ordering)
             # This is the "peek" mechanism - one item from each queue waiting to be compared
@@ -562,7 +723,12 @@ async def extract_session_data_for_csv() -> Dict[str, Any]:
                     if pending_item and hasattr(pending_item, 'timestamp'):
                         symbol, stream_type = stream_key
                         prefix = f"{symbol}_pending_{stream_type.value}_"
-                        row[f"{prefix}ts"] = pending_item.timestamp.strftime("%H:%M:%S")
+                        # Convert pending item timestamp to market timezone
+                        import pytz
+                        market_tz_str = system_mgr.get_time_manager().get_market_timezone()
+                        market_tz = pytz.timezone(market_tz_str)
+                        pending_ts = pending_item.timestamp.astimezone(market_tz) if pending_item.timestamp.tzinfo else pending_item.timestamp
+                        row[f"{prefix}ts"] = pending_ts.strftime("%H:%M:%S")
                     elif pending_item is None:
                         # None indicates stream exhausted
                         symbol, stream_type = stream_key
@@ -578,7 +744,7 @@ async def extract_session_data_for_csv() -> Dict[str, Any]:
     return row
 
 
-async def data_session_command(
+def data_session_command(
     refresh_seconds: Optional[int] = None, 
     csv_file: Optional[str] = None,
     duration_seconds: Optional[int] = None,
@@ -616,8 +782,8 @@ async def data_session_command(
     csv_file_handle = open(csv_path, 'w', newline='')
     
     # Write header once
-    first_row = await extract_session_data_for_csv()
-    csv_writer = csv.DictWriter(csv_file_handle, fieldnames=first_row.keys())
+    first_row = extract_session_data_for_csv()
+    csv_writer = csv.DictWriter(csv_file_handle, fieldnames=first_row.keys(), extrasaction='ignore')
     csv_writer.writeheader()
     csv_file_handle.flush()
     
@@ -636,11 +802,11 @@ async def data_session_command(
     try:
         if refresh_seconds == 0:
             # Display once without refresh
-            table = await generate_session_display(compact=False)
+            table = generate_session_display(compact=False)
             console.print(table)
             
             # Write CSV row
-            row_data = await extract_session_data_for_csv()
+            row_data = extract_session_data_for_csv()
             csv_writer.writerow(row_data)
             csv_file_handle.flush()
         else:
@@ -655,14 +821,14 @@ async def data_session_command(
                             console.print("\n[yellow]Duration expired - stopping session display[/yellow]")
                             break
                         
-                        await asyncio.sleep(refresh_seconds)
+                        time.sleep(refresh_seconds)
                         iteration += 1
                         console.print(f"\n[dim]--- Refresh {iteration} ---[/dim]")
-                        table = await generate_session_display(compact=True)
+                        table = generate_session_display(compact=True)
                         console.print(table)
                         
                         # Write CSV row
-                        row_data = await extract_session_data_for_csv()
+                        row_data = extract_session_data_for_csv()
                         csv_writer.writerow(row_data)
                         csv_file_handle.flush()
                 
@@ -672,7 +838,7 @@ async def data_session_command(
                 console.print("\n[green]Session data display stopped[/green]")
             else:
                 # Live display - update in place (better for interactive use)
-                with Live(await generate_session_display(compact=True), console=console, refresh_per_second=4) as live:
+                with Live(generate_session_display(compact=True), console=console, refresh_per_second=4) as live:
                     try:
                         while system_mgr.state.value == "running":
                             # Check if duration expired
@@ -680,11 +846,11 @@ async def data_session_command(
                                 console.print("\n[yellow]Duration expired - stopping session display[/yellow]")
                                 break
                             
-                            await asyncio.sleep(refresh_seconds)
-                            live.update(await generate_session_display(compact=True))
+                            time.sleep(refresh_seconds)
+                            live.update(generate_session_display(compact=True))
                             
                             # Write CSV row
-                            row_data = await extract_session_data_for_csv()
+                            row_data = extract_session_data_for_csv()
                             csv_writer.writerow(row_data)
                             csv_file_handle.flush()
                     
@@ -694,7 +860,7 @@ async def data_session_command(
                 console.print("\nSession data display stopped")
             
             # Final display (non-compact)
-            final_table = await generate_session_display(compact=False)
+            final_table = generate_session_display(compact=False)
             console.print(final_table)
     
     except (KeyboardInterrupt, asyncio.CancelledError):

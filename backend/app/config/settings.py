@@ -65,6 +65,15 @@ class Settings(BaseSettings):
     # Backtest speed multiplier: 0 = max speed (no pacing), 1.0 = realtime, 2.0 = 2x speed, 0.5 = half speed
     DATA_MANAGER_BACKTEST_SPEED: float = 60.0
     
+    # ExecutionManager defaults
+    EXECUTION_MANAGER_DEFAULT_BROKERAGE: str = "mismartera"  # Default brokerage: "alpaca", "schwab", or "mismartera"
+    
+    # Mismartera Simulated Trading Configuration
+    MISMARTERA_INITIAL_BALANCE: float = 100000.0          # Starting cash balance
+    MISMARTERA_BUYING_POWER_MULTIPLIER: float = 1.0       # Margin multiplier (1.0 = cash account, 2.0 = 2x leverage)
+    MISMARTERA_EXECUTION_COST_PCT: float = 0.001          # Total execution cost as % of order value (0.1% = fees + commission + slippage)
+    MISMARTERA_SLIPPAGE_PCT: float = 0.0001               # Market order slippage (0.01% = 1 basis point)
+    
     # Data-Upkeep Thread Configuration (Phase 2)
     DATA_UPKEEP_ENABLED: bool = True
     DATA_UPKEEP_CHECK_INTERVAL_SECONDS: int = 60   # How often to check data quality
@@ -76,7 +85,7 @@ class Settings(BaseSettings):
     # Historical Bars Configuration (Phase 3)
     HISTORICAL_BARS_ENABLED: bool = True
     HISTORICAL_BARS_TRAILING_DAYS: int = 5         # Number of trailing days to keep
-    HISTORICAL_BARS_INTERVALS: list = [1, 5]       # Which intervals to load (minutes)
+    HISTORICAL_BARS_INTERVALS: list = ['1m', '5m', '1d']  # Which intervals to load (e.g., '1m', '5m', '1h', '1d')
     HISTORICAL_BARS_AUTO_LOAD: bool = True         # Auto-load on session start
     
     # Prefetch Configuration (Phase 4)

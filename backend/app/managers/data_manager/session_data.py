@@ -15,6 +15,7 @@ from typing import Dict, List, Optional, Set, Deque
 from dataclasses import dataclass, field
 from collections import defaultdict, deque
 import asyncio
+import threading
 
 from app.models.trading import BarData, TickData
 from app.logger import logger
@@ -28,18 +29,22 @@ class SymbolSessionData:
     - Latest bar cached for O(1) access
     - Deque for efficient append and recent-N access
     - Timestamp index for fast lookups
+    - Dynamic base interval support (1s or 1m per symbol)
     """
     
     symbol: str
     
-    # 1-minute bars (deque for O(1) append and efficient last-N access)
-    bars_1m: Deque[BarData] = field(default_factory=deque)
+    # Base interval for this symbol ("1s" or "1m")
+    base_interval: str = "1m"
+    
+    # Base bars (1s or 1m depending on base_interval)
+    bars_base: Deque[BarData] = field(default_factory=deque)
     
     # Cache for O(1) access to latest bar
     _latest_bar: Optional[BarData] = None
     
-    # Derived bars (e.g., {5: [...], 15: [...]})
-    bars_derived: Dict[int, List[BarData]] = field(default_factory=dict)
+    # Derived bars (e.g., {"1m": [...], "5m": [...], "15m": [...]})
+    bars_derived: Dict[str, List[BarData]] = field(default_factory=dict)
     
     # Bar quality metric (0-100%)
     bar_quality: float = 0.0
@@ -61,10 +66,23 @@ class SymbolSessionData:
     
     # Historical bars for trailing days
     # Structure: {interval: {date: [bars]}}
-    # Example: {1: {date1: [...], date2: [...]}, 5: {date1: [...], date2: [...]}}
-    historical_bars: Dict[int, Dict[date, List[BarData]]] = field(
+    # Example: {"1m": {date1: [...], date2: [...]}, "5m": {date1: [...], date2: [...]}}
+    historical_bars: Dict[str, Dict[date, List[BarData]]] = field(
         default_factory=lambda: defaultdict(dict)
     )
+    
+    @property
+    def bars_1m(self) -> Deque[BarData]:
+        """Backward compatibility: Access to bars (works for 1m base or derived 1m from 1s).
+        
+        Returns:
+            Base bars if interval is 1m, otherwise derived 1m bars
+        """
+        if self.base_interval == "1m":
+            return self.bars_base
+        else:
+            # Return derived 1m bars (if computed from 1s)
+            return deque(self.bars_derived.get("1m", []))
     
     def update_from_bar(self, bar: BarData) -> None:
         """Update session metrics from a new bar.
@@ -89,80 +107,128 @@ class SymbolSessionData:
         # Update latest bar cache
         self._latest_bar = bar
     
-    def get_latest_bar(self, interval: int = 1) -> Optional[BarData]:
+    def get_latest_bar(self, interval = None) -> Optional[BarData]:
         """Get the most recent bar (O(1) operation).
         
         Args:
-            interval: Bar interval in minutes (1, 5, 15, etc.)
+            interval: Bar interval (int minutes or string like "1s", "1m", "5m"). If None, uses base_interval.
             
         Returns:
             Most recent bar or None
         """
-        if interval == 1:
+        # Normalize interval: convert int to string
+        if isinstance(interval, int):
+            interval = f"{interval}m"
+        
+        if interval is None or interval == self.base_interval:
             return self._latest_bar
         else:
+            # Try string key first
             bars = self.bars_derived.get(interval, [])
+            if not bars and isinstance(interval, str) and interval.endswith('m'):
+                # Fallback: try integer key
+                try:
+                    interval_int = int(interval[:-1])
+                    bars = self.bars_derived.get(interval_int, [])
+                except (ValueError, IndexError):
+                    pass
             return bars[-1] if bars else None
     
-    def get_last_n_bars(self, n: int, interval: int = 1) -> List[BarData]:
+    def get_last_n_bars(self, n: int, interval = None) -> List[BarData]:
         """Get the last N bars efficiently.
         
-        For 1-minute bars, uses deque for O(N) access.
+        For base bars, uses deque for O(N) access.
         For derived bars, uses list slicing.
         
         Args:
             n: Number of bars to retrieve
-            interval: Bar interval in minutes
+            interval: Bar interval (int minutes or string like "1s", "1m", "5m"). If None, uses base_interval.
             
         Returns:
             List of last N bars (oldest to newest)
         """
-        if interval == 1:
-            # Efficient: only iterate over last n items
-            if len(self.bars_1m) <= n:
-                return list(self.bars_1m)
+        # Normalize interval: convert int to string
+        if isinstance(interval, int):
+            interval = f"{interval}m"
+        
+        if interval is None or interval == self.base_interval:
+            # Efficient: only iterate over last n items from base bars
+            if len(self.bars_base) <= n:
+                return list(self.bars_base)
             else:
                 # Get last n items from deque
-                return list(self.bars_1m)[-n:]
+                return list(self.bars_base)[-n:]
         else:
+            # Try string key first
             bars = self.bars_derived.get(interval, [])
+            if not bars and isinstance(interval, str) and interval.endswith('m'):
+                # Fallback: try integer key
+                try:
+                    interval_int = int(interval[:-1])
+                    bars = self.bars_derived.get(interval_int, [])
+                except (ValueError, IndexError):
+                    pass
             return bars[-n:] if bars else []
     
-    def get_bars_since(self, timestamp: datetime, interval: int = 1) -> List[BarData]:
+    def get_bars_since(self, timestamp: datetime, interval = None) -> List[BarData]:
         """Get all bars since a specific timestamp.
         
         Args:
             timestamp: Start timestamp
-            interval: Bar interval in minutes
+            interval: Bar interval (int minutes or string like "1s", "1m", "5m"). If None, uses base_interval.
             
         Returns:
             List of bars after timestamp
         """
-        if interval == 1:
+        # Normalize interval: convert int to string
+        if isinstance(interval, int):
+            interval = f"{interval}m"
+        
+        if interval is None or interval == self.base_interval:
             # Efficient: iterate backward from newest until we hit timestamp
             result = []
-            for bar in reversed(self.bars_1m):
+            for bar in reversed(self.bars_base):
                 if bar.timestamp < timestamp:
                     break
                 result.append(bar)
             return list(reversed(result))
         else:
+            # Try string key first
             bars = self.bars_derived.get(interval, [])
-            return [b for b in bars if b.timestamp >= timestamp]
+            if not bars and isinstance(interval, str) and interval.endswith('m'):
+                # Fallback: try integer key
+                try:
+                    interval_int = int(interval[:-1])
+                    bars = self.bars_derived.get(interval_int, [])
+                except (ValueError, IndexError):
+                    pass
+            return [b for b in bars if b.timestamp >= timestamp] if bars else []
     
-    def get_bar_count(self, interval: int = 1) -> int:
+    def get_bar_count(self, interval = None) -> int:
         """Get count of bars for an interval (O(1) operation).
         
         Args:
-            interval: Bar interval in minutes
+            interval: Bar interval (int minutes, or string like "1s", "1m", "5m"). If None, uses base_interval.
             
         Returns:
             Number of bars available
         """
-        if interval == 1:
-            return len(self.bars_1m)
+        # Normalize interval: convert int to string
+        if isinstance(interval, int):
+            interval = f"{interval}m"
+        
+        if interval is None or interval == self.base_interval:
+            return len(self.bars_base)
         else:
+            # Try string key first (e.g., "5m")
             bars = self.bars_derived.get(interval)
+            if bars is None and isinstance(interval, str) and interval.endswith('m'):
+                # Fallback: try integer key (e.g., 5)
+                try:
+                    interval_int = int(interval[:-1])
+                    bars = self.bars_derived.get(interval_int)
+                except (ValueError, IndexError):
+                    pass
             return len(bars) if bars else 0
     
     def reset_session_metrics(self) -> None:
@@ -201,7 +267,7 @@ class SessionData:
         self.historical_bars_intervals: List[int] = []
         
         # Session state
-        self.session_ended: bool = False
+        self._session_active: bool = False  # Managed by upkeep thread
         
         # Per-symbol data structures
         self._symbols: Dict[str, SymbolSessionData] = {}
@@ -212,9 +278,10 @@ class SessionData:
         # Active streams tracking: {(symbol, stream_type): True}
         # stream_type: "bars", "ticks", "quotes"
         self._active_streams: Dict[Tuple[str, str], bool] = {}
-        
-        # Thread-safe lock for concurrent access
-        self._lock = asyncio.Lock()
+        # Event to signal upkeep thread when new data arrives
+        self._data_arrival_event = threading.Event()
+        # Thread lock for concurrent access
+        self._lock = threading.RLock()
         
         logger.info("SessionData initialized")
     
@@ -263,17 +330,43 @@ class SessionData:
             settings.PREFETCH_AUTO_ACTIVATE = config.prefetch.auto_activate
             logger.info(f"  ✓ Prefetch: window {config.prefetch.window_minutes} min before session")
         
-        # Session boundary configuration
-        if config.session_boundary:
-            settings.SESSION_AUTO_ROLL = config.session_boundary.auto_roll
-            # Also update historical_bars_trailing_days for consistency
-            if config.session_boundary.preserve_historical_days != self.historical_bars_trailing_days:
-                self.historical_bars_trailing_days = config.session_boundary.preserve_historical_days
-                logger.info(f"  ✓ Session boundary: auto-roll enabled, preserve {config.session_boundary.preserve_historical_days} days")
-        
         logger.success("Session data configuration applied")
     
-    async def register_symbol(self, symbol: str) -> SymbolSessionData:
+    def activate_session(self) -> None:
+        """
+        Activate the trading session.
+        
+        Called by upkeep thread when:
+        1. System starts (initial activation)
+        2. New trading day begins after EOD transition
+        
+        This signals to the stream coordinator that it can begin streaming data.
+        """
+        self._session_active = True
+        logger.info("✓ Session activated")
+    
+    def deactivate_session(self) -> None:
+        """
+        Deactivate the trading session.
+        
+        Called by upkeep thread when market close time is reached.
+        This signals to the stream coordinator to stop streaming.
+        """
+        self._session_active = False
+        logger.info("✓ Session deactivated")
+    
+    def is_session_active(self) -> bool:
+        """
+        Check if session is currently active.
+        
+        Returns:
+            True if session is active and streaming should occur
+        
+        Note: This is a simple boolean check (GIL-safe for reads)
+        """
+        return self._session_active
+    
+    def register_symbol(self, symbol: str) -> SymbolSessionData:
         """Register a new symbol for tracking.
         
         Args:
@@ -284,7 +377,7 @@ class SessionData:
         """
         symbol = symbol.upper()
         
-        async with self._lock:
+        with self._lock:
             if symbol not in self._symbols:
                 self._symbols[symbol] = SymbolSessionData(symbol=symbol)
                 self._active_symbols.add(symbol)
@@ -294,7 +387,7 @@ class SessionData:
             
             return self._symbols[symbol]
     
-    async def get_symbol_data(self, symbol: str) -> Optional[SymbolSessionData]:
+    def get_symbol_data(self, symbol: str) -> Optional[SymbolSessionData]:
         """Get data for a symbol.
         
         Args:
@@ -304,7 +397,7 @@ class SessionData:
             SymbolSessionData if symbol is registered, None otherwise
         """
         symbol = symbol.upper()
-        async with self._lock:
+        with self._lock:
             return self._symbols.get(symbol)
     
     def is_stream_active(self, symbol: str, stream_type: str) -> bool:
@@ -321,7 +414,7 @@ class SessionData:
         stream_key = (symbol, stream_type.lower())
         return stream_key in self._active_streams
     
-    async def mark_stream_active(self, symbol: str, stream_type: str) -> None:
+    def mark_stream_active(self, symbol: str, stream_type: str) -> None:
         """Mark a stream as active for a symbol.
         
         Args:
@@ -331,12 +424,12 @@ class SessionData:
         symbol = symbol.upper()
         stream_type = stream_type.lower()
         
-        async with self._lock:
+        with self._lock:
             stream_key = (symbol, stream_type)
             self._active_streams[stream_key] = True
             logger.info(f"Marked {stream_type} stream active for {symbol}")
     
-    async def mark_stream_inactive(self, symbol: str, stream_type: str) -> None:
+    def mark_stream_inactive(self, symbol: str, stream_type: str) -> None:
         """Mark a stream as inactive for a symbol.
         
         Args:
@@ -346,49 +439,58 @@ class SessionData:
         symbol = symbol.upper()
         stream_type = stream_type.lower()
         
-        async with self._lock:
+        with self._lock:
             stream_key = (symbol, stream_type)
             if stream_key in self._active_streams:
                 del self._active_streams[stream_key]
                 logger.info(f"Marked {stream_type} stream inactive for {symbol}")
     
-    async def add_bar(self, symbol: str, bar: BarData) -> None:
-        """Add a 1-minute bar to session data.
+    def add_bar(self, symbol: str, bar: BarData) -> None:
+        """Add a bar to session data (base interval: 1s or 1m).
         
         Automatically determines if bar belongs to current session or historical data
         based on the bar's date vs current session date.
+        Sets the base_interval from the first bar's interval.
         
         Args:
             symbol: Stock symbol
-            bar: Bar data to add
+            bar: Bar data to add (with interval field)
         """
         symbol = symbol.upper()
         
         # Auto-register symbol if not already registered
         if symbol not in self._active_symbols:
-            await self.register_symbol(symbol)
+            self.register_symbol(symbol)
         
         # Get current session date to determine where to store the bar
         current_session_date = self.get_current_session_date()
         bar_date = bar.timestamp.date()
         
-        async with self._lock:
+        with self._lock:
             symbol_data = self._symbols[symbol]
+            
+            # Set base_interval from first bar if not already set
+            if symbol_data.base_interval == "1m" and bar.interval in ["1s", "1m"]:
+                symbol_data.base_interval = bar.interval
             
             # Check if bar belongs to current session or historical data
             if current_session_date is not None and bar_date == current_session_date:
-                # Current session bar - add to bars_1m and update metrics
-                symbol_data.bars_1m.append(bar)
+                # Current session bar - add to base bars and update metrics
+                symbol_data.bars_base.append(bar)
                 symbol_data.update_from_bar(bar)
+                # Signal upkeep thread that new data arrived
+                self._data_arrival_event.set()
             else:
                 # Historical bar - add to historical_bars storage
-                if 1 not in symbol_data.historical_bars:
-                    symbol_data.historical_bars[1] = {}
-                if bar_date not in symbol_data.historical_bars[1]:
-                    symbol_data.historical_bars[1][bar_date] = []
-                symbol_data.historical_bars[1][bar_date].append(bar)
+                # Store by interval (string) and date
+                interval_key = bar.interval
+                if interval_key not in symbol_data.historical_bars:
+                    symbol_data.historical_bars[interval_key] = {}
+                if bar_date not in symbol_data.historical_bars[interval_key]:
+                    symbol_data.historical_bars[interval_key][bar_date] = []
+                symbol_data.historical_bars[interval_key][bar_date].append(bar)
     
-    async def add_bars_batch(
+    def add_bars_batch(
         self, 
         symbol: str, 
         bars: List[BarData],
@@ -408,9 +510,9 @@ class SessionData:
         symbol = symbol.upper()
         
         if symbol not in self._active_symbols:
-            await self.register_symbol(symbol)
+            self.register_symbol(symbol)
         
-        async with self._lock:
+        with self._lock:
             symbol_data = self._symbols[symbol]
             
             if insert_mode == "historical":
@@ -429,6 +531,8 @@ class SessionData:
                 symbol_data.bars_1m.extend(bars)
                 for bar in bars:
                     symbol_data.update_from_bar(bar)
+                # Signal upkeep thread that new data arrived
+                self._data_arrival_event.set()
                 return
             
             if insert_mode == "gap_fill":
@@ -443,6 +547,8 @@ class SessionData:
                 # Replace deque with updated sorted list
                 from collections import deque
                 symbol_data.bars_1m = deque(bars_list)
+                # Signal upkeep thread that new data arrived
+                self._data_arrival_event.set()
                 return
             
             # Default "auto" mode: date-based routing
@@ -469,6 +575,8 @@ class SessionData:
                     symbol_data.update_from_bar(bar)
                 from collections import deque
                 symbol_data.bars_1m = deque(bars_list)
+                # Signal upkeep thread that new data arrived
+                self._data_arrival_event.set()
             
             # Add historical bars
             if historical_bars_by_date:
@@ -482,7 +590,7 @@ class SessionData:
     # ==================== FAST ACCESS METHODS ====================
     # These methods are optimized for AnalysisEngine and other high-frequency readers
     
-    async def get_latest_bar(self, symbol: str, interval: int = 1) -> Optional[BarData]:
+    def get_latest_bar(self, symbol: str, interval: int = 1) -> Optional[BarData]:
         """Get the most recent bar for a symbol (O(1) operation).
         
         Optimized for high-frequency access by AnalysisEngine.
@@ -495,13 +603,13 @@ class SessionData:
             Most recent bar or None
         """
         symbol = symbol.upper()
-        async with self._lock:
+        with self._lock:
             symbol_data = self._symbols.get(symbol)
             if symbol_data is None:
                 return None
             return symbol_data.get_latest_bar(interval)
     
-    async def get_last_n_bars(
+    def get_last_n_bars(
         self,
         symbol: str,
         n: int,
@@ -520,13 +628,13 @@ class SessionData:
             List of last N bars (oldest to newest)
         """
         symbol = symbol.upper()
-        async with self._lock:
+        with self._lock:
             symbol_data = self._symbols.get(symbol)
             if symbol_data is None:
                 return []
             return symbol_data.get_last_n_bars(n, interval)
     
-    async def get_bars_since(
+    def get_bars_since(
         self,
         symbol: str,
         timestamp: datetime,
@@ -543,13 +651,13 @@ class SessionData:
             List of bars after timestamp
         """
         symbol = symbol.upper()
-        async with self._lock:
+        with self._lock:
             symbol_data = self._symbols.get(symbol)
             if symbol_data is None:
                 return []
             return symbol_data.get_bars_since(timestamp, interval)
     
-    async def get_bar_count(self, symbol: str, interval: int = 1) -> int:
+    def get_bar_count(self, symbol: str, interval: int = 1) -> int:
         """Get count of available bars (O(1) operation).
         
         Args:
@@ -560,13 +668,13 @@ class SessionData:
             Number of bars available
         """
         symbol = symbol.upper()
-        async with self._lock:
+        with self._lock:
             symbol_data = self._symbols.get(symbol)
             if symbol_data is None:
                 return 0
             return symbol_data.get_bar_count(interval)
     
-    async def get_latest_bars_multi(
+    def get_latest_bars_multi(
         self,
         symbols: List[str],
         interval: int = 1
@@ -583,7 +691,7 @@ class SessionData:
             Dictionary mapping symbol to latest bar
         """
         result = {}
-        async with self._lock:
+        with self._lock:
             for symbol in symbols:
                 symbol = symbol.upper()
                 symbol_data = self._symbols.get(symbol)
@@ -593,7 +701,7 @@ class SessionData:
                     result[symbol] = None
         return result
     
-    async def get_bars(
+    def get_bars(
         self,
         symbol: str,
         interval: int = 1,
@@ -613,7 +721,7 @@ class SessionData:
         """
         symbol = symbol.upper()
         
-        async with self._lock:
+        with self._lock:
             symbol_data = self._symbols.get(symbol)
             if symbol_data is None:
                 return []
@@ -637,7 +745,7 @@ class SessionData:
             
             return bars
     
-    async def get_session_metrics(self, symbol: str) -> Dict[str, any]:
+    def get_session_metrics(self, symbol: str) -> Dict[str, any]:
         """Get current session metrics for a symbol.
         
         Args:
@@ -648,7 +756,7 @@ class SessionData:
         """
         symbol = symbol.upper()
         
-        async with self._lock:
+        with self._lock:
             symbol_data = self._symbols.get(symbol)
             if symbol_data is None:
                 return {}
@@ -666,72 +774,26 @@ class SessionData:
     # ==================== HISTORICAL BARS METHODS (Phase 3) ====================
     
     def get_current_session_date(self) -> Optional[date]:
-        """Get current session date from TimeProvider (single source of truth).
+        """Get current session date from TimeManager (single source of truth).
         
         Returns:
-            Current session date from TimeProvider, or None if not available
+            Current session date from TimeManager, or None if not available
         """
-        try:
-            from app.managers.data_manager.time_provider import get_time_provider
-            time_provider = get_time_provider()
-            current_time = time_provider.get_current_time()
-            return current_time.date()
-        except Exception as e:
-            logger.warning(f"Could not get current date from TimeProvider: {e}")
-            return None
-    
-    def is_session_active(self) -> bool:
-        """Check if a session is currently active.
-        
-        A session is considered active when ALL of the following are true:
-        1. System is in RUNNING state (from system_manager)
-        2. Market is currently open (from data_manager)
-        3. Session has not been explicitly ended (from self.session_ended flag)
-        
-        Note: Does NOT require active symbols. A session can be active even
-        with no symbols streaming, as long as system is running and market is open.
-        
-        Returns:
-            True if session is active, False otherwise
-        """
-        # 1. Check if session explicitly ended (self)
-        if self.session_ended:
-            logger.debug("Session not active: session_ended=True")
-            return False
-        
-        # 2 & 3. Check system state and market status via system_manager
         try:
             from app.managers.system_manager import get_system_manager
-            system_manager = get_system_manager()
-            
-            # Check system is running
-            if not system_manager.is_running():
-                logger.debug("Session not active: system not running")
-                return False
-            
-            # Check market is open via data_manager
-            data_manager = system_manager.get_data_manager()
-            market_open = data_manager.check_market_open()
-            
-            if not market_open:
-                logger.debug("Session not active: market closed")
-            else:
-                logger.debug("Session active: all checks passed")
-            
-            return market_open
-            
+            system_mgr = get_system_manager()
+            time_mgr = system_mgr.get_time_manager()
+            current_time = time_mgr.get_current_time()
+            return current_time.date()
         except Exception as e:
-            logger.warning(f"Session not active: error checking status: {e}")
-            import traceback
-            logger.warning(f"Traceback: {traceback.format_exc()}")
-            # If we can't determine status, assume not active
-            return False
+            logger.warning(f"Could not get current date from TimeManager: {e}")
+            return None
     
-    async def load_historical_bars(
+    def load_historical_bars(
         self,
         symbol: str,
         trailing_days: int,
-        intervals: List[int],
+        intervals: List,  # Can be int (for minutes) or str (e.g., '1m', '5m', '1d')
         data_repository
     ) -> int:
         """Load historical bars for trailing days from database.
@@ -739,7 +801,7 @@ class SessionData:
         Args:
             symbol: Stock symbol
             trailing_days: Number of days to load
-            intervals: List of intervals (1, 5, 15, etc.)
+            intervals: List of intervals (1, 5, 15) or ('1m', '5m', '1d', etc.)
             data_repository: Database access (session or repository)
             
         Returns:
@@ -752,7 +814,7 @@ class SessionData:
         symbol = symbol.upper()
         
         if symbol not in self._active_symbols:
-            await self.register_symbol(symbol)
+            self.register_symbol(symbol)
         
         current_session_date = self.get_current_session_date()
         if current_session_date is None:
@@ -765,13 +827,13 @@ class SessionData:
         
         total_loaded = 0
         
-        async with self._lock:
+        with self._lock:
             symbol_data = self._symbols[symbol]
             
             for interval in intervals:
                 try:
                     # Query database using same interface detection as gap filling
-                    bars_db = await self._query_historical_bars(
+                    bars_db = self._query_historical_bars(
                         data_repository,
                         symbol,
                         start_date,
@@ -796,8 +858,10 @@ class SessionData:
                     symbol_data.historical_bars[interval].update(dict(bars_by_date))
                     total_loaded += len(bars_db)
                     
+                    # Format interval for display
+                    interval_str = f"{interval}m" if isinstance(interval, int) else interval
                     logger.debug(
-                        f"Loaded {len(bars_db)} historical {interval}m bars for {symbol}"
+                        f"Loaded {len(bars_db)} historical {interval_str} bars for {symbol}"
                     )
                 
                 except Exception as e:
@@ -811,17 +875,18 @@ class SessionData:
         
         return total_loaded
     
-    async def _query_historical_bars(
+    def _query_historical_bars(
         self,
         data_repository,
         symbol: str,
         start_date: date,
         end_date: date,
-        interval: int
+        interval  # Can be int (for minutes) or str (e.g., '1m', '5m', '1d')
     ) -> List:
         """Query historical bars from database (internal helper).
         
         Supports same interfaces as gap filling.
+        Handles both integer (minutes) and string (e.g., '1m', '1d') interval formats.
         """
         from datetime import datetime as dt_class
         
@@ -829,40 +894,37 @@ class SessionData:
         start_dt = dt_class.combine(start_date, datetime.min.time())
         end_dt = dt_class.combine(end_date, datetime.max.time())
         
-        bars_db = None
+        # Convert interval to string format if it's an integer
+        interval_str = f"{interval}m" if isinstance(interval, int) else interval
         
-        # Method 1: Database session (AsyncSession)
-        if hasattr(data_repository, 'execute'):
-            from app.repositories.market_data_repository import MarketDataRepository
-            bars_db = await MarketDataRepository.get_bars_by_symbol(
-                session=data_repository,
-                symbol=symbol,
-                start_date=start_dt,
-                end_date=end_dt,
-                interval=f"{interval}m"
-            )
+        # Load bars from Parquet (no database)
+        from app.managers.data_manager.parquet_storage import parquet_storage
         
-        # Method 2: Repository with get_bars_by_symbol
-        elif hasattr(data_repository, 'get_bars_by_symbol'):
-            bars_db = await data_repository.get_bars_by_symbol(
-                symbol=symbol,
-                start_date=start_dt,
-                end_date=end_dt,
-                interval=f"{interval}m"
-            )
+        df = parquet_storage.read_bars(
+            interval_str,
+            symbol,
+            start_date=start_dt,
+            end_date=end_dt
+        )
         
-        # Method 3: Generic get_bars
-        elif hasattr(data_repository, 'get_bars'):
-            bars_db = await data_repository.get_bars(
-                symbol=symbol,
-                start=start_dt,
-                end=end_dt,
-                interval=interval
-            )
+        # Convert DataFrame to list of BarData objects
+        bars_db = []
+        if not df.empty:
+            for _, row in df.iterrows():
+                bars_db.append(BarData(
+                    symbol=row['symbol'],
+                    timestamp=row['timestamp'],
+                    interval=row.get('interval', interval_str),
+                    open=row['open'],
+                    high=row['high'],
+                    low=row['low'],
+                    close=row['close'],
+                    volume=row['volume']
+                ))
         
-        return bars_db or []
+        return bars_db
     
-    async def get_historical_bars(
+    def get_historical_bars(
         self,
         symbol: str,
         days_back: int = 0,
@@ -880,7 +942,7 @@ class SessionData:
         """
         symbol = symbol.upper()
         
-        async with self._lock:
+        with self._lock:
             symbol_data = self._symbols.get(symbol)
             if symbol_data is None:
                 return {}
@@ -894,7 +956,7 @@ class SessionData:
             dates = sorted(historical.keys(), reverse=True)[:days_back]
             return {d: historical[d] for d in dates}
     
-    async def get_all_bars_including_historical(
+    def get_all_bars_including_historical(
         self,
         symbol: str,
         interval: int = 1
@@ -912,7 +974,7 @@ class SessionData:
         """
         symbol = symbol.upper()
         
-        async with self._lock:
+        with self._lock:
             symbol_data = self._symbols.get(symbol)
             if symbol_data is None:
                 return []
@@ -933,7 +995,7 @@ class SessionData:
             
             return all_bars
     
-    async def roll_session(
+    def roll_session(
         self,
         new_session_date: date
     ) -> None:
@@ -943,11 +1005,11 @@ class SessionData:
         current session for new data. Maintains trailing days window.
         
         Note: This method is for manual session rolling. The current
-        session date comes from TimeProvider as the single source of truth.
+        session date comes from TimeManager as the single source of truth.
         
         Args:
             new_session_date: Date of the new session (informational only,
-                TimeProvider should be updated separately)
+                TimeManager should be updated separately)
         """
         old_date = self.get_current_session_date()
         if old_date is None:
@@ -955,7 +1017,7 @@ class SessionData:
             logger.info(f"Starting first session for date: {new_session_date}")
             return
         
-        async with self._lock:
+        with self._lock:
             
             # For each symbol, move current session to historical
             for symbol_data in self._symbols.values():
@@ -992,26 +1054,23 @@ class SessionData:
                 symbol_data.ticks.clear()
                 symbol_data.reset_session_metrics()
             
-            # Reset session state
-            self.session_ended = False
+            # Session state managed by upkeep thread
         
         logger.info(
             f"Rolled session from {old_date} to {new_session_date}. "
-            f"Note: TimeProvider should be updated to {new_session_date} separately."
+            f"Note: TimeManager should be updated to {new_session_date} separately."
         )
     
-    async def reset_session(self) -> None:
+    def reset_session(self) -> None:
         """Reset current session data.
         
         Clears all session-specific data but keeps configuration and symbol registrations.
-        The current session date comes from TimeProvider (single source of truth).
+        The current session date comes from TimeManager (single source of truth).
         
-        Note: This does NOT change the TimeProvider date. Call this when starting
-        a new session after TimeProvider has been updated.
+        Note: This does NOT change the TimeManager date. Call this when starting
+        a new session after TimeManager has been updated.
         """
-        async with self._lock:
-            self.session_ended = False
-            
+        with self._lock:
             # Reset all symbol data
             for symbol_data in self._symbols.values():
                 symbol_data.bars_1m.clear()
@@ -1023,14 +1082,14 @@ class SessionData:
             current_date = self.get_current_session_date()
             logger.info(f"Reset session data for date: {current_date}")
     
-    async def end_session(self) -> None:
+    def end_session(self) -> None:
         """Mark current session as ended."""
-        async with self._lock:
-            self.session_ended = True
+        with self._lock:
+            self._session_active = False
             current_date = self.get_current_session_date()
             logger.info(f"Session ended for date: {current_date}")
     
-    async def clear(self) -> None:
+    def clear(self) -> None:
         """Clear all session data including symbols, bars, and session state.
         
         This method:
@@ -1039,22 +1098,21 @@ class SessionData:
         - Resets session ended flag
         
         Use this when stopping the system or starting a fresh session.
-        Note: Current date comes from TimeProvider, not stored here.
+        Note: Current date comes from TimeManager, not stored here.
         """
-        async with self._lock:
+        with self._lock:
             num_symbols = len(self._active_symbols)
             num_streams = len(self._active_streams)
             self._symbols.clear()
             self._active_symbols.clear()
             self._active_streams.clear()  # Clear active streams tracking
-            self.session_ended = False
             logger.warning(f"⚠ Session data cleared! Removed {num_symbols} symbols, {num_streams} active streams")
             import traceback
             logger.debug(f"Clear called from:\n{''.join(traceback.format_stack()[-5:-1])}")
     
-    async def clear_all(self) -> None:
+    def clear_all(self) -> None:
         """Clear all session data (alias for clear(), kept for backwards compatibility)."""
-        await self.clear()
+        self.clear()
     
     def get_active_symbols(self) -> Set[str]:
         """Get set of active symbols (thread-safe read)."""

@@ -1,64 +1,66 @@
 """
 Database configuration and session management
 """
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
-from sqlalchemy.orm import declarative_base
+from sqlalchemy import create_engine
+from sqlalchemy.orm import declarative_base, sessionmaker, Session
 from app.config import settings
 from app.logger import logger
 from pathlib import Path
 
 # Create database directory if it doesn't exist
-db_path = Path(settings.DATABASE_URL.replace("sqlite+aiosqlite:///", ""))
+# Convert async URL to sync URL (remove +aiosqlite)
+db_url = settings.DATABASE_URL.replace("sqlite+aiosqlite://", "sqlite://")
+db_path = Path(db_url.replace("sqlite:///", ""))
 db_path.parent.mkdir(parents=True, exist_ok=True)
 
-# Create async engine
-engine = create_async_engine(
-    settings.DATABASE_URL,
+# Create synchronous engine
+# Thread-safe by default - each thread gets its own connection from pool
+# No event loop issues, no asyncio complexity
+engine = create_engine(
+    db_url,
     echo=False,  # Disable SQL query logging for cleaner output
-    future=True,
-    pool_pre_ping=True,
+    pool_pre_ping=True,  # Verify connections before using
+    connect_args={"check_same_thread": False} if "sqlite" in db_url else {},
 )
 
-# Create async session factory
-AsyncSessionLocal = async_sessionmaker(
-    engine,
-    class_=AsyncSession,
-    expire_on_commit=False,
+# Create synchronous session factory
+SessionLocal = sessionmaker(
+    bind=engine,
     autocommit=False,
     autoflush=False,
+    expire_on_commit=False,
 )
 
 # Base class for models
 Base = declarative_base()
 
 
-async def get_db() -> AsyncSession:
+def get_db() -> Session:
     """
-    Dependency for getting async database session
+    Dependency for getting database session
     
     Yields:
-        AsyncSession: Database session
+        Session: Database session
     """
-    async with AsyncSessionLocal() as session:
-        try:
-            yield session
-            await session.commit()
-        except Exception as e:
-            await session.rollback()
-            logger.error(f"Database session error: {e}")
-            raise
-        finally:
-            await session.close()
+    session = SessionLocal()
+    try:
+        yield session
+        session.commit()
+    except Exception as e:
+        session.rollback()
+        logger.error(f"Database session error: {e}")
+        raise
+    finally:
+        session.close()
 
 
-async def init_db():
+def init_db():
     """Initialize database tables"""
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    Base.metadata.create_all(bind=engine)
     logger.info("Database tables initialized")
 
 
-async def close_db():
+def close_db():
     """Close database connections"""
-    await engine.dispose()
+    engine.dispose()
     logger.info("Database connections closed")

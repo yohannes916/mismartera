@@ -7,7 +7,7 @@ from datetime import datetime, date, time
 from sqlalchemy import select, delete, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.trading_calendar import TradingHoliday, TradingHours
+from app.models.trading_calendar import TradingHoliday
 from app.logger import logger
 
 
@@ -135,8 +135,8 @@ class TradingCalendarRepository:
         Returns:
             True if trading day, False if weekend/holiday
         """
-        # Check if weekend
-        if TradingHours.is_weekend(date):
+        # Check if weekend (Monday=0, Sunday=6)
+        if date.weekday() >= 5:  # Saturday or Sunday
             return False
         
         # Check if holiday (full closure)
@@ -166,8 +166,8 @@ class TradingCalendarRepository:
         if holiday and holiday.early_close_time:
             return holiday.early_close_time
         
-        # Default close time
-        return time.fromisoformat(TradingHours.MARKET_CLOSE)
+        # Default close time (4:00 PM)
+        return time(16, 0)
     
     @staticmethod
     async def count_trading_days(

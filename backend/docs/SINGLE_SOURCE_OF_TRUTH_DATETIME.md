@@ -35,7 +35,7 @@ session_start = datetime.combine(
 
 # upkeep_thread.py
 data_manager = self._system_manager.get_data_manager()
-trading_hours = await data_manager.get_trading_hours(session, current_date)
+trading_hours = data_manager.get_trading_hours(session, current_date)
 
 if trading_hours is None:
     # Market closed today (holiday)
@@ -113,7 +113,7 @@ market_open = time(9, 30)  # Duplicate!
 ```python
 # CORRECT!
 current_time = time_provider.get_current_time()
-trading_hours = await data_manager.get_trading_hours(session, date)
+trading_hours = data_manager.get_trading_hours(session, date)
 ```
 
 **✅ ALWAYS check for None (holidays):**
@@ -177,7 +177,7 @@ current_date = current_time.date()
 from app.models.database import AsyncSessionLocal
 async with AsyncSessionLocal() as session:
     data_manager = self._system_manager.get_data_manager()
-    trading_hours = await data_manager.get_trading_hours(session, current_date)
+    trading_hours = data_manager.get_trading_hours(session, current_date)
     
     if trading_hours is None:
         # Market closed today (holiday)
@@ -206,7 +206,7 @@ current_date = current_time.date()
 from app.models.database import AsyncSessionLocal
 async with AsyncSessionLocal() as session:
     data_manager = self._system_manager.get_data_manager()
-    trading_hours = await data_manager.get_trading_hours(session, current_date)
+    trading_hours = data_manager.get_trading_hours(session, current_date)
     
     if trading_hours is None:
         # Market closed today (holiday)
@@ -260,15 +260,15 @@ async with AsyncSessionLocal() as session:
     data_manager = system_manager.get_data_manager()
     
     # Regular day
-    hours = await data_manager.get_trading_hours(session, date(2025, 11, 18))
+    hours = data_manager.get_trading_hours(session, date(2025, 11, 18))
     # Returns: DayTradingHours(open_time=time(9, 30), close_time=time(16, 0))
     
     # Early close (day before Thanksgiving)
-    hours = await data_manager.get_trading_hours(session, date(2025, 11, 27))
+    hours = data_manager.get_trading_hours(session, date(2025, 11, 27))
     # Returns: DayTradingHours(open_time=time(9, 30), close_time=time(13, 0))
     
     # Holiday (Thanksgiving)
-    hours = await data_manager.get_trading_hours(session, date(2025, 11, 28))
+    hours = data_manager.get_trading_hours(session, date(2025, 11, 28))
     # Returns: None
     
     if hours:
@@ -283,7 +283,7 @@ async with AsyncSessionLocal() as session:
 ### Test 1: Regular Trading Day
 ```python
 async def test_regular_day():
-    hours = await data_manager.get_trading_hours(session, date(2025, 11, 18))
+    hours = data_manager.get_trading_hours(session, date(2025, 11, 18))
     assert hours is not None
     assert hours.open_time == time(9, 30)
     assert hours.close_time == time(16, 0)
@@ -293,7 +293,7 @@ async def test_regular_day():
 ```python
 async def test_early_close():
     # Day before Thanksgiving
-    hours = await data_manager.get_trading_hours(session, date(2025, 11, 27))
+    hours = data_manager.get_trading_hours(session, date(2025, 11, 27))
     assert hours is not None
     assert hours.open_time == time(9, 30)
     assert hours.close_time == time(13, 0)  # 1:00 PM
@@ -303,7 +303,7 @@ async def test_early_close():
 ```python
 async def test_holiday():
     # Thanksgiving
-    hours = await data_manager.get_trading_hours(session, date(2025, 11, 28))
+    hours = data_manager.get_trading_hours(session, date(2025, 11, 28))
     assert hours is None  # Market closed
 ```
 
@@ -330,7 +330,7 @@ session_start = datetime.combine(date, time(9, 30))  # Hardcoded!
 
 **CORRECT:**
 ```python
-trading_hours = await data_manager.get_trading_hours(session, date)
+trading_hours = data_manager.get_trading_hours(session, date)
 if trading_hours:
     session_start = datetime.combine(date, trading_hours.open_time)
 ```
@@ -344,7 +344,7 @@ session_end = datetime.combine(date, time(16, 0))  # Hardcoded!
 
 **CORRECT:**
 ```python
-trading_hours = await data_manager.get_trading_hours(session, date)
+trading_hours = data_manager.get_trading_hours(session, date)
 if trading_hours:
     session_end = datetime.combine(date, trading_hours.close_time)
 ```
@@ -358,7 +358,7 @@ expected_minutes = 390  # Always assumes full day!
 
 **CORRECT:**
 ```python
-trading_hours = await data_manager.get_trading_hours(session, date)
+trading_hours = data_manager.get_trading_hours(session, date)
 if trading_hours:
     open_dt = datetime.combine(date, trading_hours.open_time)
     close_dt = datetime.combine(date, trading_hours.close_time)

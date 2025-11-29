@@ -1,4 +1,37 @@
-https://www.backtestmarket.com/en/btm-historical-data-complete-pack
+https://www.backtestmarket.com/en/btm-historical-data-complete-pack ($250 complete bundle)
+https://www.thetadata.net/ ($40/month)
+https://www.kibot.com/buy.aspx ($900)
+https://firstratedata.com/cb/4/complete-stocks-etf  Complete Intraday Bundle - Stock, Futures, ETF, Index, Crypto ($700): 1-minute, Jan 2000 - Nov 2025, 10120 Tickers
+https://www.youtube.com/watch?v=FUmO-jREy4s how to setup rtx 3090 on ubuntu
+https://www.sabrepc.com/CBL-PWEX-0582-Supermicro-S128429?srsltid=AfmBOop3-CGfVrvINzzgRzl4OKpjUCGAh_W_nmi7mlXHQmRN6EvfSkER
+
+
+
+input streams are strictly limited to ticks, 1s bars, 1m bars, and/or quotes, while session_data can contain derived types (e.g., OHLCV).
+Additional Test Cases / Invariants for the CSV Snapshot
+Data Type Constraints & Consistency
+Input Queue Type Validation:
+The only columns present in the CSV related to input queues should correspond exclusively to 1s, 1m, or quote data types for any given ticker (e.g., SYM_1s_oldest_ts, SYM_quote_newest_ts). No other data type identifier should exist for the input queues.
+Derived Data in Session Data:
+Columns related to session_data are permitted to show additional data types beyond the basic three (e.g., SYM_OHLCV_session_newest_ts), confirming derived data processing.
+Time Granularity Consistency with Source:
+When the backtest_time advances because of a 1m bar being processed, the data that moves from the queue into session_data must adhere to 1-minute time boundaries (e.g., timestamps like 10:30:00, 10:31:00).
+When the advance is due to 1s bars, the timestamps can be more granular (e.g., 10:30:00, 10:30:01).
+Quote data timestamps can be at exact real-time precision.
+System Behavior and Merging Logic
+Simultaneous Processing Logic: If multiple queues for the same symbol contain data at the same timestamp (e.g., a 1s bar and a quote at the exact same time), the system's defined priority for processing them must be consistently reflected in which data appears in session_data first or how the backtest_time advances.
+Queue Exhaustion: If the only data remaining for the entire backtest is in the ticker_A_1m queue, the backtest_time should advance strictly in 1-minute increments until that queue is exhausted.
+Edge Cases and Session Management
+End-of-Session Behavior: When all queues for all symbols are empty, the backtest_time must stop advancing. The final backtest_time should align with the latest newest timestamp found across all session_data columns in the previous row.
+Missing Data Gaps: The system handles "missing bars." This means it is valid for a backtest_time to jump by more than the expected 1 minute (e.g., jump from 10:00 to 10:05). The critical test is that it never jumps backwards or jumps less than the minimum expected increment (1 second or exact tick time).
+Single Day Session Constraint: All timestamps in the entire CSV file (queues and session data) must fall within a single trading day/session window. You should not see a change of date in any timestamp column within the file.
+
+
+
+timestamp,system_state,system_mode,session_date,session_time,session_active,session_ended,active_symbols,AAPL_volume,AAPL_high,AAPL_low,AAPL_1m_bars,AAPL_5m_bars,AAPL_bar_quality,AAPL_bars_updated,AAPL_first_bar_ts,AAPL_last_bar_ts,RIVN_volume,RIVN_high,RIVN_low,RIVN_1m_bars,RIVN_5m_bars,RIVN_bar_quality,RIVN_bars_updated,RIVN_first_bar_ts,RIVN_last_bar_ts,RIVN_queue_BAR_size,RIVN_queue_BAR_oldest,RIVN_queue_BAR_newest,AAPL_queue_BAR_size,AAPL_queue_BAR_oldest,AAPL_queue_BAR_newest,RIVN_pending_bar_ts,AAPL_pending_bar_ts
+
+
+
 
 Pricing for Claude Opus 4.1 starts at $15 per million input tokens and $75 per million output tokens, 
 with up to 90% cost savings with prompt caching and 50% cost savings with batch processing. 

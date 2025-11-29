@@ -291,7 +291,7 @@ system start session_configs/live_session_example.json
 
 ```python
 # The system will automatically apply mode and backtest config
-await system_mgr.start("session_configs/example_session.json")
+system_mgr.start("session_configs/example_session.json")
 
 # Access configuration
 if system_mgr.session_config:

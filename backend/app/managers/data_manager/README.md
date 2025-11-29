@@ -292,9 +292,9 @@ current = dm.get_current_time()
 **Initialization Requirements**:
 Before calling `get_current_time()` in backtest mode, you **must** initialize the clock:
 ```python
-await dm.init_backtest(session)  # Sets clock to DataManager.backtest_start_date at market open
+dm.init_backtest(session)  # Sets clock to DataManager.backtest_start_date at market open
 # OR
-await dm.reset_backtest_clock()  # Resets to start of backtest window (DataManager.backtest_start_date at market open)
+dm.reset_backtest_clock()  # Resets to start of backtest window (DataManager.backtest_start_date at market open)
 ```
 
 **IMPORTANT**: Both `init_backtest()` and `reset_backtest_clock()` are now **async** methods that automatically stop all active streams before modifying backtest time. This prevents inconsistencies when time is reset while streams are actively running.
@@ -447,7 +447,7 @@ async for bar in dm.stream_bars(session, ["AAPL", "TSLA"]):
     
     # User decides to restart backtest
     if restart_needed:
-        await dm.reset_backtest_clock()  # Automatically stops all streams
+        dm.reset_backtest_clock()  # Automatically stops all streams
         # Previous stream loop will exit, safe to start new streams
         break
 
@@ -470,7 +470,7 @@ if now.time() >= time(9, 30) and now.time() <= time(16, 0):
 **Pattern 2: Timestamp Data Operations**
 ```python
 # Get bars up to current time
-bars = await dm.get_bars(session, "AAPL", start, dm.get_current_time())
+bars = dm.get_bars(session, "AAPL", start, dm.get_current_time())
 ```
 
 **Pattern 3: Check Backtest Progress**
@@ -494,7 +494,7 @@ async for bar in dm.stream_bars(session, ["AAPL", "TSLA", "MSFT"]):
     
     # Emergency stop condition
     if should_stop():
-        await dm.stop_all_streams()  # Clean shutdown of all streams
+        dm.stop_all_streams()  # Clean shutdown of all streams
         break
 
 # Or from CLI

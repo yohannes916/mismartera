@@ -10,14 +10,13 @@ Key Features:
 - Assumes off-hours data is already filtered during import
 """
 
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.logger import logger
 from app.repositories.trading_calendar_repository import TradingCalendarRepository
-from app.models.trading_calendar import TradingHours
 
 
 @dataclass
@@ -97,32 +96,33 @@ async def calculate_expected_trading_minutes(
             return cached
     
     # Calculate expected minutes
+    # Get TimeManager to query trading sessions from database
+    from app.managers.system_manager import get_system_manager
+    system_mgr = get_system_manager()
+    time_mgr = system_mgr.get_time_manager()
+    
     total_minutes = 0
     current_date = start_date
     
-    market_open = time.fromisoformat(TradingHours.MARKET_OPEN)
-    market_close_standard = time.fromisoformat(TradingHours.MARKET_CLOSE)
-    
     while current_date <= end_date:
-        # Check if it's a trading day
-        holiday = await TradingCalendarRepository.get_holiday(session, current_date)
+        # Get trading session for this date (accounts for holidays and early closes)
+        trading_session = time_mgr.get_trading_session(session, current_date)
         
-        if holiday and holiday.is_closed:
+        if not trading_session or trading_session.is_holiday:
             # Market closed this day
             current_date += timedelta(days=1)
             continue
         
-        # Check for early close
-        if holiday and holiday.early_close_time:
-            market_close = holiday.early_close_time
-        else:
-            market_close = market_close_standard
+        # Get market hours for this day (handles early closes automatically)
+        open_dt = trading_session.get_regular_open_datetime()
+        close_dt = trading_session.get_regular_close_datetime()
+        
+        if trading_session.early_close and trading_session.early_close_time:
+            # Use early close time if applicable
+            close_dt = datetime.combine(current_date, trading_session.early_close_time)
+            close_dt = close_dt.replace(tzinfo=open_dt.tzinfo)
         
         # Calculate minutes for this day
-        # From market_open (9:30) to market_close (16:00 or earlier)
-        open_dt = datetime.combine(current_date, market_open)
-        close_dt = datetime.combine(current_date, market_close)
-        
         day_minutes = int((close_dt - open_dt).total_seconds() / 60)
         total_minutes += day_minutes
         

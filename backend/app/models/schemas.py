@@ -30,58 +30,6 @@ class AccountInfo(Base):
     user = relationship("User", back_populates="account_info")
 
 
-class PositionLegacy(Base):
-    """Current stock positions (DEPRECATED - use app.models.account.Position instead)"""
-    __tablename__ = "positions_legacy"
-    
-    id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-    symbol = Column(String(10), index=True, nullable=False)
-    quantity = Column(Float, nullable=False)
-    average_price = Column(Float, nullable=False)
-    current_price = Column(Float)
-    market_value = Column(Float)
-    cost_basis = Column(Float)
-    unrealized_pnl = Column(Float)
-    unrealized_pnl_percent = Column(Float)
-    day_change = Column(Float)
-    day_change_percent = Column(Float)
-    last_updated = Column(DateTime(timezone=True), onupdate=func.now())
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    
-    # Relationships
-    user = relationship("User", back_populates="positions")
-
-
-class OrderLegacy(Base):
-    """Order history and status (DEPRECATED - use app.models.orders.Order instead)"""
-    __tablename__ = "orders_legacy"
-    
-    id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-    schwab_order_id = Column(String(100), unique=True, index=True)
-    symbol = Column(String(10), index=True, nullable=False)
-    order_type = Column(String(20), nullable=False)  # MARKET, LIMIT, STOP, STOP_LIMIT
-    side = Column(String(10), nullable=False)  # BUY, SELL
-    quantity = Column(Float, nullable=False)
-    filled_quantity = Column(Float, default=0.0)
-    price = Column(Float)  # For limit orders
-    stop_price = Column(Float)  # For stop orders
-    status = Column(String(20), nullable=False)  # PENDING, FILLED, PARTIAL, CANCELLED, REJECTED
-    filled_price = Column(Float)
-    commission = Column(Float, default=0.0)
-    time_in_force = Column(String(10), default="DAY")  # DAY, GTC, IOC, FOK
-    notes = Column(Text)
-    placed_at = Column(DateTime(timezone=True), server_default=func.now())
-    filled_at = Column(DateTime(timezone=True))
-    cancelled_at = Column(DateTime(timezone=True))
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
-    
-    # Relationships
-    user = relationship("User", back_populates="orders")
-
-
 class MarketData(Base):
     """OHLCV market data for backtesting and analysis"""
     __tablename__ = "market_data"

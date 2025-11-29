@@ -4,7 +4,7 @@ Detects next trading sessions and determines when to trigger prefetch operations
 
 Used by PrefetchManager to anticipate and prepare for upcoming sessions.
 """
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Optional
 from app.managers.data_manager.trading_calendar import get_trading_calendar, TradingCalendar
 from app.config import settings
@@ -84,7 +84,7 @@ class SessionDetector:
             prefetch_window_minutes = settings.PREFETCH_WINDOW_MINUTES
         
         # Calculate session start time
-        session_start = datetime.combine(next_session, self.MARKET_OPEN)
+        session_start = datetime.combine(next_session, self.MARKET_OPEN, tzinfo=timezone.utc)
         
         # Calculate time until session
         time_until_session = (session_start - current_time).total_seconds()
@@ -191,7 +191,7 @@ class SessionDetector:
             prefetch_window_minutes = settings.PREFETCH_WINDOW_MINUTES
         
         # Session starts at market open
-        session_start = datetime.combine(session_date, self.MARKET_OPEN)
+        session_start = datetime.combine(session_date, self.MARKET_OPEN, tzinfo=timezone.utc)
         
         # Prefetch starts N minutes before
         prefetch_start = session_start - timedelta(minutes=prefetch_window_minutes)
@@ -219,7 +219,7 @@ class SessionDetector:
         if next_session is None:
             return None
         
-        session_start = datetime.combine(next_session, self.MARKET_OPEN)
+        session_start = datetime.combine(next_session, self.MARKET_OPEN, tzinfo=timezone.utc)
         time_remaining = session_start - current_time
         
         return time_remaining if time_remaining.total_seconds() > 0 else timedelta(0)

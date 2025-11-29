@@ -5,8 +5,8 @@ from typing import List, Dict, Optional
 
 
 @dataclass(frozen=True)
-class DataCommandMeta:
-    """Metadata for a `data` subcommand.
+class CommandMeta:
+    """Metadata for a CLI command.
 
     This is the single source of truth for:
     - usage string
@@ -21,6 +21,10 @@ class DataCommandMeta:
     examples: List[str]
     suggests_symbols_at: Optional[int] = None  # index of arg that is a symbol
     enum_args: Dict[str, List[str]] | None = None  # arg name -> allowed values
+
+
+# Alias for backward compatibility
+DataCommandMeta = CommandMeta
 
 
 DATA_COMMANDS: List[DataCommandMeta] = [
@@ -245,36 +249,6 @@ DATA_COMMANDS: List[DataCommandMeta] = [
 
 
 @dataclass(frozen=True)
-class HolidayCommandMeta:
-    name: str
-    usage: str
-    description: str
-    examples: List[str]
-
-
-HOLIDAY_COMMANDS: List[HolidayCommandMeta] = [
-    HolidayCommandMeta(
-        name="import",
-        usage="holidays import <file>",
-        description="Import market holiday schedule from CSV",
-        examples=["holidays import data/holidays.csv"],
-    ),
-    HolidayCommandMeta(
-        name="list",
-        usage="holidays list \[YYYY]",
-        description="List market holidays for year YYYY (or all if omitted)",
-        examples=["holidays list 2025"],
-    ),
-    HolidayCommandMeta(
-        name="delete",
-        usage="holidays delete \[YYYY]",
-        description="Delete market holidays for year YYYY",
-        examples=["holidays delete 2025"],
-    ),
-]
-
-
-@dataclass(frozen=True)
 class MarketCommandMeta:
     name: str
     usage: str
@@ -352,9 +326,9 @@ class GeneralCommandMeta:
 GENERAL_COMMANDS: List[GeneralCommandMeta] = [
     GeneralCommandMeta(
         name="help",
-        usage="help",
-        description="Show this help message",
-        examples=["help"],
+        usage="help [namespace] [command]",
+        description="Show help - all commands, specific namespace, or detailed command info",
+        examples=["help", "help data", "help time holidays import", "help data import-api"],
     ),
     GeneralCommandMeta(
         name="history",
@@ -562,5 +536,162 @@ SCHWAB_COMMANDS: List[SchwabCommandMeta] = [
         usage="schwab disconnect",
         description="Show how to logically disconnect Schwab",
         examples=["schwab disconnect"],
+    ),
+]
+
+
+# ============================================================================
+# EXECUTION COMMANDS
+# ============================================================================
+
+@dataclass(frozen=True)
+class ExecutionCommandMeta:
+    """Metadata for execution/trading commands."""
+    name: str
+    usage: str
+    description: str
+    examples: List[str]
+
+
+EXECUTION_COMMANDS: List[ExecutionCommandMeta] = [
+    ExecutionCommandMeta(
+        name="api",
+        usage="execution api <provider>",
+        description="Select execution/trading API provider (alpaca, schwab, mismartera)",
+        examples=["execution api alpaca", "execution api schwab", "execution api mismartera"],
+    ),
+    ExecutionCommandMeta(
+        name="balance",
+        usage="execution balance [--account <id>] [--no-sync]",
+        description="Show account balance information",
+        examples=["execution balance", "execution balance --no-sync"],
+    ),
+    ExecutionCommandMeta(
+        name="positions",
+        usage="execution positions [--account <id>] [--no-sync]",
+        description="Show current positions",
+        examples=["execution positions", "execution positions --no-sync"],
+    ),
+    ExecutionCommandMeta(
+        name="orders",
+        usage="execution orders [--status <status>] [--days <n>]",
+        description="Show order history",
+        examples=["execution orders", "execution orders --status FILLED --days 7"],
+    ),
+    ExecutionCommandMeta(
+        name="order",
+        usage="execution order <symbol> <quantity> [--side BUY|SELL] [--type MARKET|LIMIT] [--price <price>]",
+        description="Place a new order",
+        examples=["execution order AAPL 100 --side BUY", "execution order TSLA 50 --type LIMIT --price 250.50"],
+    ),
+    ExecutionCommandMeta(
+        name="cancel",
+        usage="execution cancel <order_id>",
+        description="Cancel an order",
+        examples=["execution cancel ORD_123ABC"],
+    ),
+]
+
+
+# Time Manager Commands
+TimeCommandMeta = CommandMeta
+
+TIME_COMMANDS: List[TimeCommandMeta] = [
+    TimeCommandMeta(
+        name="current",
+        usage="time current [--timezone <tz>]",
+        description="Get current system time (live or backtest mode)",
+        examples=["time current", "time current --timezone UTC", "time current --timezone Asia/Tokyo"],
+    ),
+    TimeCommandMeta(
+        name="market",
+        usage="time market [--exchange <exch>] [--extended]",
+        description="Check if market is currently open",
+        examples=["time market", "time market --exchange NASDAQ", "time market --extended"],
+    ),
+    TimeCommandMeta(
+        name="session",
+        usage="time session [<date>] [--exchange <exch>]",
+        description="Get trading session information for a date",
+        examples=["time session", "time session 2024-11-25", "time session 2024-12-25 --exchange NASDAQ"],
+    ),
+    TimeCommandMeta(
+        name="next",
+        usage="time next [<from_date>] [--n <count>] [--exchange <exch>]",
+        description="Get the next N trading dates",
+        examples=["time next", "time next 2024-11-27", "time next 2024-11-27 --n 5"],
+    ),
+    TimeCommandMeta(
+        name="days",
+        usage="time days <start_date> <end_date> [--exchange <exch>]",
+        description="Count trading days in a date range",
+        examples=["time days 2024-11-01 2024-11-30", "time days 2024-01-01 2024-12-31 --exchange NASDAQ"],
+    ),
+    TimeCommandMeta(
+        name="holidays",
+        usage="time holidays [--year <year>] [--exchange <exch>]",
+        description="List holidays for a year",
+        examples=["time holidays", "time holidays --year 2024", "time holidays --year 2025 --exchange NASDAQ"],
+    ),
+    TimeCommandMeta(
+        name="convert",
+        usage="time convert <datetime> <from_tz> <to_tz>",
+        description="Convert datetime between timezones",
+        examples=[
+            'time convert "2024-11-25 10:30:00" America/New_York UTC',
+            'time convert "2024-11-25 15:30:00" UTC Asia/Tokyo'
+        ],
+    ),
+    TimeCommandMeta(
+        name="holidays import",
+        usage="time holidays import <file> [--exchange <group>] [--dry-run]",
+        description="Import holidays from JSON/CSV file (auto-uses configured exchange's group)",
+        examples=[
+            "time holidays import data/holidays/us_equity_2024.json",
+            "time holidays import holidays.csv --exchange US_EQUITY",
+            "time holidays import holidays.json --dry-run"
+        ],
+    ),
+    TimeCommandMeta(
+        name="list-groups",
+        usage="time list-groups",
+        description="List all available exchange groups for holiday management",
+        examples=["time list-groups"],
+    ),
+    TimeCommandMeta(
+        name="backtest-window",
+        usage="time backtest-window <start> \[end]",
+        description="Set backtest window dates (YYYY-MM-DD)",
+        examples=["time backtest-window 2024-11-01 2024-11-30", "time backtest-window 2024-11-01"],
+    ),
+    TimeCommandMeta(
+        name="advance",
+        usage="time advance [--extended] [--exchange <exch>]",
+        description="Advance backtest time to next market opening (backtest mode only)",
+        examples=["time advance", "time advance --extended", "time advance --exchange NASDAQ"],
+    ),
+    TimeCommandMeta(
+        name="reset",
+        usage="time reset [--extended]",
+        description="Reset backtest time to window start (backtest mode only)",
+        examples=["time reset", "time reset --extended"],
+    ),
+    TimeCommandMeta(
+        name="config",
+        usage="time config",
+        description="Show current configuration (exchange, window, mode)",
+        examples=["time config"],
+    ),
+    TimeCommandMeta(
+        name="exchange",
+        usage="time exchange <exchange> [asset_class]",
+        description="Set primary exchange for all time/calendar operations (live and backtest)",
+        examples=["time exchange NYSE", "time exchange NASDAQ EQUITY"],
+    ),
+    TimeCommandMeta(
+        name="holidays delete",
+        usage="time holidays delete <year> [--exchange <exch>]",
+        description="Delete holidays for a specific year and exchange (uses primary exchange if not specified)",
+        examples=["time holidays delete 2024", "time holidays delete 2025 --exchange NASDAQ"],
     ),
 ]

@@ -97,26 +97,26 @@ def is_session_active(self) -> bool:
 **Before:**
 ```python
 # ❌ Implied it set the date
-await session_data.start_new_session(date(2024, 11, 18))
+session_data.start_new_session(date(2024, 11, 18))
 ```
 
 **After:**
 ```python
 # ✓ Just resets data, date comes from TimeProvider
-await session_data.reset_session()  # No date parameter!
+session_data.reset_session()  # No date parameter!
 ```
 
 ### 4. Updated `roll_session()`
 
 **Before:**
 ```python
-await session_data.roll_session(new_date)
+session_data.roll_session(new_date)
 self.current_session_date = new_date  # ❌ Stored locally
 ```
 
 **After:**
 ```python
-await session_data.roll_session(new_date)
+session_data.roll_session(new_date)
 # Date is informational only, TimeProvider should be updated separately
 # session_data gets date from TimeProvider automatically ✓
 ```
@@ -136,7 +136,7 @@ if current_date:
 **System Start:**
 ```python
 # Before
-await session_data.start_new_session(session_date)  # ❌ Set date
+session_data.start_new_session(session_date)  # ❌ Set date
 
 # After
 # No need to set date - TimeProvider already has it! ✓
@@ -221,10 +221,10 @@ if session_data.current_session_date:  # AttributeError!
 **✓ Correct Way:**
 ```python
 # Initialize backtest (sets TimeProvider)
-await data_manager.init_backtest(session)
+data_manager.init_backtest(session)
 
 # Register symbols (session_data gets date from TimeProvider automatically)
-await session_data.register_symbol("AAPL")
+session_data.register_symbol("AAPL")
 
 # Date comes from TimeProvider - no need to set it! ✓
 ```
@@ -232,7 +232,7 @@ await session_data.register_symbol("AAPL")
 **❌ Wrong Way:**
 ```python
 # Don't manually set date (method doesn't exist!)
-await session_data.start_new_session(date(2024, 11, 18))  # Method removed!
+session_data.start_new_session(date(2024, 11, 18))  # Method removed!
 ```
 
 ### Resetting Session
@@ -240,7 +240,7 @@ await session_data.start_new_session(date(2024, 11, 18))  # Method removed!
 **✓ Correct Way:**
 ```python
 # Just reset data, date comes from TimeProvider
-await session_data.reset_session()
+session_data.reset_session()
 ```
 
 ## Migration Guide
@@ -264,17 +264,17 @@ if current_date:
 
 **Before:**
 ```python
-await session_data.start_new_session(date(2024, 11, 18))
+session_data.start_new_session(date(2024, 11, 18))
 ```
 
 **After:**
 ```python
 # Option 1: Just reset (if TimeProvider already set)
-await session_data.reset_session()
+session_data.reset_session()
 
 # Option 2: Set TimeProvider first, then reset
 time_provider.set_current_time(datetime(2024, 11, 18, 9, 30))
-await session_data.reset_session()
+session_data.reset_session()
 ```
 
 ### For Tests

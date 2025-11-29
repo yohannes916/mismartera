@@ -161,13 +161,13 @@ from app.managers import get_system_manager
 
 system_mgr = get_system_manager()
 data_manager = system_mgr.get_data_manager()
-bars = await data_manager.get_bars(session, symbol, start, end)
+bars = data_manager.get_bars(session, symbol, start, end)
 ```
 
 ❌ **Incorrect:**
 ```python
 # CLI command - NEVER do this!
-bars = await MarketDataRepository.get_bars_by_symbol(...)
+bars = MarketDataRepository.get_bars_by_symbol(...)
 
 # Also DEPRECATED (v1.0 pattern):
 data_manager = DataManager()  # Don't instantiate directly
@@ -411,18 +411,18 @@ analysis_engine = system_mgr.get_analysis_engine()
 system_mgr.start()
 
 # 4. Get current bar from DataManager
-current_bar = await data_manager.get_latest_bar(session, "AAPL")
+current_bar = data_manager.get_latest_bar(session, "AAPL")
 
 # 5. Get recent bars for context
 start_time = current_bar.timestamp - timedelta(minutes=50)
-recent_bars = await data_manager.get_bars(session, "AAPL", start_time, current_bar.timestamp)
+recent_bars = data_manager.get_bars(session, "AAPL", start_time, current_bar.timestamp)
 
 # 6. Analyze with AnalysisEngine
-analysis = await analysis_engine.analyze_bar(session, "AAPL", current_bar, recent_bars)
+analysis = analysis_engine.analyze_bar(session, "AAPL", current_bar, recent_bars)
 
 # 7. If decision is BUY, place order via ExecutionManager
 if analysis["decision"]["action"] == "BUY":
-    order = await execution_manager.place_order(
+    order = execution_manager.place_order(
         session=session,
         account_id="default",
         symbol="AAPL",
@@ -467,7 +467,7 @@ system_mgr.start()
 for bar in historical_bars:
     # Time is automatically advanced by stream coordinator
     # System can be paused/resumed via system_mgr
-    await process_bar(bar)
+    process_bar(bar)
 
 # Control system state
 system_mgr.pause()   # Pause backtest (time stops advancing)

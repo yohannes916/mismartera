@@ -227,7 +227,7 @@ headers = {
 
 # After: OAuth implementation
 from app.integrations.schwab_client import schwab_client
-access_token = await schwab_client.get_valid_access_token()  # Auto-refreshes
+access_token = schwab_client.get_valid_access_token()  # Auto-refreshes
 
 headers = {
     "Authorization": f"Bearer {access_token}",  # ← CORRECT

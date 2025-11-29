@@ -16,9 +16,10 @@ class TradeSignal(str, Enum):
 
 
 class BarData(BaseModel):
-    """Single 1-minute OHLCV bar"""
+    """OHLCV bar with flexible interval support (1s, 1m, 5m, etc.)"""
     timestamp: datetime
     symbol: str
+    interval: str = "1m"  # Bar interval: 1s, 1m, 5m, 15m, etc.
     open: float = Field(gt=0)
     high: float = Field(gt=0)
     low: float = Field(gt=0)

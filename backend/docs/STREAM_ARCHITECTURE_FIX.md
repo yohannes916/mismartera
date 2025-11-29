@@ -27,7 +27,7 @@ self._active_streams: Dict[Tuple[str, str], bool] = {}
 ```python
 # ❌ Fetched entire backtest window (multiple days)
 end_date = self.backtest_end_date  # e.g., 4 days away
-bars = await fetch_bars(start=now, end=end_date)  # Fetch 1,560 bars!
+bars = fetch_bars(start=now, end=end_date)  # Fetch 1,560 bars!
 
 # ❌ Spawned background task (non-blocking)
 asyncio.create_task(feed_bars(symbol))
@@ -42,15 +42,15 @@ tracker = get_session_tracker()
 current_date = now.date()
 start_time = datetime.combine(current_date, MARKET_OPEN)  # 9:30 AM
 end_time = datetime.combine(current_date, MARKET_CLOSE)   # 4:00 PM
-bars = await fetch_bars(start=start_time, end=end_time)   # ~390 bars
+bars = fetch_bars(start=start_time, end=end_time)   # ~390 bars
 
 # ✓ Blocks until fetch complete (synchronous)
-await fetch_bars_by_symbol(...)
+fetch_bars_by_symbol(...)
 
 # ✓ Uses session_data singleton
 session_data = get_session_data()
-await session_data.register_symbol(symbol)
-await session_data.mark_stream_active(symbol, "bars")
+session_data.register_symbol(symbol)
+session_data.mark_stream_active(symbol, "bars")
 ```
 
 ### 3. Updated `system_manager.start()`
@@ -58,13 +58,13 @@ await session_data.mark_stream_active(symbol, "bars")
 **OLD BEHAVIOR (Wrong):**
 ```python
 # ❌ Manually fetched data
-bars = await MarketDataRepository.get_bars_by_symbol(...)
+bars = MarketDataRepository.get_bars_by_symbol(...)
 
 # ❌ Manually registered with coordinator
 coordinator.register_stream(symbol, StreamType.BAR)
 
 # ❌ Manually registered with session_data
-await session_data.register_symbol(symbol)
+session_data.register_symbol(symbol)
 
 # ❌ Manually fed data
 coordinator.feed_data_list(symbol, stream_type, bars)
@@ -80,7 +80,7 @@ stream_iter = data_manager.stream_bars(
 )
 
 # Trigger initialization by consuming first item
-await stream_iter.__anext__()
+stream_iter.__anext__()
 
 # stream_bars() internally:
 # - Checks for duplicates in session_data
@@ -107,8 +107,8 @@ await stream_iter.__anext__()
       → If not: continue
    
    b. Register with session_data:
-      await session_data.register_symbol(symbol)
-      await session_data.mark_stream_active(symbol, "bars")
+      session_data.register_symbol(symbol)
+      session_data.mark_stream_active(symbol, "bars")
    
    c. Register with coordinator:
       coordinator.register_stream(symbol, StreamType.BAR)
@@ -117,14 +117,14 @@ await stream_iter.__anext__()
       current_date = time_provider.get_current_time().date()
       start = datetime.combine(current_date, MARKET_OPEN)  # 9:30 AM
       end = datetime.combine(current_date, MARKET_CLOSE)    # 4:00 PM
-      bars = await fetch_bars(symbol, start, end)  # ~390 bars
+      bars = fetch_bars(symbol, start, end)  # ~390 bars
    
    e. Add bars to session_data:
       for bar in bars:
-          await session_data.add_bar(symbol, bar)
+          session_data.add_bar(symbol, bar)
    
    f. Feed bars to coordinator:
-      await coordinator.feed_stream(symbol, bar_iterator)
+      coordinator.feed_stream(symbol, bar_iterator)
    
 4. Return to system_manager (streams started)
 5. System state = RUNNING
@@ -158,14 +158,14 @@ def _upkeep_symbol(symbol):
         
         # Prefetch next trading day
         if not symbol_data.has_data_for_date(next_date):
-            bars = await fetch_bars_for_date(symbol, next_date)
+            bars = fetch_bars_for_date(symbol, next_date)
             
             # Feed to coordinator
-            await coordinator.feed_stream(symbol, StreamType.BAR, bars)
+            coordinator.feed_stream(symbol, StreamType.BAR, bars)
             
             # Add to session_data
             for bar in bars:
-                await session_data.add_bar(symbol, bar)
+                session_data.add_bar(symbol, bar)
 ```
 
 ## Benefits
@@ -226,7 +226,7 @@ Marked bars stream active for AAPL
 ### Test Memory Usage
 ```python
 # Check bars in session_data
-symbol_data = await session_data.get_symbol_data("AAPL")
+symbol_data = session_data.get_symbol_data("AAPL")
 len(symbol_data.bars_1m)  # Should be ~390, not 1,560+
 ```
 
@@ -237,9 +237,9 @@ len(symbol_data.bars_1m)  # Should be ~390, not 1,560+
 **OLD:**
 ```python
 # ❌ Don't do this anymore
-bars = await MarketDataRepository.get_bars_by_symbol(...)
+bars = MarketDataRepository.get_bars_by_symbol(...)
 coordinator.register_stream(symbol, StreamType.BAR)
-await session_data.register_symbol(symbol)
+session_data.register_symbol(symbol)
 coordinator.feed_data_list(symbol, StreamType.BAR, bars)
 ```
 

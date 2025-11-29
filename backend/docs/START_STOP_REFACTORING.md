@@ -24,7 +24,7 @@ async def start(config_file_path: str):
     
     # STOP ALL EXISTING STREAMS (duplicate logic!)
     logger.info("Stopping all existing streams...")
-    await data_manager.stop_all_streams()
+    data_manager.stop_all_streams()
     logger.success("✓ All existing streams stopped")
 ```
 
@@ -34,7 +34,7 @@ async def start(config_file_path: str):
     # Stop system first to ensure clean state
     if self._state != SystemState.STOPPED:
         logger.info(f"System in {self._state.value} state, stopping first...")
-        await self.stop()
+        self.stop()
     
     # ... continue with start
     
@@ -107,7 +107,7 @@ if self._state == SystemState.PAUSED:
 **After:** Unified handling via `stop()`
 ```python
 if self._state != SystemState.STOPPED:
-    await self.stop()  # Handles RUNNING, PAUSED, or any state
+    self.stop()  # Handles RUNNING, PAUSED, or any state
 ```
 
 ### 4. Idempotent Operations ✅
@@ -116,13 +116,13 @@ Both `start()` and `stop()` are now idempotent:
 
 ```python
 # Can safely call multiple times
-await system_manager.stop()
-await system_manager.stop()  # Returns True, no error
-await system_manager.stop()  # Returns True, no error
+system_manager.stop()
+system_manager.stop()  # Returns True, no error
+system_manager.stop()  # Returns True, no error
 
-await system_manager.start(config)
-await system_manager.start(config)  # Stops first, then starts
-await system_manager.start(config)  # Stops first, then starts
+system_manager.start(config)
+system_manager.start(config)  # Stops first, then starts
+system_manager.start(config)  # Stops first, then starts
 ```
 
 ## State Transition Flow
@@ -158,7 +158,7 @@ User: system start
 ↓
 Check: state != STOPPED?
 ↓
-Call: await self.stop()
+Call: self.stop()
   → Stop all streams
   → Clear session config
   → State = STOPPED
@@ -175,7 +175,7 @@ User: system start
 ↓
 Check: state != STOPPED?
 ↓
-Call: await self.stop()
+Call: self.stop()
   → Stop all streams
   → Clear session config
   → State = STOPPED
@@ -209,7 +209,7 @@ Result: ✅ System started
 # This handles RUNNING, PAUSED, or already STOPPED states
 if self._state != SystemState.STOPPED:
     logger.info(f"System in {self._state.value} state, stopping first...")
-    await self.stop()
+    self.stop()
 ```
 
 **Lines 325-328 (REMOVED):**
@@ -217,7 +217,7 @@ if self._state != SystemState.STOPPED:
 # REMOVED - No longer needed!
 # STOP ALL EXISTING STREAMS
 # logger.info("Stopping all existing streams...")
-# await data_manager.stop_all_streams()
+# data_manager.stop_all_streams()
 # logger.success("✓ All existing streams stopped")
 ```
 
@@ -270,7 +270,7 @@ system@mismartera: system start config.json
 ### Scenario 1: Start from STOPPED
 ```python
 # State: STOPPED
-result = await system_manager.start("config.json")
+result = system_manager.start("config.json")
 # Expected: Starts normally
 # State: RUNNING
 ```
@@ -278,7 +278,7 @@ result = await system_manager.start("config.json")
 ### Scenario 2: Start from RUNNING
 ```python
 # State: RUNNING
-result = await system_manager.start("config.json")
+result = system_manager.start("config.json")
 # Expected: Stops first, then starts
 # Logs: "System in RUNNING state, stopping first..."
 # State: RUNNING (restarted)
@@ -287,7 +287,7 @@ result = await system_manager.start("config.json")
 ### Scenario 3: Start from PAUSED
 ```python
 # State: PAUSED
-result = await system_manager.start("config.json")
+result = system_manager.start("config.json")
 # Expected: Stops first, then starts
 # Logs: "System in PAUSED state, stopping first..."
 # State: RUNNING
@@ -296,18 +296,18 @@ result = await system_manager.start("config.json")
 ### Scenario 4: Multiple Stops
 ```python
 # State: RUNNING
-await system_manager.stop()  # Returns True
-await system_manager.stop()  # Returns True (idempotent)
-await system_manager.stop()  # Returns True (idempotent)
+system_manager.stop()  # Returns True
+system_manager.stop()  # Returns True (idempotent)
+system_manager.stop()  # Returns True (idempotent)
 # State: STOPPED
 ```
 
 ### Scenario 5: Multiple Starts
 ```python
 # State: STOPPED
-await system_manager.start("config.json")  # Fresh start
-await system_manager.start("config.json")  # Stops first, restarts
-await system_manager.start("config.json")  # Stops first, restarts
+system_manager.start("config.json")  # Fresh start
+system_manager.start("config.json")  # Stops first, restarts
+system_manager.start("config.json")  # Stops first, restarts
 # State: RUNNING (last config)
 ```
 

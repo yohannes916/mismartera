@@ -209,7 +209,7 @@ elif clear_downtrend and RSI < 30:
 # 4. High-value trades (>$10k)
 
 if signals_conflicting() or high_uncertainty():
-    claude_analysis = await ask_claude_probability(
+    claude_analysis = ask_claude_probability(
         bar_data=current_bar,
         indicators=calculated_indicators,
         context=recent_market_behavior
@@ -305,7 +305,7 @@ class ClaudeProbabilityAnalyzer:
             bar_data, indicators, context
         )
         
-        response = await claude_client.ask(prompt)
+        response = claude_client.ask(prompt)
         
         return self._parse_probability_response(response)
 ```
@@ -482,7 +482,7 @@ async def process_1min_bar(bar: BarData):
     
     if use_claude:
         # Deep analysis
-        claude_analysis = await claude_analyzer.analyze(
+        claude_analysis = claude_analyzer.analyze(
             bar, indicators, recent_context
         )
         

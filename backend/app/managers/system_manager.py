@@ -72,9 +72,15 @@ class SystemManager:
         WARNING: Do not call directly. Use get_system_manager() instead.
         """
         # Manager instances (lazy-loaded)
+        self._time_manager: Optional['TimeManager'] = None
         self._data_manager: Optional['DataManager'] = None
         self._execution_manager: Optional[object] = None  # TODO: Type when implemented
         self._analysis_engine: Optional[object] = None  # TODO: Type when implemented
+        
+        # Background threads (Phase 4 & 5)
+        self._data_processor: Optional[object] = None  # DataProcessor instance
+        self._quality_manager: Optional[object] = None  # DataQualityManager instance
+        self._processor_subscription: Optional[object] = None  # StreamSubscription for coordinator-processor sync
         
         # System-wide state
         self._initialized = False
@@ -83,12 +89,75 @@ class SystemManager:
         # Session configuration (loaded on start)
         self._session_config: Optional[SessionConfig] = None
         
+        # Exchange configuration (from session config)
+        self.exchange_group: str = "US_EQUITY"  # Default, updated on load_session_config
+        self.asset_class: str = "EQUITY"  # Default, updated on load_session_config
+        self.timezone: str = None  # Loaded from MarketHours database in _update_exchange_config
+        
         # Operation mode (live or backtest)
         from app.config import settings
         mode_str = settings.SYSTEM_OPERATING_MODE.lower()
         self._mode = OperationMode.LIVE if mode_str == "live" else OperationMode.BACKTEST
         
         logger.info(f"SystemManager initialized in {self._mode.value} mode")
+    
+    def _update_exchange_config(self) -> None:
+        """
+        Update exchange configuration from session config.
+        
+        Loads exchange_group, asset_class, and timezone from:
+        1. Session config (if available)
+        2. MarketHours database (to get timezone)
+        3. Falls back to hardcoded defaults
+        """
+        if self._session_config is None:
+            return
+        
+        # Update from session config
+        self.exchange_group = self._session_config.exchange_group
+        self.asset_class = self._session_config.asset_class
+        
+        # Get timezone from database
+        from app.models.database import SessionLocal
+        from app.models.trading_calendar import MarketHours as MarketHoursDB
+        
+        try:
+            with SessionLocal() as session:
+                market_hours = session.query(MarketHoursDB).filter(
+                    MarketHoursDB.exchange_group == self.exchange_group,
+                    MarketHoursDB.asset_class == self.asset_class,
+                    MarketHoursDB.is_active == True
+                ).first()
+                
+                if market_hours:
+                    self.timezone = market_hours.timezone
+                    logger.info(
+                        f"Exchange config: {self.exchange_group}/{self.asset_class} → {self.timezone}"
+                    )
+                else:
+                    # No fallback - timezone MUST come from database
+                    raise ValueError(
+                        f"No market hours found for {self.exchange_group}/{self.asset_class}. "
+                        f"Please run migration to add market hours data to database."
+                    )
+        except Exception as e:
+            logger.error(f"Error loading timezone from database: {e}")
+            logger.warning(f"Using default timezone: {self.timezone}")
+    
+    def get_time_manager(self) -> 'TimeManager':
+        """Get or create the TimeManager singleton.
+        
+        TimeManager is the single source of truth for all date/time and
+        market calendar operations.
+        
+        Returns:
+            TimeManager instance with reference to this SystemManager
+        """
+        if self._time_manager is None:
+            from app.managers.time_manager import TimeManager
+            self._time_manager = TimeManager(system_manager=self)
+            logger.info("TimeManager created by SystemManager")
+        return self._time_manager
     
     def get_data_manager(self) -> 'DataManager':
         """Get or create the DataManager singleton.
@@ -102,16 +171,19 @@ class SystemManager:
             logger.info("DataManager created by SystemManager")
         return self._data_manager
     
-    def get_execution_manager(self) -> object:
+    def get_execution_manager(self) -> 'ExecutionManager':
         """Get or create the ExecutionManager singleton.
         
         Returns:
-            ExecutionManager instance (placeholder for now)
+            ExecutionManager instance
         """
         if self._execution_manager is None:
-            # TODO: Implement ExecutionManager
-            logger.warning("ExecutionManager not yet implemented, returning placeholder")
-            self._execution_manager = object()  # Placeholder
+            from app.managers.execution_manager import ExecutionManager
+            # Initialize with default brokerage from settings
+            from app.config import settings
+            brokerage = getattr(settings, 'EXECUTION_MANAGER_DEFAULT_BROKERAGE', 'alpaca')
+            self._execution_manager = ExecutionManager(mode=self._mode.value, brokerage=brokerage)
+            logger.info(f"ExecutionManager created by SystemManager (brokerage: {brokerage})")
         return self._execution_manager
     
     def get_analysis_engine(self) -> object:
@@ -138,6 +210,8 @@ class SystemManager:
         logger.info("Initializing SystemManager and all subsystems...")
         
         # Create all managers in dependency order
+        # TimeManager first (no dependencies)
+        self.get_time_manager()
         self.get_data_manager()
         # self.get_execution_manager()  # TODO: Uncomment when implemented
         # self.get_analysis_engine()     # TODO: Uncomment when implemented
@@ -211,7 +285,7 @@ class SystemManager:
         """Check if system is in backtest mode."""
         return self._mode == OperationMode.BACKTEST
     
-    async def start(self, config_file_path: str) -> bool:
+    def start(self, config_file_path: str) -> bool:
         """Start the system run with a mandatory configuration file.
         
         STRICT REQUIREMENTS:
@@ -250,7 +324,7 @@ class SystemManager:
         # This handles RUNNING, PAUSED, or already STOPPED states
         if self._state != SystemState.STOPPED:
             logger.info(f"System in {self._state.value} state, stopping first...")
-            await self.stop()
+            self.stop()
         
         logger.info(f"Starting system with configuration: {config_file_path}")
         
@@ -280,6 +354,9 @@ class SystemManager:
             self._session_config = SessionConfig.from_dict(config_data)
             logger.success(f"Configuration loaded: {self._session_config.session_name}")
             
+            # Update exchange configuration from session config
+            self._update_exchange_config()
+            
             # Apply operation mode from configuration
             if self._session_config.mode != self._mode.value:
                 logger.info(f"Setting operation mode to: {self._session_config.mode}")
@@ -298,11 +375,12 @@ class SystemManager:
                 session_data.apply_config(self._session_config.session_data_config)
             
             # Apply backtest configuration if in backtest mode
-            # DataManager is responsible for backtest window and speed configuration
-            # TimeProvider will use these values as the single source of truth
+            # TimeManager is responsible for backtest window and time management
+            # DataManager is responsible for backtest speed configuration
+            time_manager = self.get_time_manager()
             data_manager = self.get_data_manager()
             if self._session_config.mode == "backtest" and self._session_config.backtest_config:
-                from app.models.database import AsyncSessionLocal
+                from app.models.database import SessionLocal
                 from datetime import datetime
                 
                 logger.info(
@@ -314,12 +392,12 @@ class SystemManager:
                 start_date = datetime.strptime(self._session_config.backtest_config.start_date, "%Y-%m-%d").date()
                 end_date = datetime.strptime(self._session_config.backtest_config.end_date, "%Y-%m-%d").date()
                 
-                # Set backtest window via DataManager (this also resets TimeProvider clock)
-                async with AsyncSessionLocal() as db_session:
-                    await data_manager.set_backtest_window(db_session, start_date, end_date)
+                # Set backtest window via TimeManager (this also resets backtest clock)
+                with SessionLocal() as db_session:
+                    time_manager.set_backtest_window(db_session, start_date, end_date)
                 
                 # Set backtest speed via DataManager (updates settings as single source of truth)
-                await data_manager.set_backtest_speed(self._session_config.backtest_config.speed_multiplier)
+                data_manager.set_backtest_speed(self._session_config.backtest_config.speed_multiplier)
                 logger.info(f"Backtest speed multiplier: {self._session_config.backtest_config.speed_multiplier}")
             
             # Apply API configuration
@@ -329,17 +407,17 @@ class SystemManager:
             # START CONFIGURED STREAMS
             logger.info(f"Starting {len(self._session_config.data_streams)} configured stream(s)...")
             
-            from app.models.database import AsyncSessionLocal
+            from app.models.database import SessionLocal
             
             # Initialize backtest if needed
-            if self._session_config.mode == "backtest" and data_manager.backtest_start_date is None:
-                async with AsyncSessionLocal() as init_session:
-                    await data_manager.init_backtest(init_session)
+            if self._session_config.mode == "backtest" and time_manager.backtest_start_date is None:
+                with SessionLocal() as init_session:
+                    time_manager.init_backtest(init_session)
             
-            # Verify TimeProvider is available
-            current_time = data_manager.get_current_time()
+            # Verify TimeManager is available
+            current_time = time_manager.get_current_time()
             session_date = current_time.date()
-            logger.info(f"Session date from TimeProvider: {session_date}")
+            logger.info(f"Session date from TimeManager: {session_date}")
             
             # Track stream startup results
             streams_started = 0
@@ -359,11 +437,11 @@ class SystemManager:
                     if not stream_config.interval:
                         raise ValueError(f"Bar stream for {stream_config.symbol} requires an interval")
                     
-                    # ENFORCE: Only 1m bars can be streamed
+                    # ENFORCE: Only 1s or 1m bars can be streamed as base intervals
                     # Derived intervals (5m, 15m, etc.) are computed by the upkeep thread
-                    if stream_config.interval != "1m":
+                    if stream_config.interval not in ["1s", "1m"]:
                         raise ValueError(
-                            f"Stream coordinator only supports 1m bars. "
+                            f"Stream coordinator only supports 1s or 1m bars. "
                             f"Symbol {stream_config.symbol} has interval '{stream_config.interval}'. "
                             f"Derived intervals (5m, 15m, etc.) are automatically computed by the data upkeep thread."
                         )
@@ -388,10 +466,10 @@ class SystemManager:
                     logger.info(f"Starting bar streams ({interval}) for {len(symbols)} symbol(s): {', '.join(symbols)}")
                     
                     try:
-                        async with AsyncSessionLocal() as stream_session:
+                        with SessionLocal() as stream_session:
                             # Call start_bar_streams() - blocks during fetch, then returns
                             # Streams continue running in coordinator worker thread
-                            count = await data_manager.start_bar_streams(
+                            count = data_manager.start_bar_streams(
                                 stream_session,
                                 symbols=symbols,
                                 interval=interval
@@ -426,6 +504,59 @@ class SystemManager:
             
             # CRITICAL: Only transition to RUNNING after streams are started
             self._state = SystemState.RUNNING
+            
+            # Start data processor (Phase 4) and quality manager (Phase 5)
+            # Replaces old DataUpkeepThread with focused, event-driven threads
+            from app.threads.data_processor import DataProcessor
+            from app.threads.data_quality_manager import DataQualityManager
+            from app.threads.sync.stream_subscription import StreamSubscription
+            from app.config import settings
+            
+            if settings.DATA_UPKEEP_ENABLED:
+                # Create DataProcessor (derived bars + real-time indicators)
+                processor = DataProcessor(
+                    session_data=session_data,
+                    system_manager=self,
+                    session_config=self._session_config,
+                    metrics=self._performance_metrics
+                )
+                
+                # Create DataQualityManager (quality measurement + gap filling)
+                quality_manager = DataQualityManager(
+                    session_data=session_data,
+                    system_manager=self,
+                    session_config=self._session_config,
+                    metrics=self._performance_metrics,
+                    data_manager=data_manager
+                )
+                
+                # Set up subscription for coordinator-processor synchronization
+                processor_subscription = StreamSubscription()
+                processor.set_coordinator_subscription(processor_subscription)
+                
+                # Note: Analysis engine queue will be wired in Phase 7
+                # processor.set_analysis_engine_queue(analysis_queue)
+                
+                # Wire threads into coordinator
+                coordinator.set_data_processor(processor, processor_subscription)
+                coordinator.set_quality_manager(quality_manager)
+                
+                # Start threads
+                processor.start()
+                quality_manager.start()
+                
+                logger.info("✓ Data processor started (derived bars, indicators)")
+                logger.info("✓ Quality manager started (quality measurement, gap filling)")
+                
+                # Store references for cleanup
+                self._data_processor = processor
+                self._quality_manager = quality_manager
+                self._processor_subscription = processor_subscription
+            else:
+                self._data_processor = None
+                self._quality_manager = None
+                self._processor_subscription = None
+                logger.warning("Data processor and quality manager disabled in settings")
             
             # Build success message
             success_msg = (
@@ -530,7 +661,7 @@ class SystemManager:
         logger.success("System resumed")
         return True
     
-    async def stop(self) -> bool:
+    def stop(self) -> bool:
         """Stop the system run.
         
         Transitions from any state to STOPPED.
@@ -545,10 +676,25 @@ class SystemManager:
         
         logger.info(f"Stopping system from state: {self._state.value}...")
         
+        # Stop processor and quality manager first (so they stop processing while streams are still active)
+        if hasattr(self, '_data_processor') and self._data_processor is not None:
+            logger.info("Stopping data processor...")
+            self._data_processor.stop()
+            self._data_processor.join(timeout=5.0)
+            self._data_processor = None
+            logger.success("Data processor stopped")
+        
+        if hasattr(self, '_quality_manager') and self._quality_manager is not None:
+            logger.info("Stopping quality manager...")
+            self._quality_manager.stop()
+            self._quality_manager.join(timeout=5.0)
+            self._quality_manager = None
+            logger.success("Quality manager stopped")
+        
         # Stop all data streams if data manager exists
         if self._data_manager is not None:
             logger.info("Stopping all active data streams...")
-            await self._data_manager.stop_all_streams()
+            self._data_manager.stop_all_streams()
             logger.success("All data streams stopped")
         
         # Clear session configuration

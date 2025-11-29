@@ -123,7 +123,7 @@ async def exchange_authorization_code(auth_code: str):
     
     auth = (settings.SCHWAB_APP_KEY, settings.SCHWAB_APP_SECRET)
     
-    response = await client.post(url, data=data, auth=auth)
+    response = client.post(url, data=data, auth=auth)
     tokens = response.json()
     
     # Store tokens securely
@@ -168,7 +168,7 @@ async def get_valid_access_token():
     
     if tokens["expires_at"] < datetime.now():
         # Token expired, refresh it
-        tokens = await refresh_access_token(tokens["refresh_token"])
+        tokens = refresh_access_token(tokens["refresh_token"])
         store_tokens(tokens)
     
     return tokens["access_token"]
@@ -187,7 +187,7 @@ async def refresh_access_token(refresh_token: str):
     
     auth = (settings.SCHWAB_APP_KEY, settings.SCHWAB_APP_SECRET)
     
-    response = await client.post(url, data=data, auth=auth)
+    response = client.post(url, data=data, auth=auth)
     return response.json()
 ```
 
@@ -197,7 +197,7 @@ async def refresh_access_token(refresh_token: str):
 ```python
 async def fetch_1m_bars(symbol, start, end):
     # Get valid token
-    access_token = await get_valid_access_token()
+    access_token = get_valid_access_token()
     
     headers = {
         "Authorization": f"Bearer {access_token}",  # ← CORRECT
@@ -205,7 +205,7 @@ async def fetch_1m_bars(symbol, start, end):
     }
     
     # Make API request
-    response = await client.get(url, headers=headers, params=params)
+    response = client.get(url, headers=headers, params=params)
     ...
 ```
 
@@ -271,11 +271,11 @@ class SchwabClient:
 # New commands
 elif cmd == 'schwab':
     if subcmd == 'auth-start':
-        await schwab_auth_start()
+        schwab_auth_start()
     elif subcmd == 'auth-status':
-        await schwab_auth_status()
+        schwab_auth_status()
     elif subcmd == 'auth-logout':
-        await schwab_auth_logout()
+        schwab_auth_logout()
 ```
 
 ### 3. `app/managers/data_manager/integrations/schwab_data.py`
@@ -283,7 +283,7 @@ elif cmd == 'schwab':
 async def fetch_1m_bars(symbol, start, end):
     # Get valid OAuth token
     from app.integrations.schwab_client import schwab_client
-    access_token = await schwab_client.get_valid_access_token()
+    access_token = schwab_client.get_valid_access_token()
     
     # Use token in request
     headers = {

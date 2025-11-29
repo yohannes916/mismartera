@@ -1,13 +1,9 @@
 """
 DataManager Repositories
-Database access layer for market data, tick data, and holidays
-"""
-from app.repositories.market_data_repository import MarketDataRepository
-from app.managers.data_manager.repositories.holiday_repo import (
-    TradingCalendarRepository as HolidayRepository
-)
+Parquet-based storage for market data (no database)
 
-__all__ = [
-    'MarketDataRepository',
-    'HolidayRepository',
-]
+NOTE: Holiday management has been moved to TimeManager.
+Use time_manager.TradingCalendarRepository for holiday operations.
+"""
+
+__all__ = []

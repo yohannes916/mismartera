@@ -31,7 +31,7 @@ async def start(config_file_path: str):
     
     # Setup streams (Line 370-398)
     for interval, symbols in by_interval.items():
-        count = await data_manager.start_bar_streams(
+        count = data_manager.start_bar_streams(
             stream_session,
             symbols=symbols,
             interval=interval
@@ -185,14 +185,14 @@ for symbol in symbols:
     # Register with coordinator
     
     # BLOCK and fetch current day (Line 852-859)
-    bars = await MarketDataRepository.get_bars_by_symbol(...)
+    bars = MarketDataRepository.get_bars_by_symbol(...)
     
     # Add bars to session_data (Line 869-878)
     for bar in bars:
-        await session_data.add_bar(symbol, bar)
+        session_data.add_bar(symbol, bar)
     
     # Feed to coordinator queues (Line 893)
-    await coordinator.feed_stream(symbol, StreamType.BAR, bar_iterator())
+    coordinator.feed_stream(symbol, StreamType.BAR, bar_iterator())
     
     # Return count
 return streams_started

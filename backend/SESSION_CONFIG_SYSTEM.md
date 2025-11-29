@@ -17,9 +17,9 @@ system_mgr.start()  # ❌ No configuration required
 **After:**
 ```python
 # New behavior - configuration file is MANDATORY
-await system_mgr.start("session_configs/my_session.json")  # ✅ Required
-await system_mgr.start(None)  # ❌ Raises ValueError
-await system_mgr.start("")    # ❌ Raises ValueError
+system_mgr.start("session_configs/my_session.json")  # ✅ Required
+system_mgr.start(None)  # ❌ Raises ValueError
+system_mgr.start("")    # ❌ Raises ValueError
 ```
 
 ### 2. No Default Fallbacks
@@ -204,7 +204,7 @@ from app.managers.system_manager import get_system_manager
 system_mgr = get_system_manager()
 
 # Start with configuration (async)
-await system_mgr.start("session_configs/my_session.json")
+system_mgr.start("session_configs/my_session.json")
 
 # Access session configuration
 if system_mgr.session_config:
@@ -213,7 +213,7 @@ if system_mgr.session_config:
     print(f"Max Buying Power: ${system_mgr.session_config.trading_config.max_buying_power:,.2f}")
 
 # Stop system (stops all streams)
-await system_mgr.stop()
+system_mgr.stop()
 ```
 
 ## Error Handling
@@ -234,8 +234,8 @@ Please provide a valid path to a session configuration file.
 ### Empty or Null Path
 
 ```python
-await system_mgr.start(None)
-await system_mgr.start("")
+system_mgr.start(None)
+system_mgr.start("")
 ```
 **Error:**
 ```
@@ -486,7 +486,7 @@ system_mgr.start()
 
 **New Code:**
 ```python
-await system_mgr.start("session_configs/my_session.json")
+system_mgr.start("session_configs/my_session.json")
 ```
 
 ### Creating Your First Configuration
@@ -514,7 +514,7 @@ system start session_configs/my_session.json
 ✅ **Risk management** - Explicit position limits and buying power  
 ✅ **Multi-symbol support** - Configure multiple data streams  
 ✅ **API flexibility** - Choose data and trading providers  
-✅ **Async architecture** - Proper async/await support  
+✅ **Async architecture** - Proper async/support  
 ✅ **Metadata support** - Track strategy info and notes  
 
 The system now requires explicit, validated configuration for all sessions, ensuring safer and more predictable trading operations.

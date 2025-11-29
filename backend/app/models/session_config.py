@@ -1,57 +1,30 @@
 """Session Configuration Model
 
-Defines the structure for session configuration files that control:
-- Trading parameters (buying power, position limits)
-- Data streams to start
-- API selections
-- Account settings
+Defines the structure for session configuration files matching SESSION_ARCHITECTURE.md.
+
+This is a REWRITE for the new session architecture (Phase 2).
+Old version backed up to: _old_session_config.py.bak
+
+Key Changes:
+1. New structure: symbols, streams, historical, gap_filler
+2. Added: historical.enable_quality (default: true)
+3. Added: gap_filler.enable_session_quality (default: true)
+4. Removed: quality_update_frequency (quality is always event-driven)
+5. Added: backtest_config.prefetch_days
 """
+
 from __future__ import annotations
+from typing import List, Optional, Dict, Any, Union
+from dataclasses import dataclass, field
+from datetime import datetime
+import logging
 
-from typing import List, Optional, Dict, Any
-from dataclasses import dataclass
-from enum import Enum
-
-
-class StreamType(Enum):
-    """Types of data streams."""
-    BARS = "bars"
-    TICKS = "ticks"
-    QUOTES = "quotes"
+logger = logging.getLogger(__name__)
 
 
-@dataclass
-class DataStreamConfig:
-    """Configuration for a single data stream.
-    
-    Attributes:
-        type: Stream type (bars, ticks, quotes)
-        symbol: Stock symbol to stream
-        interval: Bar interval (e.g., "1m", "5m") - only for bars
-    """
-    type: str  # "bars", "ticks", "quotes"
-    symbol: str
-    interval: Optional[str] = None  # Only for bars (e.g., "1m", "5m")
-    
-    def validate(self) -> None:
-        """Validate stream configuration.
-        
-        Raises:
-            ValueError: If configuration is invalid
-        """
-        # Validate type
-        valid_types = ["bars", "ticks", "quotes"]
-        if self.type not in valid_types:
-            raise ValueError(f"Invalid stream type: {self.type}. Must be one of {valid_types}")
-        
-        # Validate symbol
-        if not self.symbol or not self.symbol.strip():
-            raise ValueError("Stream symbol cannot be empty")
-        
-        # Bars require interval
-        if self.type == "bars" and not self.interval:
-            raise ValueError("Bar streams require an interval (e.g., '1m', '5m')")
-
+# =============================================================================
+# Backtest Configuration
+# =============================================================================
 
 @dataclass
 class BacktestConfig:
@@ -60,124 +33,176 @@ class BacktestConfig:
     Attributes:
         start_date: Start date for backtest window (YYYY-MM-DD)
         end_date: End date for backtest window (YYYY-MM-DD)
-        speed_multiplier: Speed multiplier (0=max, 1.0=realtime, 2.0=2x speed)
+        speed_multiplier: Speed multiplier (0=max, >0=realtime multiplier)
+        prefetch_days: Days of data to prefetch into queues at session start
     """
-    start_date: str  # YYYY-MM-DD format
-    end_date: str    # YYYY-MM-DD format
-    speed_multiplier: float = 0.0  # 0 = max speed
+    start_date: str
+    end_date: str
+    speed_multiplier: float = 0.0
+    prefetch_days: int = 1
     
     def validate(self) -> None:
-        """Validate backtest configuration.
-        
-        Raises:
-            ValueError: If configuration is invalid
-        """
-        from datetime import datetime
-        
+        """Validate backtest configuration."""
         # Validate date formats
         try:
             start = datetime.strptime(self.start_date, "%Y-%m-%d")
         except ValueError as e:
-            raise ValueError(f"Invalid start_date format: {self.start_date}. Use YYYY-MM-DD") from e
+            raise ValueError(
+                f"Invalid start_date format: {self.start_date}. Use YYYY-MM-DD"
+            ) from e
         
         try:
             end = datetime.strptime(self.end_date, "%Y-%m-%d")
         except ValueError as e:
-            raise ValueError(f"Invalid end_date format: {self.end_date}. Use YYYY-MM-DD") from e
+            raise ValueError(
+                f"Invalid end_date format: {self.end_date}. Use YYYY-MM-DD"
+            ) from e
         
         # Validate date range
         if start > end:
-            raise ValueError(f"start_date ({self.start_date}) must be before or equal to end_date ({self.end_date})")
+            raise ValueError(
+                f"start_date ({self.start_date}) must be before or equal to "
+                f"end_date ({self.end_date})"
+            )
         
         # Validate speed multiplier
         if self.speed_multiplier < 0:
             raise ValueError("speed_multiplier must be >= 0 (0 = max speed)")
+        
+        # Validate prefetch_days
+        if self.prefetch_days < 1:
+            raise ValueError("prefetch_days must be >= 1")
 
+
+# =============================================================================
+# Session Data Configuration
+# =============================================================================
 
 @dataclass
-class TradingConfig:
-    """Trading configuration and risk parameters.
+class HistoricalDataConfig:
+    """Historical data configuration for a trailing window.
     
     Attributes:
-        max_buying_power: Maximum total buying power to use (USD)
-        max_per_trade: Maximum amount per single trade (USD)
-        max_per_symbol: Maximum position size per symbol (USD)
-        max_open_positions: Maximum number of concurrent open positions
-        paper_trading: Whether to use paper trading (True) or live (False)
+        trailing_days: Number of trading days to maintain
+        intervals: Bar intervals to load (e.g., ["1m", "5m"])
+        apply_to: Symbols to apply to ("all" or list of symbols)
     """
-    max_buying_power: float
-    max_per_trade: float
-    max_per_symbol: float
-    max_open_positions: int = 10
-    paper_trading: bool = True
+    trailing_days: int
+    intervals: List[str]
+    apply_to: Union[str, List[str]] = "all"
+    
+    def validate(self, available_symbols: List[str]) -> None:
+        """Validate historical data configuration.
+        
+        Args:
+            available_symbols: Available symbols from session config
+        """
+        # Validate trailing_days
+        if self.trailing_days <= 0:
+            raise ValueError("trailing_days must be > 0")
+        
+        # Validate intervals
+        if not self.intervals:
+            raise ValueError("intervals cannot be empty")
+        
+        valid_intervals = ["1s", "1m", "5m", "10m", "15m", "30m", "1h", "1d"]
+        for interval in self.intervals:
+            if interval not in valid_intervals:
+                raise ValueError(
+                    f"Invalid interval '{interval}'. "
+                    f"Must be one of: {valid_intervals}"
+                )
+        
+        # Validate apply_to
+        if isinstance(self.apply_to, str):
+            if self.apply_to != "all":
+                raise ValueError(
+                    f"Invalid apply_to value: '{self.apply_to}'. "
+                    "Must be 'all' or a list of symbols"
+                )
+        elif isinstance(self.apply_to, list):
+            if not self.apply_to:
+                raise ValueError("apply_to list cannot be empty")
+            for symbol in self.apply_to:
+                if symbol not in available_symbols:
+                    raise ValueError(
+                        f"Symbol '{symbol}' in apply_to not found in "
+                        f"session_data_config.symbols"
+                    )
+        else:
+            raise ValueError(
+                "apply_to must be 'all' or a list of symbols"
+            )
+
+
+@dataclass
+class HistoricalConfig:
+    """Historical data and indicators configuration.
+    
+    Attributes:
+        enable_quality: Calculate quality for historical bars (default: true)
+        data: List of historical data configurations
+        indicators: Historical indicator configurations
+    """
+    enable_quality: bool = True
+    data: List[HistoricalDataConfig] = field(default_factory=list)
+    indicators: Dict[str, Any] = field(default_factory=dict)
+    
+    def validate(self, available_symbols: List[str]) -> None:
+        """Validate historical configuration.
+        
+        Args:
+            available_symbols: Available symbols from session config
+        """
+        # Validate each data config
+        for data_config in self.data:
+            data_config.validate(available_symbols)
+        
+        # Validate indicators (basic validation, full validation in indicator code)
+        for indicator_name, indicator_config in self.indicators.items():
+            if not isinstance(indicator_config, dict):
+                raise ValueError(
+                    f"Indicator '{indicator_name}' config must be a dictionary"
+                )
+            
+            if "type" not in indicator_config:
+                raise ValueError(
+                    f"Indicator '{indicator_name}' missing required field 'type'"
+                )
+            
+            valid_types = ["trailing_average", "trailing_max", "trailing_min"]
+            if indicator_config["type"] not in valid_types:
+                raise ValueError(
+                    f"Indicator '{indicator_name}' has invalid type "
+                    f"'{indicator_config['type']}'. Must be one of: {valid_types}"
+                )
+
+
+@dataclass
+class GapFillerConfig:
+    """Gap filler configuration (live mode only).
+    
+    CRITICAL: Gap filling only occurs in LIVE mode and only when
+    enable_session_quality=true.
+    
+    Attributes:
+        max_retries: Max retry attempts to fill detected gaps (live only)
+        retry_interval_seconds: Interval between retries (live only)
+        enable_session_quality: Calculate quality for session bars (both modes)
+    """
+    max_retries: int = 5
+    retry_interval_seconds: int = 60
+    enable_session_quality: bool = True
     
     def validate(self) -> None:
-        """Validate trading configuration.
+        """Validate gap filler configuration."""
+        # Validate max_retries
+        if not (1 <= self.max_retries <= 20):
+            raise ValueError("max_retries must be between 1 and 20")
         
-        Raises:
-            ValueError: If configuration is invalid
-        """
-        if self.max_buying_power <= 0:
-            raise ValueError("max_buying_power must be positive")
-        
-        if self.max_per_trade <= 0:
-            raise ValueError("max_per_trade must be positive")
-        
-        if self.max_per_symbol <= 0:
-            raise ValueError("max_per_symbol must be positive")
-        
-        if self.max_per_trade > self.max_buying_power:
-            raise ValueError("max_per_trade cannot exceed max_buying_power")
-        
-        if self.max_per_symbol > self.max_buying_power:
-            raise ValueError("max_per_symbol cannot exceed max_buying_power")
-        
-        if self.max_open_positions <= 0:
-            raise ValueError("max_open_positions must be positive")
-
-
-@dataclass
-class HistoricalBarsConfig:
-    """Historical bars configuration."""
-    enabled: bool = True
-    trailing_days: int = 5
-    intervals: List[int] = None
-    auto_load: bool = True
-    
-    def __post_init__(self):
-        if self.intervals is None:
-            self.intervals = [1, 5]
-
-
-@dataclass
-class DataUpkeepConfig:
-    """Data upkeep thread configuration."""
-    enabled: bool = True
-    check_interval_seconds: int = 60
-    retry_missing_bars: bool = True
-    max_retries: int = 5
-    derived_intervals: List[int] = None
-    auto_compute_derived: bool = True
-    
-    def __post_init__(self):
-        if self.derived_intervals is None:
-            self.derived_intervals = [5, 15]
-
-
-@dataclass
-class PrefetchConfig:
-    """Prefetch manager configuration."""
-    enabled: bool = True
-    window_minutes: int = 60
-    check_interval_minutes: int = 5
-    auto_activate: bool = True
-
-
-@dataclass
-class SessionBoundaryConfig:
-    """Session boundary manager configuration."""
-    auto_roll: bool = True
-    preserve_historical_days: int = 5
+        # Validate retry_interval_seconds
+        if self.retry_interval_seconds < 1:
+            raise ValueError("retry_interval_seconds must be >= 1")
 
 
 @dataclass
@@ -185,26 +210,97 @@ class SessionDataConfig:
     """Session data configuration.
     
     Attributes:
-        historical_bars: Historical bars loading configuration
-        data_upkeep: Data upkeep thread configuration
-        prefetch: Prefetch manager configuration
-        session_boundary: Session boundary manager configuration
+        symbols: List of symbols to trade/analyze
+        streams: Requested data streams (coordinator determines streamed vs generated)
+        historical: Historical data and indicators configuration
+        gap_filler: Gap filler configuration
     """
-    historical_bars: HistoricalBarsConfig = None
-    data_upkeep: DataUpkeepConfig = None
-    prefetch: PrefetchConfig = None
-    session_boundary: SessionBoundaryConfig = None
+    symbols: List[str]
+    streams: List[str]
+    historical: HistoricalConfig = field(default_factory=HistoricalConfig)
+    gap_filler: GapFillerConfig = field(default_factory=GapFillerConfig)
     
-    def __post_init__(self):
-        if self.historical_bars is None:
-            self.historical_bars = HistoricalBarsConfig()
-        if self.data_upkeep is None:
-            self.data_upkeep = DataUpkeepConfig()
-        if self.prefetch is None:
-            self.prefetch = PrefetchConfig()
-        if self.session_boundary is None:
-            self.session_boundary = SessionBoundaryConfig()
+    def validate(self) -> None:
+        """Validate session data configuration."""
+        # Validate symbols
+        if not self.symbols:
+            raise ValueError("symbols list cannot be empty")
+        
+        for symbol in self.symbols:
+            if not symbol or not symbol.strip():
+                raise ValueError("Symbol cannot be empty or whitespace")
+        
+        # Check for duplicates
+        if len(self.symbols) != len(set(self.symbols)):
+            raise ValueError("Duplicate symbols found in symbols list")
+        
+        # Validate streams
+        if not self.streams:
+            raise ValueError("streams list cannot be empty")
+        
+        valid_streams = [
+            "1s", "1m", "5m", "10m", "15m", "30m", "1h", "1d",
+            "ticks", "quotes"
+        ]
+        for stream in self.streams:
+            if stream not in valid_streams:
+                raise ValueError(
+                    f"Invalid stream '{stream}'. "
+                    f"Must be one of: {valid_streams}"
+                )
+        
+        # Validate sub-configs
+        self.historical.validate(self.symbols)
+        self.gap_filler.validate()
 
+
+# =============================================================================
+# Trading Configuration
+# =============================================================================
+
+@dataclass
+class TradingConfig:
+    """Trading configuration and risk parameters.
+    
+    Attributes:
+        max_buying_power: Maximum total buying power (USD)
+        max_per_trade: Maximum per trade (USD)
+        max_per_symbol: Maximum per symbol (USD)
+        max_open_positions: Maximum concurrent positions
+    """
+    max_buying_power: float
+    max_per_trade: float
+    max_per_symbol: float
+    max_open_positions: int
+    
+    def validate(self) -> None:
+        """Validate trading configuration."""
+        if self.max_buying_power <= 0:
+            raise ValueError("max_buying_power must be > 0")
+        
+        if self.max_per_trade <= 0:
+            raise ValueError("max_per_trade must be > 0")
+        
+        if self.max_per_symbol <= 0:
+            raise ValueError("max_per_symbol must be > 0")
+        
+        if self.max_per_trade > self.max_buying_power:
+            raise ValueError(
+                "max_per_trade cannot exceed max_buying_power"
+            )
+        
+        if self.max_per_symbol > self.max_buying_power:
+            raise ValueError(
+                "max_per_symbol cannot exceed max_buying_power"
+            )
+        
+        if self.max_open_positions <= 0:
+            raise ValueError("max_open_positions must be > 0")
+
+
+# =============================================================================
+# API Configuration
+# =============================================================================
 
 @dataclass
 class APIConfig:
@@ -220,75 +316,80 @@ class APIConfig:
     account_id: Optional[str] = None
     
     def validate(self) -> None:
-        """Validate API configuration.
-        
-        Raises:
-            ValueError: If configuration is invalid
-        """
+        """Validate API configuration."""
         valid_data_apis = ["alpaca", "schwab"]
         if self.data_api not in valid_data_apis:
-            raise ValueError(f"Invalid data_api: {self.data_api}. Must be one of {valid_data_apis}")
+            raise ValueError(
+                f"Invalid data_api: {self.data_api}. "
+                f"Must be one of {valid_data_apis}"
+            )
         
         valid_trade_apis = ["alpaca", "schwab"]
         if self.trade_api not in valid_trade_apis:
-            raise ValueError(f"Invalid trade_api: {self.trade_api}. Must be one of {valid_trade_apis}")
+            raise ValueError(
+                f"Invalid trade_api: {self.trade_api}. "
+                f"Must be one of {valid_trade_apis}"
+            )
 
+
+# =============================================================================
+# Root Session Configuration
+# =============================================================================
 
 @dataclass
 class SessionConfig:
     """Complete session configuration.
     
-    This is the root configuration object loaded from JSON files.
+    Root configuration object loaded from JSON files matching
+    SESSION_ARCHITECTURE.md specification.
     
     Attributes:
         session_name: Descriptive name for this session
+        exchange_group: Exchange group (e.g., "US_EQUITY", "LSE", "TSE")
+        asset_class: Asset class (e.g., "EQUITY", "OPTION", "FUTURES")
         mode: Operation mode ("live" or "backtest")
-        data_streams: List of data streams to start
+        backtest_config: Backtest window configuration (required for backtest mode)
+        session_data_config: Session data configuration
         trading_config: Trading parameters and risk limits
         api_config: API provider configuration
-        backtest_config: Backtest window configuration (required if mode is "backtest")
         metadata: Optional additional metadata
     """
     session_name: str
-    mode: str  # "live" or "backtest"
-    data_streams: List[DataStreamConfig]
+    exchange_group: str
+    asset_class: str
+    mode: str
+    backtest_config: Optional[BacktestConfig]
+    session_data_config: SessionDataConfig
     trading_config: TradingConfig
     api_config: APIConfig
-    backtest_config: Optional[BacktestConfig] = None
-    session_data_config: Optional[SessionDataConfig] = None
     metadata: Optional[Dict[str, Any]] = None
     
     def validate(self) -> None:
-        """Validate entire session configuration.
-        
-        Raises:
-            ValueError: If configuration is invalid
-        """
+        """Validate entire session configuration."""
+        # Validate session_name
         if not self.session_name or not self.session_name.strip():
             raise ValueError("session_name cannot be empty")
         
         # Validate mode
         valid_modes = ["live", "backtest"]
         if self.mode not in valid_modes:
-            raise ValueError(f"Invalid mode: {self.mode}. Must be one of {valid_modes}")
+            raise ValueError(
+                f"Invalid mode: {self.mode}. Must be one of {valid_modes}"
+            )
         
         # Backtest mode requires backtest_config
         if self.mode == "backtest" and not self.backtest_config:
-            raise ValueError("backtest_config is required when mode is 'backtest'")
-        
-        if not self.data_streams:
-            raise ValueError("At least one data stream must be configured")
+            raise ValueError(
+                "backtest_config is required when mode is 'backtest'"
+            )
         
         # Validate each component
-        for stream in self.data_streams:
-            stream.validate()
-        
-        self.trading_config.validate()
-        self.api_config.validate()
-        
-        # Validate backtest config if present
         if self.backtest_config:
             self.backtest_config.validate()
+        
+        self.session_data_config.validate()
+        self.trading_config.validate()
+        self.api_config.validate()
     
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> SessionConfig:
@@ -303,31 +404,87 @@ class SessionConfig:
         Raises:
             ValueError: If required fields are missing or invalid
         """
-        # Extract required fields
+        # Extract required root fields
         session_name = data.get("session_name")
         if not session_name:
             raise ValueError("Missing required field: session_name")
         
-        # Parse mode
+        exchange_group = data.get("exchange_group", "US_EQUITY")
+        asset_class = data.get("asset_class", "EQUITY")
+        
         mode = data.get("mode")
         if not mode:
             raise ValueError("Missing required field: mode")
         
-        # Parse data streams
-        streams_data = data.get("data_streams", [])
-        if not streams_data:
-            raise ValueError("Missing or empty required field: data_streams")
-        
-        data_streams = [
-            DataStreamConfig(
-                type=s.get("type"),
-                symbol=s.get("symbol"),
-                interval=s.get("interval")
+        # Parse backtest config (required for backtest mode)
+        backtest_config = None
+        backtest_data = data.get("backtest_config")
+        if backtest_data:
+            backtest_config = BacktestConfig(
+                start_date=backtest_data.get("start_date"),
+                end_date=backtest_data.get("end_date"),
+                speed_multiplier=backtest_data.get("speed_multiplier", 0.0),
+                prefetch_days=backtest_data.get("prefetch_days", 1)
             )
-            for s in streams_data
-        ]
         
-        # Parse trading config
+        # Parse session_data_config (required)
+        sd_data = data.get("session_data_config")
+        if not sd_data:
+            raise ValueError("Missing required field: session_data_config")
+        
+        # Parse symbols
+        symbols = sd_data.get("symbols")
+        if not symbols:
+            raise ValueError(
+                "Missing required field: session_data_config.symbols"
+            )
+        
+        # Parse streams
+        streams = sd_data.get("streams")
+        if not streams:
+            raise ValueError(
+                "Missing required field: session_data_config.streams"
+            )
+        
+        # Parse historical config
+        hist_data = sd_data.get("historical", {})
+        
+        # Parse historical.data
+        historical_data_configs = []
+        for hd in hist_data.get("data", []):
+            historical_data_configs.append(
+                HistoricalDataConfig(
+                    trailing_days=hd.get("trailing_days"),
+                    intervals=hd.get("intervals"),
+                    apply_to=hd.get("apply_to", "all")
+                )
+            )
+        
+        # Parse historical.indicators
+        indicators = hist_data.get("indicators", {})
+        
+        historical = HistoricalConfig(
+            enable_quality=hist_data.get("enable_quality", True),
+            data=historical_data_configs,
+            indicators=indicators
+        )
+        
+        # Parse gap_filler config
+        gf_data = sd_data.get("gap_filler", {})
+        gap_filler = GapFillerConfig(
+            max_retries=gf_data.get("max_retries", 5),
+            retry_interval_seconds=gf_data.get("retry_interval_seconds", 60),
+            enable_session_quality=gf_data.get("enable_session_quality", True)
+        )
+        
+        session_data_config = SessionDataConfig(
+            symbols=symbols,
+            streams=streams,
+            historical=historical,
+            gap_filler=gap_filler
+        )
+        
+        # Parse trading config (required)
         trading_data = data.get("trading_config")
         if not trading_data:
             raise ValueError("Missing required field: trading_config")
@@ -336,11 +493,10 @@ class SessionConfig:
             max_buying_power=trading_data.get("max_buying_power"),
             max_per_trade=trading_data.get("max_per_trade"),
             max_per_symbol=trading_data.get("max_per_symbol"),
-            max_open_positions=trading_data.get("max_open_positions", 10),
-            paper_trading=trading_data.get("paper_trading", True)
+            max_open_positions=trading_data.get("max_open_positions")
         )
         
-        # Parse API config
+        # Parse API config (required)
         api_data = data.get("api_config")
         if not api_data:
             raise ValueError("Missing required field: api_config")
@@ -351,74 +507,81 @@ class SessionConfig:
             account_id=api_data.get("account_id")
         )
         
-        # Parse backtest config (optional, but required if mode is backtest)
-        backtest_config = None
-        backtest_data = data.get("backtest_config")
-        if backtest_data:
-            backtest_config = BacktestConfig(
-                start_date=backtest_data.get("start_date"),
-                end_date=backtest_data.get("end_date"),
-                speed_multiplier=backtest_data.get("speed_multiplier", 0.0)
-            )
-        
-        # Parse session_data config (optional)
-        session_data_config = None
-        sd_data = data.get("session_data_config")
-        if sd_data:
-            # Parse historical bars config
-            hist_data = sd_data.get("historical_bars", {})
-            historical_bars = HistoricalBarsConfig(
-                enabled=hist_data.get("enabled", True),
-                trailing_days=hist_data.get("trailing_days", 5),
-                intervals=hist_data.get("intervals", [1, 5]),
-                auto_load=hist_data.get("auto_load", True)
-            )
-            
-            # Parse data upkeep config
-            upkeep_data = sd_data.get("data_upkeep", {})
-            data_upkeep = DataUpkeepConfig(
-                enabled=upkeep_data.get("enabled", True),
-                check_interval_seconds=upkeep_data.get("check_interval_seconds", 60),
-                retry_missing_bars=upkeep_data.get("retry_missing_bars", True),
-                max_retries=upkeep_data.get("max_retries", 5),
-                derived_intervals=upkeep_data.get("derived_intervals", [5, 15]),
-                auto_compute_derived=upkeep_data.get("auto_compute_derived", True)
-            )
-            
-            # Parse prefetch config
-            prefetch_data = sd_data.get("prefetch", {})
-            prefetch = PrefetchConfig(
-                enabled=prefetch_data.get("enabled", True),
-                window_minutes=prefetch_data.get("window_minutes", 60),
-                check_interval_minutes=prefetch_data.get("check_interval_minutes", 5),
-                auto_activate=prefetch_data.get("auto_activate", True)
-            )
-            
-            # Parse session boundary config
-            boundary_data = sd_data.get("session_boundary", {})
-            session_boundary = SessionBoundaryConfig(
-                auto_roll=boundary_data.get("auto_roll", True),
-                preserve_historical_days=boundary_data.get("preserve_historical_days", 5)
-            )
-            
-            session_data_config = SessionDataConfig(
-                historical_bars=historical_bars,
-                data_upkeep=data_upkeep,
-                prefetch=prefetch,
-                session_boundary=session_boundary
-            )
-        
         # Create and validate config
         config = cls(
             session_name=session_name,
+            exchange_group=exchange_group,
+            asset_class=asset_class,
             mode=mode,
-            data_streams=data_streams,
-            trading_config=trading_config,
-            api_config=api_config,
             backtest_config=backtest_config,
             session_data_config=session_data_config,
+            trading_config=trading_config,
+            api_config=api_config,
             metadata=data.get("metadata")
         )
         
         config.validate()
+        logger.info(f"Loaded and validated session config: {session_name}")
         return config
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert config to dictionary for serialization.
+        
+        Returns:
+            Dictionary representation
+        """
+        result = {
+            "session_name": self.session_name,
+            "exchange_group": self.exchange_group,
+            "asset_class": self.asset_class,
+            "mode": self.mode,
+        }
+        
+        if self.backtest_config:
+            result["backtest_config"] = {
+                "start_date": self.backtest_config.start_date,
+                "end_date": self.backtest_config.end_date,
+                "speed_multiplier": self.backtest_config.speed_multiplier,
+                "prefetch_days": self.backtest_config.prefetch_days
+            }
+        
+        result["session_data_config"] = {
+            "symbols": self.session_data_config.symbols,
+            "streams": self.session_data_config.streams,
+            "historical": {
+                "enable_quality": self.session_data_config.historical.enable_quality,
+                "data": [
+                    {
+                        "trailing_days": hd.trailing_days,
+                        "intervals": hd.intervals,
+                        "apply_to": hd.apply_to
+                    }
+                    for hd in self.session_data_config.historical.data
+                ],
+                "indicators": self.session_data_config.historical.indicators
+            },
+            "gap_filler": {
+                "max_retries": self.session_data_config.gap_filler.max_retries,
+                "retry_interval_seconds": self.session_data_config.gap_filler.retry_interval_seconds,
+                "enable_session_quality": self.session_data_config.gap_filler.enable_session_quality
+            }
+        }
+        
+        result["trading_config"] = {
+            "max_buying_power": self.trading_config.max_buying_power,
+            "max_per_trade": self.trading_config.max_per_trade,
+            "max_per_symbol": self.trading_config.max_per_symbol,
+            "max_open_positions": self.trading_config.max_open_positions
+        }
+        
+        result["api_config"] = {
+            "data_api": self.api_config.data_api,
+            "trade_api": self.api_config.trade_api
+        }
+        if self.api_config.account_id:
+            result["api_config"]["account_id"] = self.api_config.account_id
+        
+        if self.metadata:
+            result["metadata"] = self.metadata
+        
+        return result

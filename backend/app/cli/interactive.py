@@ -29,12 +29,11 @@ from app.services.auth_service import auth_service
 from app.integrations.claude_client import claude_client
 from app.integrations import alpaca_client
 from app.services.claude_usage_tracker import usage_tracker
-from app.models.database import AsyncSessionLocal
+from app.models.database import SessionLocal
 from app.services.csv_import_service import csv_import_service
-from app.repositories.market_data_repository import MarketDataRepository
+from app.managers.data_manager.parquet_storage import parquet_storage
 from app.cli.command_registry import (
     DATA_COMMANDS,
-    HOLIDAY_COMMANDS,
     MARKET_COMMANDS,
     SYSTEM_COMMANDS,
     GENERAL_COMMANDS,
@@ -42,6 +41,8 @@ from app.cli.command_registry import (
     CLAUDE_COMMANDS,
     ALPACA_COMMANDS,
     SCHWAB_COMMANDS,
+    EXECUTION_COMMANDS,
+    TIME_COMMANDS,
 )
 
 
@@ -59,20 +60,21 @@ class CommandCompleter:
         self.commands.extend([meta.name for meta in ADMIN_COMMANDS])
         
         # Add command namespaces
-        self.commands.extend(['data', 'holidays', 'market', 'system'])
-        self.commands.extend(['claude', 'alpaca', 'schwab'])
+        self.commands.extend(['data', 'market', 'system', 'time'])
+        self.commands.extend(['claude', 'alpaca', 'schwab', 'execution'])
         
         # Add standalone commands (direct shortcuts)
         self.commands.extend(['ask', 'analyze'])
         
         # Build subcommand lists from registries
         self.data_commands = [meta.name for meta in DATA_COMMANDS]
-        self.holiday_commands = [meta.name for meta in HOLIDAY_COMMANDS]
         self.market_commands = [meta.name for meta in MARKET_COMMANDS]
         self.system_commands = [meta.name for meta in SYSTEM_COMMANDS]
+        self.time_commands = [meta.name for meta in TIME_COMMANDS]
         self.claude_commands = [meta.name for meta in CLAUDE_COMMANDS]
         self.alpaca_commands = [meta.name for meta in ALPACA_COMMANDS]
         self.schwab_commands = [meta.name for meta in SCHWAB_COMMANDS]
+        self.execution_commands = [meta.name for meta in EXECUTION_COMMANDS]
         
         # Cache for symbols (loaded on first use)
         self.cached_symbols = []
@@ -84,14 +86,14 @@ class CommandCompleter:
                 # This will be populated by the CLI when logged in
                 import asyncio
                 from app.cli.data_commands import get_data_manager
-                from app.models.database import AsyncSessionLocal
+                from app.models.database import SessionLocal
                 
-                async def _fetch():
+                def _fetch():
                     data_manager = get_data_manager()
-                    async with AsyncSessionLocal() as session:
-                        return await data_manager.get_symbols(session)
+                    with SessionLocal() as session:
+                        return data_manager.get_symbols(session)
                 
-                self.cached_symbols = asyncio.run(_fetch())
+                self.cached_symbols = _fetch()
             except Exception:
                 # If we can't fetch, use empty list
                 self.cached_symbols = []
@@ -197,10 +199,14 @@ class CommandCompleter:
                     else:
                         matches = []
                 
-                # Holidays subcommands
-                elif first_word == 'holidays':
+                # Execution subcommands
+                elif first_word == 'execution':
                     if len(words) == 1 or (len(words) == 2 and not line.endswith(' ')):
-                        matches = [cmd + ' ' for cmd in self.holiday_commands if cmd.startswith(text)]
+                        matches = [cmd + ' ' for cmd in self.execution_commands if cmd.startswith(text)]
+                    # After 'execution order', suggest symbols
+                    elif words[1] == 'order' and len(words) >= 2:
+                        symbols = self.get_symbols()
+                        matches = [s + ' ' for s in symbols if s.startswith(text.upper())]
                     else:
                         matches = []
                 
@@ -208,6 +214,58 @@ class CommandCompleter:
                 elif first_word == 'market':
                     if len(words) == 1 or (len(words) == 2 and not line.endswith(' ')):
                         matches = [cmd + ' ' for cmd in self.market_commands if cmd.startswith(text)]
+                    else:
+                        matches = []
+                
+                # Time subcommands
+                elif first_word == 'time':
+                    if len(words) == 1 or (len(words) == 2 and not line.endswith(' ')):
+                        matches = [cmd + ' ' for cmd in self.time_commands if cmd.startswith(text)]
+                    else:
+                        matches = []
+                
+                # Help command - suggest namespaces or commands within namespace
+                elif first_word == 'help':
+                    if len(words) == 1 or (len(words) == 2 and not line.endswith(' ')):
+                        # Suggest namespaces
+                        namespaces = ['general', 'admin', 'system', 'data', 'market', 'time', 
+                                     'claude', 'alpaca', 'schwab', 'execution']
+                        matches = [ns + ' ' for ns in namespaces if ns.startswith(text)]
+                    elif len(words) >= 3:
+                        # User typed "help <namespace> ..." - suggest commands from that namespace
+                        # Join all words after namespace to handle multi-word command completion
+                        namespace = words[1].lower()
+                        partial_cmd = ' '.join(words[2:]) if not line.endswith(' ') else ' '.join(words[2:]) + ' '
+                        partial_cmd = partial_cmd.strip()
+                        
+                        # Get command list for namespace
+                        cmd_list = None
+                        if namespace == 'data':
+                            cmd_list = DATA_COMMANDS
+                        elif namespace == 'time':
+                            cmd_list = TIME_COMMANDS
+                        elif namespace == 'system':
+                            cmd_list = SYSTEM_COMMANDS
+                        elif namespace == 'execution':
+                            cmd_list = EXECUTION_COMMANDS
+                        elif namespace == 'claude':
+                            cmd_list = CLAUDE_COMMANDS
+                        elif namespace == 'alpaca':
+                            cmd_list = ALPACA_COMMANDS
+                        elif namespace == 'schwab':
+                            cmd_list = SCHWAB_COMMANDS
+                        elif namespace == 'market':
+                            cmd_list = MARKET_COMMANDS
+                        elif namespace == 'general':
+                            cmd_list = GENERAL_COMMANDS
+                        elif namespace == 'admin':
+                            cmd_list = ADMIN_COMMANDS
+                        
+                        if cmd_list:
+                            # Match commands that start with the partial command
+                            matches = [cmd.name + ' ' for cmd in cmd_list if cmd.name.startswith(partial_cmd)]
+                        else:
+                            matches = []
                     else:
                         matches = []
                 
@@ -316,7 +374,7 @@ class InteractiveCLI:
             f"History: {history_status}[/dim]\n"
         )
         
-    async def login(self) -> bool:
+    def login(self) -> bool:
         """
         Prompt for login credentials
         
@@ -358,8 +416,8 @@ class InteractiveCLI:
                 password = getpass.getpass("Password: ")
                 
                 # Authenticate with database
-                async with AsyncSessionLocal() as db_session:
-                    self.session_token = await auth_service.login(username, password, db_session)
+                with SessionLocal() as db_session:
+                    self.session_token = auth_service.login(username, password, db_session)
                 
                 if self.session_token:
                     self.current_user = auth_service.get_current_user(self.session_token)
@@ -394,72 +452,130 @@ class InteractiveCLI:
             self.session_token = None
             self.current_user = None
     
-    def show_help(self):
-        """Display available commands (auto-generated from registries)"""
+    def show_help(self, namespace: Optional[str] = None, subcommand: Optional[str] = None):
+        """Display available commands (auto-generated from registries)
+        
+        Args:
+            namespace: Optional command namespace (e.g., 'data', 'time', 'system')
+            subcommand: Optional specific subcommand (e.g., 'import-api', 'session')
+        """
+        # Command registry mapping
+        command_groups = {
+            'general': ('GENERAL COMMANDS', GENERAL_COMMANDS),
+            'admin': ('ADMIN COMMANDS', ADMIN_COMMANDS),
+            'system': ('SYSTEM MANAGEMENT', SYSTEM_COMMANDS),
+            'data': ('DATA COMMANDS', DATA_COMMANDS),
+            'market': ('MARKET COMMANDS', MARKET_COMMANDS),
+            'time': ('TIME COMMANDS', TIME_COMMANDS),
+            'claude': ('CLAUDE AI COMMANDS', CLAUDE_COMMANDS),
+            'alpaca': ('ALPACA COMMANDS', ALPACA_COMMANDS),
+            'schwab': ('SCHWAB COMMANDS', SCHWAB_COMMANDS),
+            'execution': ('EXECUTION COMMANDS', EXECUTION_COMMANDS),
+        }
+        
+        # If specific subcommand requested, show detailed help
+        if namespace and subcommand:
+            self._show_command_detail(namespace, subcommand, command_groups)
+            return
+        
+        # If namespace specified, show only that namespace
+        if namespace:
+            if namespace.lower() in command_groups:
+                self._show_namespace_help(namespace.lower(), command_groups)
+            else:
+                self.console.print(f"[red]Unknown command namespace: {namespace}[/red]")
+                self.console.print(f"[yellow]Available namespaces: {', '.join(command_groups.keys())}[/yellow]")
+            return
+        
+        # Show all commands (default behavior)
         table = Table(title="Available Commands", box=box.ROUNDED)
         table.add_column("Command", style="cyan", no_wrap=True)
         table.add_column("Description", style="white")
         
-        # General commands (from registry)
-        for meta in GENERAL_COMMANDS:
-            table.add_row(meta.usage, meta.description)
+        # Add each command group with alphabetically sorted commands
+        first = True
+        for group_name, (title, commands) in command_groups.items():
+            if not first:
+                table.add_section()
+            table.add_row(f"[bold cyan]{title}[/bold cyan]", "", style="cyan")
+            # Sort commands alphabetically by name
+            sorted_commands = sorted(commands, key=lambda cmd: cmd.name)
+            for meta in sorted_commands:
+                table.add_row(meta.usage, meta.description)
+            first = False
         
-        # Admin commands (from registry)
-        table.add_section()
-        table.add_row("[bold cyan]ADMIN COMMANDS[/bold cyan]", "", style="cyan")
-        for meta in ADMIN_COMMANDS:
-            table.add_row(meta.usage, meta.description)
+        self.console.print(table)
+        self.console.print("\n[dim]Tip: Use 'help <namespace>' for detailed help (e.g., 'help data', 'help time')[/dim]")
+        self.console.print("[dim]     Use 'help <namespace> <command>' for command examples (e.g., 'help data import-api')[/dim]")
+    
+    def _show_namespace_help(self, namespace: str, command_groups: dict):
+        """Show help for a specific namespace"""
+        title, commands = command_groups[namespace]
         
-        # Account commands
-        table.add_section()
-        table.add_row("[bold cyan]ACCOUNT COMMANDS[/bold cyan]", "", style="cyan")
-        table.add_row("account info", "Display account information")
-        table.add_row("account balance", "Display account balance")
-        table.add_row("account positions", "Display current positions")
+        table = Table(title=title, box=box.ROUNDED)
+        table.add_column("Command", style="cyan", no_wrap=True)
+        table.add_column("Description", style="white")
         
-        # Trading commands
-        table.add_section()
-        table.add_row("[bold cyan]TRADING COMMANDS[/bold cyan]", "", style="cyan")
-        table.add_row("quote <symbol>", "Get real-+time quote")
-        table.add_row("buy <symbol> <qty>", "Place buy order")
-        table.add_row("sell <symbol> <qty>", "Place sell order")
-        table.add_row("orders", "View order history")
-        
-        # System management commands
-        table.add_section()
-        table.add_row("[bold cyan]SYSTEM MANAGEMENT[/bold cyan]", "", style="cyan")
-        for meta in SYSTEM_COMMANDS:
-            table.add_row(meta.usage, meta.description)
-        
-        # Data commands
-        table.add_section()
-        table.add_row("[bold cyan]DATA COMMANDS[/bold cyan]", "", style="cyan")
-        for meta in DATA_COMMANDS:
-            table.add_row(meta.usage, meta.description)
-        for meta in HOLIDAY_COMMANDS:
-            table.add_row(meta.usage, meta.description)
-        for meta in MARKET_COMMANDS:
-            table.add_row(meta.usage, meta.description)
-        
-        # Claude AI commands (from registry)
-        table.add_section()
-        table.add_row("[bold cyan]CLAUDE AI COMMANDS[/bold cyan]", "", style="cyan")
-        for meta in CLAUDE_COMMANDS:
-            table.add_row(meta.usage, meta.description)
-        
-        # Alpaca integration commands (from registry)
-        table.add_section()
-        table.add_row("[bold cyan]ALPACA COMMANDS[/bold cyan]", "", style="cyan")
-        for meta in ALPACA_COMMANDS:
-            table.add_row(meta.usage, meta.description)
-        
-        # Schwab integration commands (from registry)
-        table.add_section()
-        table.add_row("[bold cyan]SCHWAB COMMANDS[/bold cyan]", "", style="cyan")
-        for meta in SCHWAB_COMMANDS:
+        # Sort commands alphabetically by name
+        sorted_commands = sorted(commands, key=lambda cmd: cmd.name)
+        for meta in sorted_commands:
             table.add_row(meta.usage, meta.description)
         
         self.console.print(table)
+        self.console.print(f"\n[dim]Tip: Use 'help {namespace} <command>' for detailed examples[/dim]")
+    
+    def _show_command_detail(self, namespace: str, subcommand: str, command_groups: dict):
+        """Show detailed help for a specific command"""
+        if namespace.lower() not in command_groups:
+            self.console.print(f"[red]Unknown namespace: {namespace}[/red]")
+            return
+        
+        title, commands = command_groups[namespace.lower()]
+        
+        # Find exact match first
+        exact_match = [cmd for cmd in commands if cmd.name == subcommand]
+        
+        # Find commands that start with the search term (for partial matches)
+        partial_matches = [cmd for cmd in commands if cmd.name.startswith(subcommand) and cmd.name != subcommand]
+        
+        if exact_match:
+            # Show the exact match
+            cmd = exact_match[0]
+            
+            # Display detailed information
+            self.console.print(f"\n[bold cyan]Command:[/bold cyan] {cmd.usage}")
+            self.console.print(f"[bold cyan]Description:[/bold cyan] {cmd.description}")
+            
+            if cmd.examples:
+                self.console.print(f"\n[bold cyan]Examples:[/bold cyan]")
+                for example in cmd.examples:
+                    self.console.print(f"  [green]$[/green] {example}")
+            
+            # If there are related commands, show them too
+            if partial_matches:
+                self.console.print(f"\n[dim]Related commands:[/dim]")
+                for related in partial_matches:
+                    self.console.print(f"  [cyan]{namespace} {related.name}[/cyan] - {related.description}")
+                self.console.print(f"\n[dim]Tip: Use 'help {namespace} <command>' to see details[/dim]")
+            
+            self.console.print()
+        
+        elif partial_matches:
+            # No exact match, but found partial matches
+            self.console.print(f"\n[yellow]Multiple commands found matching '{subcommand}':[/yellow]\n")
+            for cmd in partial_matches:
+                self.console.print(f"[bold cyan]{namespace} {cmd.name}[/bold cyan]")
+                self.console.print(f"  {cmd.description}")
+                self.console.print()
+            self.console.print(f"[dim]Use 'help {namespace} <full-command-name>' for detailed examples[/dim]")
+        
+        else:
+            # No matches at all
+            self.console.print(f"[red]Unknown command: {namespace} {subcommand}[/red]")
+            self.console.print(f"\n[yellow]Available commands in {namespace}:[/yellow]")
+            for cmd in commands:
+                self.console.print(f"  {cmd.name}")
+            self.console.print()
     
     def show_status(self):
         """Show application status"""
@@ -504,7 +620,7 @@ class InteractiveCLI:
         self.console.print(f"\n[dim]Total commands in history: {history_length}[/dim]")
         self.console.print(f"[dim]History file: {self.history_file}[/dim]\n")
     
-    async def run_script(self, script_path: str) -> None:
+    def run_script(self, script_path: str) -> None:
         """Execute commands from a script file.
         
         Args:
@@ -559,7 +675,7 @@ class InteractiveCLI:
             # Execute the command
             try:
                 # Check if we should exit (execute_command returns False to exit)
-                should_continue = await self.execute_command(line)
+                should_continue = self.execute_command(line)
                 if not should_continue:
                     self.console.print(f"\n[yellow]Script execution stopped by exit/logout command at line {line_num}[/yellow]")
                     break
@@ -581,7 +697,7 @@ class InteractiveCLI:
             self.console.print(f"[red]✗[/red] Errors: {errors}")
         self.console.print()
     
-    async def execute_command(self, command: str) -> bool:
+    def execute_command(self, command: str) -> bool:
         """
         Execute a user command
         
@@ -591,7 +707,7 @@ class InteractiveCLI:
         - SYSTEM_COMMANDS: system start/stop/pause/resume/mode/status
         - DATA_COMMANDS: data list/import/export/stream/etc.
         - MARKET_COMMANDS: market status
-        - HOLIDAY_COMMANDS: holidays import/list/delete
+        - TIME_COMMANDS: time current/session/holidays/holidays import/holidays delete/etc.
         
         Args:
             command: Command string to execute
@@ -615,7 +731,11 @@ class InteractiveCLI:
                 return True
             
             if cmd == 'help':
-                self.show_help()
+                # Parse arguments for context-sensitive help
+                namespace = args[0] if len(args) >= 1 else None
+                # Join all remaining args to handle multi-word commands like "holidays delete"
+                subcommand = ' '.join(args[1:]) if len(args) >= 2 else None
+                self.show_help(namespace, subcommand)
             
             elif cmd == 'history':
                 # Show command history
@@ -648,7 +768,7 @@ class InteractiveCLI:
                     self.console.print("[red]Usage: run <script_file>[/red]")
                 else:
                     script_file = ' '.join(args)  # Join in case of spaces in path
-                    await self.run_script(script_file)
+                    self.run_script(script_file)
             
             elif cmd == 'delay':
                 # Pause execution for specified milliseconds
@@ -659,7 +779,7 @@ class InteractiveCLI:
                 else:
                     ms = int(args[0])
                     self.console.print(f"[dim]Pausing for {ms}ms...[/dim]")
-                    await asyncio.sleep(ms / 1000.0)
+                    asyncio.sleep(ms / 1000.0)
                     self.console.print(f"[green]✓[/green] Resumed after {ms}ms")
             
             # ==================== ADMIN COMMANDS (from ADMIN_COMMANDS registry) ====================
@@ -752,14 +872,14 @@ class InteractiveCLI:
                     self.console.print("[yellow]Checking market status...[/yellow]")
 
                     try:
-                        async with AsyncSessionLocal() as session:
+                        with SessionLocal() as session:
                             # In backtest mode, ensure the backtest window and
                             # clock are initialized before reading time.
                             if self.data_manager.system_manager.mode.value == "backtest" and self.data_manager.backtest_start_date is None:
-                                await self.data_manager.init_backtest(session)
+                                self.data_manager.init_backtest(session)
 
                             # Aggregate market info for the current date/time
-                            info = await self.data_manager.get_current_day_market_info(session)
+                            info = self.data_manager.get_current_day_market_info(session)
 
                         # All DataManager times are expressed in canonical
                         # trading timezone (ET). For display, we optionally
@@ -851,32 +971,160 @@ class InteractiveCLI:
             
             # (watchlist command removed)
             
-            # ==================== HOLIDAY COMMANDS (from HOLIDAY_COMMANDS registry) ====================
+            # ==================== TIME COMMANDS (from TIME_COMMANDS registry) ====================
             
-            elif cmd == 'holidays':
+            elif cmd == 'time':
                 if args:
                     subcmd = args[0].lower()
-                    if subcmd == 'import' and len(args) >= 2:
-                        file_path = args[1]
-                        from app.cli.data_commands import import_holidays_command
-                        await import_holidays_command(file_path)
-                    elif subcmd == 'list':
-                        year = int(args[1]) if len(args) >= 2 else None
-                        from app.cli.data_commands import list_holidays_command
-                        await list_holidays_command(year)
-                    elif subcmd == 'delete' and len(args) >= 2:
-                        year = int(args[1])
-                        from app.cli.data_commands import delete_holidays_command
-                        await delete_holidays_command(year)
+                    if subcmd == 'current':
+                        timezone = None
+                        # Parse --timezone flag
+                        if '--timezone' in args:
+                            tz_idx = args.index('--timezone')
+                            if tz_idx + 1 < len(args):
+                                timezone = args[tz_idx + 1]
+                        from app.cli.time_commands import current_time_command
+                        current_time_command(timezone=timezone)
+                    elif subcmd == 'market':
+                        exchange = "NYSE"
+                        extended = False
+                        if '--exchange' in args:
+                            exc_idx = args.index('--exchange')
+                            if exc_idx + 1 < len(args):
+                                exchange = args[exc_idx + 1]
+                        if '--extended' in args:
+                            extended = True
+                        from app.cli.time_commands import market_status_command
+                        market_status_command(exchange=exchange, extended=extended)
+                    elif subcmd == 'session':
+                        date_str = None
+                        exchange = "NYSE"
+                        if len(args) >= 2 and not args[1].startswith('--'):
+                            date_str = args[1]
+                        if '--exchange' in args:
+                            exc_idx = args.index('--exchange')
+                            if exc_idx + 1 < len(args):
+                                exchange = args[exc_idx + 1]
+                        from app.cli.time_commands import trading_session_command
+                        trading_session_command(date_str=date_str, exchange=exchange)
+                    elif subcmd == 'next':
+                        from_date_str = None
+                        n = 1
+                        exchange = "NYSE"
+                        if len(args) >= 2 and not args[1].startswith('--'):
+                            from_date_str = args[1]
+                        if '--n' in args:
+                            n_idx = args.index('--n')
+                            if n_idx + 1 < len(args):
+                                n = int(args[n_idx + 1])
+                        if '--exchange' in args:
+                            exc_idx = args.index('--exchange')
+                            if exc_idx + 1 < len(args):
+                                exchange = args[exc_idx + 1]
+                        from app.cli.time_commands import next_trading_date_command
+                        next_trading_date_command(from_date_str=from_date_str, n=n, exchange=exchange)
+                    elif subcmd == 'days' and len(args) >= 3:
+                        start_str = args[1]
+                        end_str = args[2]
+                        exchange = "NYSE"
+                        if '--exchange' in args:
+                            exc_idx = args.index('--exchange')
+                            if exc_idx + 1 < len(args):
+                                exchange = args[exc_idx + 1]
+                        from app.cli.time_commands import trading_days_command
+                        trading_days_command(start_str=start_str, end_str=end_str, exchange=exchange)
+                    elif subcmd == 'holidays':
+                        if len(args) >= 2 and args[1] == 'delete':
+                            # "time holidays delete <year>"
+                            if len(args) < 3:
+                                self.console.print("[red]Usage: time holidays delete <year> [--exchange <exch>][/red]")
+                                return True
+                            year = int(args[2])
+                            exchange = None
+                            if '--exchange' in args:
+                                exc_idx = args.index('--exchange')
+                                if exc_idx + 1 < len(args):
+                                    exchange = args[exc_idx + 1]
+                            from app.cli.time_commands import delete_holidays_command
+                            delete_holidays_command(year=year, exchange=exchange)
+                        elif len(args) >= 2 and args[1] == 'import':
+                            # "time holidays import <file>"
+                            if len(args) < 3:
+                                self.console.print("[red]Usage: time holidays import <file> [--exchange <group>] [--dry-run][/red]")
+                                return True
+                            file_path = args[2]
+                            exchange = None
+                            dry_run = False
+                            if '--exchange' in args:
+                                exc_idx = args.index('--exchange')
+                                if exc_idx + 1 < len(args):
+                                    exchange = args[exc_idx + 1]
+                            if '--dry-run' in args:
+                                dry_run = True
+                            from app.cli.time_commands import import_holidays_command
+                            import_holidays_command(file_path=file_path, exchange=exchange, dry_run=dry_run)
+                        else:
+                            # "time holidays" - list holidays
+                            year = None
+                            exchange = "NYSE"
+                            if '--year' in args:
+                                year_idx = args.index('--year')
+                                if year_idx + 1 < len(args):
+                                    year = int(args[year_idx + 1])
+                            if '--exchange' in args:
+                                exc_idx = args.index('--exchange')
+                                if exc_idx + 1 < len(args):
+                                    exchange = args[exc_idx + 1]
+                            from app.cli.time_commands import holidays_command
+                            holidays_command(year=year, exchange=exchange)
+                    elif subcmd == 'convert' and len(args) >= 4:
+                        datetime_str = args[1]
+                        from_tz = args[2]
+                        to_tz = args[3]
+                        from app.cli.time_commands import timezone_convert_command
+                        timezone_convert_command(datetime_str=datetime_str, from_tz=from_tz, to_tz=to_tz)
+                    elif subcmd == 'list-groups':
+                        from app.cli.time_commands import list_exchange_groups_command
+                        list_exchange_groups_command()
+                    elif subcmd == 'backtest-window' and len(args) >= 2:
+                        start_date = args[1]
+                        end_date = args[2] if len(args) >= 3 else None
+                        from app.cli.time_commands import set_backtest_window_command
+                        set_backtest_window_command(start_date=start_date, end_date=end_date)
+                    elif subcmd == 'advance':
+                        extended = False
+                        exchange = "NYSE"
+                        if '--extended' in args:
+                            extended = True
+                        if '--exchange' in args:
+                            exc_idx = args.index('--exchange')
+                            if exc_idx + 1 < len(args):
+                                exchange = args[exc_idx + 1]
+                        from app.cli.time_commands import advance_to_market_open_command
+                        advance_to_market_open_command(extended=extended, exchange=exchange)
+                    elif subcmd == 'reset':
+                        extended = False
+                        if '--extended' in args:
+                            extended = True
+                        from app.cli.time_commands import reset_to_backtest_start_command
+                        reset_to_backtest_start_command(extended=extended)
+                    elif subcmd == 'config':
+                        from app.cli.time_commands import show_backtest_config_command
+                        show_backtest_config_command()
+                    elif subcmd == 'exchange' and len(args) >= 2:
+                        exchange = args[1]
+                        asset_class = args[2] if len(args) >= 3 else "EQUITY"
+                        from app.cli.time_commands import set_backtest_exchange_command
+                        set_backtest_exchange_command(exchange=exchange, asset_class=asset_class)
                     else:
                         # Show usage from registry (single source of truth)
-                        self.console.print("[red]Unknown holidays command. Available commands:[/red]\n")
-                        for meta in HOLIDAY_COMMANDS:
-                            self.console.print(f"  [cyan]{meta.usage:<40}[/cyan] {meta.description}")
+                        self.console.print("[red]Unknown time command. Available commands:[/red]\n")
+                        for meta in TIME_COMMANDS:
+                            self.console.print(f"  [cyan]{meta.usage:<50}[/cyan] {meta.description}")
                 else:
                     # Show available subcommands from registry
-                    subcommands = [meta.name for meta in HOLIDAY_COMMANDS]
-                    self.console.print(f"[red]Usage: holidays <{' | '.join(subcommands)}>[/red]")
+                    subcommands = [meta.name for meta in TIME_COMMANDS]
+                    self.console.print(f"[red]Usage: time <{' | '.join(subcommands)}>[/red]")
             
             # ==================== SYSTEM COMMANDS (from SYSTEM_COMMANDS registry) ====================
             
@@ -887,23 +1135,23 @@ class InteractiveCLI:
                         # Use default config if not provided
                         config_path = args[1] if len(args) >= 2 else "session_configs/example_session.json"
                         from app.cli.system_commands import start_command
-                        await start_command(config_path)
+                        start_command(config_path)
                     elif subcmd == 'pause':
                         from app.cli.system_commands import pause_command
-                        await pause_command()
+                        pause_command()
                     elif subcmd == 'resume':
                         from app.cli.system_commands import resume_command
-                        await resume_command()
+                        resume_command()
                     elif subcmd == 'stop':
                         from app.cli.system_commands import stop_command
-                        await stop_command()
+                        stop_command()
                     elif subcmd == 'mode' and len(args) >= 2:
                         mode = args[1].lower()
                         from app.cli.system_commands import mode_command
-                        await mode_command(mode)
+                        mode_command(mode)
                     elif subcmd == 'status':
                         from app.cli.system_commands import status_command
-                        await status_command()
+                        status_command()
                     else:
                         # Show usage from registry (single source of truth)
                         self.console.print("[red]Unknown system command. Available commands:[/red]\n")
@@ -919,33 +1167,33 @@ class InteractiveCLI:
                     subcmd = args[0].lower()
                     if subcmd == 'list':
                         from app.cli.data_commands import list_symbols_command
-                        await list_symbols_command()
+                        list_symbols_command()
                     elif subcmd == 'info' and len(args) >= 2:
                         symbol = args[1].upper()
                         from app.cli.data_commands import data_info_command
-                        await data_info_command(symbol)
+                        data_info_command(symbol)
                     elif subcmd == 'quality' and len(args) >= 2:
                         symbol = args[1].upper()
                         from app.cli.data_commands import data_quality_command
-                        await data_quality_command(symbol)
+                        data_quality_command(symbol)
                     elif subcmd == 'delete' and len(args) >= 2:
                         symbol = args[1].upper()
                         from app.cli.data_commands import delete_symbol_command
-                        await delete_symbol_command(symbol)
+                        delete_symbol_command(symbol)
                     elif subcmd == 'delete-all':
                         from app.cli.data_commands import delete_all_command
-                        await delete_all_command()
+                        delete_all_command()
                     elif subcmd == 'api' and len(args) >= 2:
                         api = args[1]
                         from app.cli.data_commands import select_data_api_command
-                        await select_data_api_command(api)
+                        select_data_api_command(api)
                     elif subcmd == 'import-api' and len(args) >= 5:
                         data_type = args[1]
                         symbol = args[2].upper()
                         start_date = args[3]
                         end_date = args[4]
                         from app.cli.data_commands import import_from_api_command
-                        await import_from_api_command(data_type, symbol, start_date, end_date)
+                        import_from_api_command(data_type, symbol, start_date, end_date)
                     elif subcmd == 'import-file' and len(args) >= 3:
                         # data import-file <file> <symbol> [start] [end]
                         file_path = args[1]
@@ -953,7 +1201,7 @@ class InteractiveCLI:
                         start_date = args[3] if len(args) >= 4 else None
                         end_date = args[4] if len(args) >= 5 else None
                         from app.cli.data_commands import import_csv_command
-                        await import_csv_command(file_path, symbol, start_date, end_date)
+                        import_csv_command(file_path, symbol, start_date, end_date)
                     elif subcmd == 'export-csv' and len(args) >= 5:
                         # data export-csv <type> <symbol> <start> <end?> -f <file>
                         data_type = args[1]
@@ -972,7 +1220,7 @@ class InteractiveCLI:
                             self.console.print("[red]Usage: data export-csv <type> <symbol> <start> [end] -f <file>[/red]")
                         else:
                             from app.cli.data_commands import export_csv_command
-                            await export_csv_command(data_type, symbol, start_date, end_date, file_path)
+                            export_csv_command(data_type, symbol, start_date, end_date, file_path)
                     elif subcmd == 'bars' and len(args) >= 4:
                         # data bars <symbol> <start> <end> [interval]
                         symbol = args[1].upper()
@@ -983,7 +1231,7 @@ class InteractiveCLI:
                             interval = args[4]
 
                         from app.cli.data_commands import on_demand_bars_command
-                        await on_demand_bars_command(symbol, start_date, end_date, interval)
+                        on_demand_bars_command(symbol, start_date, end_date, interval)
                     elif subcmd == 'ticks' and len(args) >= 4:
                         # data ticks <symbol> <start> <end>
                         symbol = args[1].upper()
@@ -991,7 +1239,7 @@ class InteractiveCLI:
                         end_date = args[3]
 
                         from app.cli.data_commands import on_demand_ticks_command
-                        await on_demand_ticks_command(symbol, start_date, end_date)
+                        on_demand_ticks_command(symbol, start_date, end_date)
                     elif subcmd == 'quotes' and len(args) >= 4:
                         # data quotes <symbol> <start> <end>
                         symbol = args[1].upper()
@@ -999,18 +1247,18 @@ class InteractiveCLI:
                         end_date = args[3]
 
                         from app.cli.data_commands import on_demand_quotes_command
-                        await on_demand_quotes_command(symbol, start_date, end_date)
+                        on_demand_quotes_command(symbol, start_date, end_date)
                     elif subcmd == 'latest-bar' and len(args) >= 2:
                         # data latest-bar <symbol> [interval]
                         symbol = args[1].upper()
                         interval = args[2] if len(args) >= 3 else '1m'
 
-                        async with AsyncSessionLocal() as session:
+                        with SessionLocal() as session:
                             # Ensure backtest clock is initialized if needed
                             if self.data_manager.system_manager.mode.value == "backtest" and self.data_manager.backtest_start_date is None:
-                                await self.data_manager.init_backtest(session)
+                                self.data_manager.init_backtest(session)
 
-                            bar = await self.data_manager.get_latest_bar(session, symbol, interval)
+                            bar = self.data_manager.get_latest_bar(session, symbol, interval)
 
                         if not bar:
                             self.console.print(f"[yellow]No bar data found for {symbol} on current date[/yellow]")
@@ -1041,11 +1289,11 @@ class InteractiveCLI:
                         # data latest-tick <symbol>
                         symbol = args[1].upper()
 
-                        async with AsyncSessionLocal() as session:
+                        with SessionLocal() as session:
                             if self.data_manager.system_manager.mode.value == "backtest" and self.data_manager.backtest_start_date is None:
-                                await self.data_manager.init_backtest(session)
+                                self.data_manager.init_backtest(session)
 
-                            tick = await self.data_manager.get_latest_tick(session, symbol)
+                            tick = self.data_manager.get_latest_tick(session, symbol)
 
                         if not tick:
                             self.console.print(f"[yellow]No tick data found for {symbol} on current date[/yellow]")
@@ -1066,11 +1314,11 @@ class InteractiveCLI:
                         # data latest-quote <symbol>
                         symbol = args[1].upper()
 
-                        async with AsyncSessionLocal() as session:
+                        with SessionLocal() as session:
                             if self.data_manager.system_manager.mode.value == "backtest" and self.data_manager.backtest_start_date is None:
-                                await self.data_manager.init_backtest(session)
+                                self.data_manager.init_backtest(session)
 
-                            quote = await self.data_manager.get_latest_quote(session, symbol)
+                            quote = self.data_manager.get_latest_quote(session, symbol)
 
                         if not quote:
                             self.console.print(f"[yellow]No quote data found for {symbol} on current date[/yellow]")
@@ -1097,7 +1345,7 @@ class InteractiveCLI:
                     elif subcmd == 'backtest-speed' and len(args) >= 2:
                         mode = args[1]
                         from app.cli.data_commands import set_backtest_speed_command
-                        await set_backtest_speed_command(mode)
+                        set_backtest_speed_command(mode)
                     elif subcmd == 'backtest-window' and len(args) >= 2:
                         # Parse dates and route directly to the shared
                         # DataManager instance so that the updated backtest
@@ -1121,17 +1369,17 @@ class InteractiveCLI:
                                 self.console.print("[red]End date must be in YYYY-MM-DD format[/red]")
                                 return True
 
-                        async with AsyncSessionLocal() as session:
-                            await self.data_manager.set_backtest_window(session, start_dt, end_dt)
+                        with SessionLocal() as session:
+                            self.data_manager.set_backtest_window(session, start_dt, end_dt)
 
                         effective_end = self.data_manager.backtest_end_date or start_dt
 
                         # Show full datetime with market open/close times
                         from datetime import time as dt_time, datetime as dt
-                        from app.models.trading_calendar import TradingHours
                         
-                        start_datetime = dt.combine(start_dt, dt_time.fromisoformat(TradingHours.MARKET_OPEN))
-                        end_datetime = dt.combine(effective_end, dt_time.fromisoformat(TradingHours.MARKET_CLOSE))
+                        # Use 9:30 AM and 4:00 PM as defaults (will be queried from TimeManager at runtime)
+                        start_datetime = dt.combine(start_dt, dt_time(9, 30))
+                        end_datetime = dt.combine(effective_end, dt_time(16, 0))
 
                         self.console.print("[green]✓[/green] Backtest window updated:")
                         self.console.print(f"  Start: {start_datetime.strftime('%Y-%m-%d %H:%M:%S')}")
@@ -1144,7 +1392,7 @@ class InteractiveCLI:
 
                         from app.cli.data_commands import stream_bars_command
                         # Block during DB fetch, then return after starting stream
-                        await stream_bars_command(symbol, interval, file_path)
+                        stream_bars_command(symbol, interval, file_path)
                     elif subcmd == 'stream-ticks' and len(args) >= 2:
                         # data stream-ticks <symbol> [file]
                         symbol = args[1].upper()
@@ -1152,7 +1400,7 @@ class InteractiveCLI:
 
                         from app.cli.data_commands import stream_ticks_command
                         # Block during DB fetch, then return after starting stream
-                        await stream_ticks_command(symbol, file_path)
+                        stream_ticks_command(symbol, file_path)
                     elif subcmd == 'stream-quotes' and len(args) >= 2:
                         # data stream-quotes <symbol> [file]
                         symbol = args[1].upper()
@@ -1160,51 +1408,51 @@ class InteractiveCLI:
 
                         from app.cli.data_commands import stream_quotes_command
                         # Block during DB fetch, then return after starting stream
-                        await stream_quotes_command(symbol, file_path)
+                        stream_quotes_command(symbol, file_path)
                     elif subcmd == 'stop-stream-bars':
                         # data stop-stream-bars [id]
                         stream_id = args[1] if len(args) >= 2 else None
 
                         from app.cli.data_commands import stop_bars_stream_command
-                        await stop_bars_stream_command(stream_id)
+                        stop_bars_stream_command(stream_id)
                     elif subcmd == 'stop-stream-ticks':
                         # data stop-stream-ticks [id]
                         stream_id = args[1] if len(args) >= 2 else None
 
                         from app.cli.data_commands import stop_ticks_stream_command
-                        await stop_ticks_stream_command(stream_id)
+                        stop_ticks_stream_command(stream_id)
                     elif subcmd == 'stop-stream-quotes':
                         # data stop-stream-quotes [id]
                         stream_id = args[1] if len(args) >= 2 else None
 
                         from app.cli.data_commands import stop_quotes_stream_command
-                        await stop_quotes_stream_command(stream_id)
+                        stop_quotes_stream_command(stream_id)
                     elif subcmd == 'stop-all-streams':
                         # data stop-all-streams
                         from app.cli.data_commands import stop_all_streams_command
-                        await stop_all_streams_command()
+                        stop_all_streams_command()
                     elif subcmd == 'snapshot' and len(args) >= 2:
                         # data snapshot <symbol>
                         symbol = args[1].upper()
                         from app.cli.data_commands import snapshot_command
-                        await snapshot_command(symbol)
+                        snapshot_command(symbol)
                     elif subcmd == 'session-volume' and len(args) >= 2:
                         # data session-volume <symbol>
                         symbol = args[1].upper()
                         from app.cli.data_commands import session_volume_command
-                        await session_volume_command(symbol)
+                        session_volume_command(symbol)
                     elif subcmd == 'session-high-low' and len(args) >= 2:
                         # data session-high-low <symbol>
                         symbol = args[1].upper()
                         from app.cli.data_commands import session_high_low_command
-                        await session_high_low_command(symbol)
+                        session_high_low_command(symbol)
                     elif subcmd == 'avg-volume' and len(args) >= 3:
                         # data avg-volume <symbol> <days>
                         symbol = args[1].upper()
                         try:
                             days = int(args[2])
                             from app.cli.data_commands import avg_volume_command
-                            await avg_volume_command(symbol, days)
+                            avg_volume_command(symbol, days)
                         except ValueError:
                             self.console.print("[red]Days must be an integer[/red]")
                     elif subcmd == 'high-low' and len(args) >= 3:
@@ -1213,7 +1461,7 @@ class InteractiveCLI:
                         try:
                             days = int(args[2])
                             from app.cli.data_commands import high_low_command
-                            await high_low_command(symbol, days)
+                            high_low_command(symbol, days)
                         except ValueError:
                             self.console.print("[red]Days must be an integer[/red]")
                     elif subcmd == 'session':
@@ -1252,7 +1500,7 @@ class InteractiveCLI:
                             i += 1
                         
                         from app.cli.session_data_display import data_session_command
-                        await data_session_command(refresh_seconds, csv_file, duration_seconds, no_live)
+                        data_session_command(refresh_seconds, csv_file, duration_seconds, no_live)
                     elif subcmd == 'validate':
                         # data validate [csv_file] [--config config_file] [--db-check]
                         csv_file = None
@@ -1302,7 +1550,7 @@ class InteractiveCLI:
             elif cmd == 'ask':
                 if args:
                     question = ' '.join(args)
-                    await self.ask_claude(question)
+                    self.ask_claude(question)
                 else:
                     # Get usage from registry
                     cmd_meta = next((m for m in CLAUDE_COMMANDS if m.name == 'ask'), None)
@@ -1312,7 +1560,7 @@ class InteractiveCLI:
             elif cmd == 'analyze':
                 if args:
                     symbol = args[0].upper()
-                    await self.analyze_stock(symbol)
+                    self.analyze_stock(symbol)
                 else:
                     # Get usage from registry
                     cmd_meta = next((m for m in CLAUDE_COMMANDS if m.name == 'analyze'), None)
@@ -1350,7 +1598,7 @@ class InteractiveCLI:
                     if subcmd == 'connect':
                         self.console.print("[yellow]Testing Alpaca API connection...[/yellow]")
                         try:
-                            ok = await alpaca_client.validate_connection()
+                            ok = alpaca_client.validate_connection()
                         except Exception as e:
                             logger.error(f"Alpaca connection error: {e}")
                             ok = False
@@ -1402,7 +1650,7 @@ class InteractiveCLI:
                         self.console.print("[yellow]Testing Charles Schwab API connection...[/yellow]")
                         try:
                             from app.integrations.schwab_client import schwab_client
-                            ok = await schwab_client.validate_connection()
+                            ok = schwab_client.validate_connection()
                         except Exception as e:
                             logger.error(f"Schwab connection error: {e}")
                             ok = False
@@ -1477,7 +1725,7 @@ class InteractiveCLI:
                         
                         self.console.print("[yellow]Exchanging authorization code for access token...[/yellow]")
                         try:
-                            await schwab_client.exchange_code_for_token(auth_code)
+                            schwab_client.exchange_code_for_token(auth_code)
                             self.console.print(
                                 Panel.fit(
                                     "[green]✓ Authorization successful![/green]\n"
@@ -1577,6 +1825,128 @@ class InteractiveCLI:
                         for meta in SCHWAB_COMMANDS:
                             self.console.print(f"  [cyan]{meta.usage:<40}[/cyan] {meta.description}")
             
+            # ==================== EXECUTION COMMANDS (from EXECUTION_COMMANDS registry) ====================
+            
+            elif cmd == 'execution':
+                if not args:
+                    # Show available subcommands from registry
+                    subcommands = [meta.name for meta in EXECUTION_COMMANDS]
+                    self.console.print(f"[red]Usage: execution <{' | '.join(subcommands)}>[/red]")
+                else:
+                    subcmd = args[0].lower()
+                    if subcmd == 'api' and len(args) >= 2:
+                        # execution api <provider>
+                        provider = args[1].lower()
+                        from app.cli.execution_commands import select_execution_api_command
+                        select_execution_api_command(provider)
+                    
+                    elif subcmd == 'balance':
+                        # execution balance [--account <id>] [--no-sync]
+                        account_id = "default"
+                        no_sync = False
+                        
+                        # Parse optional flags
+                        i = 1
+                        while i < len(args):
+                            if args[i] == '--account' and i + 1 < len(args):
+                                account_id = args[i + 1]
+                                i += 2
+                            elif args[i] == '--no-sync':
+                                no_sync = True
+                                i += 1
+                            else:
+                                i += 1
+                        
+                        from app.cli.execution_commands import balance_command
+                        balance_command(account_id, no_sync)
+                    
+                    elif subcmd == 'positions':
+                        # execution positions [--account <id>] [--no-sync]
+                        account_id = "default"
+                        no_sync = False
+                        
+                        # Parse optional flags
+                        i = 1
+                        while i < len(args):
+                            if args[i] == '--account' and i + 1 < len(args):
+                                account_id = args[i + 1]
+                                i += 2
+                            elif args[i] == '--no-sync':
+                                no_sync = True
+                                i += 1
+                            else:
+                                i += 1
+                        
+                        from app.cli.execution_commands import positions_command
+                        positions_command(account_id, no_sync)
+                    
+                    elif subcmd == 'orders':
+                        # execution orders [--status <status>] [--days <n>]
+                        account_id = "default"
+                        status = None
+                        days = 7
+                        
+                        # Parse optional flags
+                        i = 1
+                        while i < len(args):
+                            if args[i] == '--account' and i + 1 < len(args):
+                                account_id = args[i + 1]
+                                i += 2
+                            elif args[i] == '--status' and i + 1 < len(args):
+                                status = args[i + 1].upper()
+                                i += 2
+                            elif args[i] == '--days' and i + 1 < len(args):
+                                days = int(args[i + 1])
+                                i += 2
+                            else:
+                                i += 1
+                        
+                        from app.cli.execution_commands import orders_command
+                        orders_command(account_id, status, days)
+                    
+                    elif subcmd == 'order' and len(args) >= 3:
+                        # execution order <symbol> <quantity> [--side BUY|SELL] [--type MARKET|LIMIT] [--price <price>]
+                        symbol = args[1].upper()
+                        quantity = float(args[2])
+                        side = "BUY"
+                        order_type = "MARKET"
+                        price = None
+                        account_id = "default"
+                        
+                        # Parse optional flags
+                        i = 3
+                        while i < len(args):
+                            if args[i] == '--side' and i + 1 < len(args):
+                                side = args[i + 1].upper()
+                                i += 2
+                            elif args[i] == '--type' and i + 1 < len(args):
+                                order_type = args[i + 1].upper()
+                                i += 2
+                            elif args[i] == '--price' and i + 1 < len(args):
+                                price = float(args[i + 1])
+                                i += 2
+                            elif args[i] == '--account' and i + 1 < len(args):
+                                account_id = args[i + 1]
+                                i += 2
+                            else:
+                                i += 1
+                        
+                        from app.cli.execution_commands import place_order_command
+                        place_order_command(symbol, quantity, side, order_type, price, account_id)
+                    
+                    elif subcmd == 'cancel' and len(args) >= 2:
+                        # execution cancel <order_id>
+                        order_id = args[1]
+                        
+                        from app.cli.execution_commands import cancel_order_command
+                        cancel_order_command(order_id)
+                    
+                    else:
+                        # Show usage from registry (single source of truth)
+                        self.console.print("[red]Unknown execution command. Available commands:[/red]\n")
+                        for meta in EXECUTION_COMMANDS:
+                            self.console.print(f"  [cyan]{meta.usage:<60}[/cyan] {meta.description}")
+            
             else:
                 self.console.print(f"[red]Unknown command: {cmd}[/red]")
                 self.console.print("[dim]Type 'help' for available commands[/dim]")
@@ -1609,7 +1979,7 @@ class InteractiveCLI:
             self.console.print("[dim]2. Add it to .env: ANTHROPIC_API_KEY=sk-ant-...[/dim]")
             self.console.print("[dim]3. Restart the CLI[/dim]")
     
-    async def ask_claude(self, question: str):
+    def ask_claude(self, question: str):
         """Ask Claude a question"""
         if not claude_client.client:
             self.console.print("[red]Claude API not configured[/red]")
@@ -1620,7 +1990,7 @@ class InteractiveCLI:
         
         try:
             with self.console.status("[cyan]Thinking...", spinner="dots"):
-                response = await claude_client.client.messages.create(
+                response = claude_client.client.messages.create(
                     model=claude_client.model,
                     max_tokens=2048,
                     temperature=0.7,
@@ -1654,7 +2024,7 @@ class InteractiveCLI:
             self.console.print(f"[red]Error: {e}[/red]")
             logger.error(f"Claude API error: {e}")
     
-    async def analyze_stock(self, symbol: str):
+    def analyze_stock(self, symbol: str):
         """Analyze a stock with Claude"""
         if not claude_client.client:
             self.console.print("[red]Claude API not configured[/red]")
@@ -1670,7 +2040,7 @@ class InteractiveCLI:
             }
             
             with self.console.status(f"[cyan]Analyzing {symbol}...", spinner="dots"):
-                result = await claude_client.analyze_stock(
+                result = claude_client.analyze_stock(
                     symbol=symbol,
                     market_data=market_data,
                     analysis_type="technical"
@@ -1779,7 +2149,7 @@ class InteractiveCLI:
         self.console.print(table)
         self.console.print("\n[dim]Showing last 10 requests[/dim]\n")
     
-    async def run(self):
+    def run(self):
         """
         Run the interactive CLI REPL
         """
@@ -1788,7 +2158,7 @@ class InteractiveCLI:
             self.display_banner()
             
             # Login
-            if not await self.login():
+            if not self.login():
                 self.console.print("[red]Login failed. Exiting...[/red]")
                 return
             
@@ -1802,7 +2172,7 @@ class InteractiveCLI:
                     # Validate session is still active
                     if not auth_service.validate_session(self.session_token):
                         self.console.print("\n[red]Session expired. Please login again.[/red]")
-                        if not await self.login():
+                        if not self.login():
                             break
                     
                     # Get command (use input() for readline compatibility)
@@ -1813,7 +2183,7 @@ class InteractiveCLI:
                     command = input(prompt)
                     
                     # Execute command
-                    if not await self.execute_command(command):
+                    if not self.execute_command(command):
                         break
                         
                 except KeyboardInterrupt:
@@ -1831,6 +2201,5 @@ class InteractiveCLI:
 
 def start_interactive_cli():
     """Start the interactive CLI"""
-    import asyncio
     cli = InteractiveCLI()
-    asyncio.run(cli.run())
+    cli.run()

@@ -95,7 +95,7 @@ def get_system_health() -> Dict[str, Any]:
             "status": "healthy",
             "active_symbols": len(session_data.get_active_symbols()),
             "current_session": str(session_data.current_session_date) if session_data.current_session_date else None,
-            "session_ended": session_data.session_ended
+            "session_active": session_data.is_session_active()
         }
     except Exception as e:
         health["components"]["session_data"] = {

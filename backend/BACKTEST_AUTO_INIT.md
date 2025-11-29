@@ -70,7 +70,7 @@ if mode == "backtest":
 # In system_status_impl.py
 if data_mgr and system_mgr.mode.value == "backtest" and data_mgr.backtest_start_date is None:
     async with AsyncSessionLocal() as session:
-        await data_mgr.init_backtest(session)  # ← Auto-initialize
+        data_mgr.init_backtest(session)  # ← Auto-initialize
 ```
 
 ## Context Handling
@@ -98,7 +98,7 @@ data init --days 30
 ```python
 # Python code
 async with AsyncSessionLocal() as session:
-    await data_mgr.init_backtest(session)
+    data_mgr.init_backtest(session)
 ```
 
 ## Settings Reference

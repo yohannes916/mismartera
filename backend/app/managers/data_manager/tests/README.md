@@ -239,7 +239,7 @@ async def test_XX_async_test(self, system_manager, test_db_session):
     dm = system_manager.get_data_manager()
     
     # Initialize backtest
-    await dm.init_backtest(test_db_session)
+    dm.init_backtest(test_db_session)
     
     # Test
     result = dm.get_current_time()

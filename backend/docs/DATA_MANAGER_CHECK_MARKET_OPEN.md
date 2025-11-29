@@ -131,14 +131,14 @@ def is_session_active(self) -> bool:
 ```python
 # Check before placing order
 if data_manager.check_market_open():
-    await place_order(order)
+    place_order(order)
 else:
     logger.warning("Market closed, cannot place order")
 
 # Check in loop
 while data_manager.check_market_open():
-    await process_data()
-    await asyncio.sleep(1)
+    process_data()
+    asyncio.sleep(1)
 
 # Log market status
 status = "OPEN" if data_manager.check_market_open() else "CLOSED"

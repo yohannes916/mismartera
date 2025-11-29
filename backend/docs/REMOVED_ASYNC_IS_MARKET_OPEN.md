@@ -14,7 +14,7 @@ Having both methods was confusing:
 
 ### New Method is Better
 The synchronous cached version is superior:
-- ✅ **Synchronous** - No await needed
+- ✅ **Synchronous** - No needed
 - ✅ **Complete accuracy** - Checks database for holidays/early closes
 - ✅ **Cached** - Fast after first call per date
 - ✅ **Simple API** - No session parameter needed
@@ -36,7 +36,7 @@ async def is_market_open(
     if TradingHours.is_weekend(check_time):
         return False
     
-    holiday = await HolidayRepository.get_holiday(session, check_time.date())
+    holiday = HolidayRepository.get_holiday(session, check_time.date())
     if holiday and holiday.is_closed:
         return False
     
@@ -101,7 +101,7 @@ def check_market_open(self, timestamp: Optional[datetime] = None) -> bool:
 # Old way
 async def my_function():
     async with AsyncSessionLocal() as session:
-        is_open = await data_manager.is_market_open(session)
+        is_open = data_manager.is_market_open(session)
         if is_open:
             # Do something
 ```

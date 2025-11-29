@@ -11,7 +11,7 @@ from typing import Optional
 from app.managers.system_manager import get_system_manager, SystemState
 from app.managers.data_manager.session_data import get_session_data
 from app.managers.data_manager.backtest_stream_coordinator import get_coordinator
-from app.models.database import AsyncSessionLocal
+from app.models.database import SessionLocal
 from app.config import settings
 from app.logger import logger
 
@@ -19,7 +19,7 @@ from app.logger import logger
 console = Console()
 
 
-async def show_comprehensive_status() -> None:
+def show_comprehensive_status() -> None:
     """Display comprehensive system status with all details."""
     
     system_mgr = get_system_manager()
@@ -29,8 +29,8 @@ async def show_comprehensive_status() -> None:
     # Auto-initialize backtest if in backtest mode and not initialized
     if data_mgr and system_mgr.mode.value == "backtest" and data_mgr.backtest_start_date is None:
         try:
-            async with AsyncSessionLocal() as session:
-                await data_mgr.init_backtest(session)
+            with SessionLocal() as session:
+                data_mgr.init_backtest(session)
                 logger.info("Auto-initialized backtest for system status display")
         except Exception as e:
             logger.warning(f"Could not auto-initialize backtest: {e}")
@@ -90,13 +90,13 @@ async def show_comprehensive_status() -> None:
         if data_mgr.data_api.lower() == "alpaca":
             from app.integrations.alpaca_client import alpaca_client
             try:
-                dm_connected = await alpaca_client.validate_connection()
+                dm_connected = alpaca_client.validate_connection()
             except Exception:
                 dm_connected = False
         elif data_mgr.data_api.lower() == "schwab":
             from app.integrations.schwab_client import schwab_client
             try:
-                dm_connected = await schwab_client.validate_connection()
+                dm_connected = schwab_client.validate_connection()
             except Exception:
                 dm_connected = False
         
@@ -126,30 +126,30 @@ async def show_comprehensive_status() -> None:
     
     # ==================== DATA MANAGER DETAILS ====================
     if data_mgr is not None:
-        await _show_data_manager_details(data_mgr, system_mgr)
+        _show_data_manager_details(data_mgr, system_mgr)
     
     # ==================== MARKET STATUS ====================
     if data_mgr is not None:
-        await _show_market_status(data_mgr)
+        _show_market_status(data_mgr)
     
     # ==================== SESSION DATA ====================
-    await _show_session_data(session_data)
+    _show_session_data(session_data)
     
     # ==================== BACKTEST COORDINATOR ====================
     if system_mgr.mode.value == "backtest" and data_mgr:
-        await _show_coordinator_status(system_mgr)
+        _show_coordinator_status(system_mgr)
     
     # ==================== CONFIGURATION FLAGS ====================
     _show_configuration_flags()
     
     # ==================== HEALTH INDICATORS ====================
-    await _show_health_indicators(system_mgr, data_mgr, session_data)
+    _show_health_indicators(system_mgr, data_mgr, session_data)
     
     # ==================== HINTS ====================
     _show_hints(system_mgr)
 
 
-async def _show_data_manager_details(data_mgr, system_mgr):
+def _show_data_manager_details(data_mgr, system_mgr):
     """Display Data Manager details."""
     dm_table = Table(title="Data Manager Details", show_header=True, header_style="bold blue", box=box.ROUNDED)
     dm_table.add_column("Property", style="blue", width=25)
@@ -163,13 +163,13 @@ async def _show_data_manager_details(data_mgr, system_mgr):
     if data_mgr.data_api.lower() == "alpaca":
         from app.integrations.alpaca_client import alpaca_client
         try:
-            provider_connected = await alpaca_client.validate_connection()
+            provider_connected = alpaca_client.validate_connection()
         except Exception:
             provider_connected = False
     elif data_mgr.data_api.lower() == "schwab":
         from app.integrations.schwab_client import schwab_client
         try:
-            provider_connected = await schwab_client.validate_connection()
+            provider_connected = schwab_client.validate_connection()
         except Exception:
             provider_connected = False
     
@@ -214,11 +214,11 @@ async def _show_data_manager_details(data_mgr, system_mgr):
     console.print()
 
 
-async def _show_market_status(data_mgr):
+def _show_market_status(data_mgr):
     """Display market status."""
     try:
-        async with AsyncSessionLocal() as session:
-            market_info = await data_mgr.get_current_day_market_info(session)
+        with SessionLocal() as session:
+            market_info = data_mgr.get_current_day_market_info(session)
         
         market_table = Table(title="Market Status", show_header=True, header_style="bold green", box=box.ROUNDED)
         market_table.add_column("Property", style="green", width=25)
@@ -264,7 +264,7 @@ async def _show_market_status(data_mgr):
         console.print(f"[red]✗ Error getting market status: {str(e)}[/red]\n")
 
 
-async def _show_session_data(session_data):
+def _show_session_data(session_data):
     """Display session data details."""
     if not session_data:
         return
@@ -277,11 +277,12 @@ async def _show_session_data(session_data):
     current_date = session_data.get_current_session_date()
     is_active = session_data.is_session_active()
     
-    # Get current time from TimeProvider
+    # Get current time from TimeManager
     try:
-        from app.managers.data_manager.time_provider import get_time_provider
-        time_provider = get_time_provider()
-        current_time = time_provider.get_current_time()
+        from app.managers.system_manager import get_system_manager
+        system_mgr = get_system_manager()
+        time_mgr = system_mgr.get_time_manager()
+        current_time = time_mgr.get_current_time()
         session_time_str = current_time.strftime("%H:%M:%S")
     except Exception as e:
         session_time_str = "N/A"
@@ -295,8 +296,6 @@ async def _show_session_data(session_data):
         session_table.add_row("Session Time", session_time_str)
         session_table.add_row("Session Active", "[red]No[/red]")
     
-    session_table.add_row("Session Ended", "Yes" if session_data.session_ended else "No")
-    
     # Active symbols
     active_symbols = session_data.get_active_symbols()
     session_table.add_row("Active Symbols", f"{len(active_symbols)} symbols")
@@ -308,7 +307,7 @@ async def _show_session_data(session_data):
         
         for symbol in sorted(active_symbols):
             try:
-                symbol_data = await session_data.get_symbol_data(symbol)
+                symbol_data = session_data.get_symbol_data(symbol)
                 if symbol_data:
                     session_table.add_row(f"  ┌─ {symbol}", "")
                     
@@ -362,7 +361,7 @@ async def _show_session_data(session_data):
         total_days = set()
         for symbol in active_symbols:
             try:
-                symbol_data = await session_data.get_symbol_data(symbol)
+                symbol_data = session_data.get_symbol_data(symbol)
                 if symbol_data and hasattr(symbol_data, 'historical_bars'):
                     for interval_bars in symbol_data.historical_bars.values():
                         for bar_date, date_bars in interval_bars.items():
@@ -378,7 +377,7 @@ async def _show_session_data(session_data):
     console.print()
 
 
-async def _show_coordinator_status(system_mgr):
+def _show_coordinator_status(system_mgr):
     """Display backtest stream coordinator status."""
     try:
         coordinator = get_coordinator(system_mgr)
@@ -468,7 +467,7 @@ def _show_configuration_flags():
     console.print()
 
 
-async def _show_health_indicators(system_mgr, data_mgr, session_data):
+def _show_health_indicators(system_mgr, data_mgr, session_data):
     """Display health indicators."""
     health_table = Table(title="Health Indicators", show_header=False, box=box.ROUNDED)
     health_table.add_column("Status", style="white")
@@ -493,13 +492,13 @@ async def _show_health_indicators(system_mgr, data_mgr, session_data):
         if data_mgr.data_api.lower() == "alpaca":
             from app.integrations.alpaca_client import alpaca_client
             try:
-                provider_connected = await alpaca_client.validate_connection()
+                provider_connected = alpaca_client.validate_connection()
             except Exception:
                 provider_connected = False
         elif data_mgr.data_api.lower() == "schwab":
             from app.integrations.schwab_client import schwab_client
             try:
-                provider_connected = await schwab_client.validate_connection()
+                provider_connected = schwab_client.validate_connection()
             except Exception:
                 provider_connected = False
     

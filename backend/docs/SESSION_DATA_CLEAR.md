@@ -41,16 +41,16 @@ Now automatically clears session data after stopping streams:
 ```python
 async def stop_all_streams(self) -> None:
     # Stop all streams
-    await self.stop_bars_stream()
-    await self.stop_ticks_stream()
-    await self.stop_quotes_stream()
+    self.stop_bars_stream()
+    self.stop_ticks_stream()
+    self.stop_quotes_stream()
     
     # Stop coordinator worker
     coordinator.stop_worker()
     
     # NEW: Clear session data
     session_data = get_session_data()
-    await session_data.clear()
+    session_data.clear()
 ```
 
 ## Impact on System Behavior
@@ -107,7 +107,7 @@ system start ./config.json
 ### 4. Backtest Initialization
 ```bash
 # When DataManager reinitializes backtest
-await data_manager.init_backtest(session)
+data_manager.init_backtest(session)
 # Calls stop_all_streams() internally
 # ✓ Clears session data
 ```
@@ -119,19 +119,19 @@ await data_manager.init_backtest(session)
 from app.managers.data_manager.session_data import get_session_data
 
 session_data = get_session_data()
-await session_data.clear()
+session_data.clear()
 ```
 
 ### Via DataManager
 ```python
 data_manager = get_data_manager()
-await data_manager.stop_all_streams()  # Clears automatically
+data_manager.stop_all_streams()  # Clears automatically
 ```
 
 ### Via SystemManager
 ```python
 system_manager = get_system_manager()
-await system_manager.stop()  # Calls stop_all_streams() → clears
+system_manager.stop()  # Calls stop_all_streams() → clears
 ```
 
 ## Backwards Compatibility
@@ -140,8 +140,8 @@ await system_manager.stop()  # Calls stop_all_streams() → clears
 
 ```python
 # Both work identically
-await session_data.clear()
-await session_data.clear_all()  # Alias for backwards compatibility
+session_data.clear()
+session_data.clear_all()  # Alias for backwards compatibility
 ```
 
 ## Example Workflows

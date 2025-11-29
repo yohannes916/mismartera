@@ -49,7 +49,7 @@ from app.managers.data_manager.session_data import get_session_data
 session_data = get_session_data()
 
 # O(1) - Instant access
-latest_bar = await session_data.get_latest_bar("AAPL")
+latest_bar = session_data.get_latest_bar("AAPL")
 
 if latest_bar:
     current_price = latest_bar.close
@@ -66,17 +66,17 @@ if latest_bar:
 
 ```python
 # Get last 20 bars for SMA-20 calculation
-bars = await session_data.get_last_n_bars("AAPL", n=20)
+bars = session_data.get_last_n_bars("AAPL", n=20)
 
 if len(bars) >= 20:
     prices = [bar.close for bar in bars]
     sma_20 = sum(prices) / len(prices)
 
 # Get last 50 bars for MACD
-bars_50 = await session_data.get_last_n_bars("AAPL", n=50)
+bars_50 = session_data.get_last_n_bars("AAPL", n=50)
 
 # Get different intervals
-bars_5m = await session_data.get_last_n_bars("AAPL", n=20, interval=5)
+bars_5m = session_data.get_last_n_bars("AAPL", n=20, interval=5)
 ```
 
 **Performance**: ~1-5µs for n=20-100 bars
@@ -92,7 +92,7 @@ from datetime import datetime, timedelta
 
 # Get all bars in the last 5 minutes
 five_min_ago = datetime.now() - timedelta(minutes=5)
-recent_bars = await session_data.get_bars_since("AAPL", five_min_ago)
+recent_bars = session_data.get_bars_since("AAPL", five_min_ago)
 
 # Calculate volume in last 5 minutes
 volume_5m = sum(bar.volume for bar in recent_bars)
@@ -109,7 +109,7 @@ volume_5m = sum(bar.volume for bar in recent_bars)
 ```python
 # Efficient: Single call for multiple symbols
 symbols = ["AAPL", "GOOGL", "MSFT", "TSLA", "NVDA"]
-latest_bars = await session_data.get_latest_bars_multi(symbols)
+latest_bars = session_data.get_latest_bars_multi(symbols)
 
 # Process all at once
 for symbol, bar in latest_bars.items():
@@ -118,7 +118,7 @@ for symbol, bar in latest_bars.items():
 
 # Compare to INEFFICIENT approach (DON'T DO THIS):
 # for symbol in symbols:
-#     bar = await session_data.get_latest_bar(symbol)  # Multiple calls!
+#     bar = session_data.get_latest_bar(symbol)  # Multiple calls!
 ```
 
 **Performance**: 
@@ -135,11 +135,11 @@ for symbol, bar in latest_bars.items():
 
 ```python
 # Check if we have enough bars for indicator
-bar_count = await session_data.get_bar_count("AAPL")
+bar_count = session_data.get_bar_count("AAPL")
 
 if bar_count >= 50:
     # Safe to calculate 50-period indicator
-    bars = await session_data.get_last_n_bars("AAPL", n=50)
+    bars = session_data.get_last_n_bars("AAPL", n=50)
     # ... calculate ...
 else:
     logger.warning(f"Only {bar_count} bars available, need 50")
@@ -157,7 +157,7 @@ else:
 class AnalysisEngine:
     async def get_current_price(self, symbol: str) -> Optional[float]:
         """Get current price for a symbol."""
-        latest_bar = await self.session_data.get_latest_bar(symbol)
+        latest_bar = self.session_data.get_latest_bar(symbol)
         return latest_bar.close if latest_bar else None
 ```
 
@@ -182,12 +182,12 @@ class AnalysisEngine:
             SMA value or None if insufficient data
         """
         # Check if enough data exists (O(1))
-        bar_count = await self.session_data.get_bar_count(symbol, interval)
+        bar_count = self.session_data.get_bar_count(symbol, interval)
         if bar_count < period:
             return None
         
         # Get last N bars (O(n))
-        bars = await self.session_data.get_last_n_bars(symbol, period, interval)
+        bars = self.session_data.get_last_n_bars(symbol, period, interval)
         
         # Calculate SMA
         prices = [bar.close for bar in bars]
@@ -216,13 +216,13 @@ class AnalysisEngine:
         
         # Get recent bars (efficient backward search)
         cutoff = datetime.now() - timedelta(minutes=lookback_minutes)
-        recent_bars = await self.session_data.get_bars_since(symbol, cutoff)
+        recent_bars = self.session_data.get_bars_since(symbol, cutoff)
         
         if not recent_bars:
             return {"error": "No recent bars"}
         
         # Get latest bar for comparison
-        latest = await self.session_data.get_latest_bar(symbol)
+        latest = self.session_data.get_latest_bar(symbol)
         
         # Calculate average volume
         avg_volume = sum(b.volume for b in recent_bars) / len(recent_bars)
@@ -258,7 +258,7 @@ class AnalysisEngine:
             Comparison data for each symbol
         """
         # Batch retrieval (efficient)
-        latest_bars = await self.session_data.get_latest_bars_multi(symbols)
+        latest_bars = self.session_data.get_latest_bars_multi(symbols)
         
         results = {}
         for symbol, bar in latest_bars.items():
@@ -267,7 +267,7 @@ class AnalysisEngine:
                 continue
             
             # Get additional context (last 20 bars)
-            bars_20 = await self.session_data.get_last_n_bars(symbol, 20)
+            bars_20 = self.session_data.get_last_n_bars(symbol, 20)
             
             # Calculate metrics
             prices = [b.close for b in bars_20]
@@ -325,15 +325,15 @@ add_bars_batch(100)              |   45.0    | 22,222/batch
 
 ```python
 # 1. Use batch operations for multiple symbols
-latest_bars = await session_data.get_latest_bars_multi(["AAPL", "GOOGL"])
+latest_bars = session_data.get_latest_bars_multi(["AAPL", "GOOGL"])
 
 # 2. Check bar count before requesting N bars
-count = await session_data.get_bar_count("AAPL")
+count = session_data.get_bar_count("AAPL")
 if count >= 50:
-    bars = await session_data.get_last_n_bars("AAPL", 50)
+    bars = session_data.get_last_n_bars("AAPL", 50)
 
 # 3. Use get_bars_since() for time-based queries
-recent = await session_data.get_bars_since("AAPL", five_minutes_ago)
+recent = session_data.get_bars_since("AAPL", five_minutes_ago)
 
 # 4. Cache frequently accessed data in your module
 class MyAnalyzer:
@@ -342,7 +342,7 @@ class MyAnalyzer:
     
     async def get_sma(self, symbol: str):
         if symbol not in self._cached_sma:
-            bars = await session_data.get_last_n_bars(symbol, 20)
+            bars = session_data.get_last_n_bars(symbol, 20)
             self._cached_sma[symbol] = calculate_sma(bars)
         return self._cached_sma[symbol]
 ```
@@ -352,25 +352,25 @@ class MyAnalyzer:
 ```python
 # 1. DON'T call get_latest_bar in a tight loop for multiple symbols
 for symbol in symbols:  # BAD!
-    bar = await session_data.get_latest_bar(symbol)
+    bar = session_data.get_latest_bar(symbol)
 
 # Use get_latest_bars_multi instead
-latest_bars = await session_data.get_latest_bars_multi(symbols)  # GOOD!
+latest_bars = session_data.get_latest_bars_multi(symbols)  # GOOD!
 
 # 2. DON'T get all bars when you only need recent ones
-all_bars = await session_data.get_bars("AAPL")  # BAD!
+all_bars = session_data.get_bars("AAPL")  # BAD!
 recent = all_bars[-20:]  # Wasteful
 
 # Get only what you need
-recent = await session_data.get_last_n_bars("AAPL", 20)  # GOOD!
+recent = session_data.get_last_n_bars("AAPL", 20)  # GOOD!
 
 # 3. DON'T repeatedly get the same data
 for i in range(100):  # BAD!
-    latest = await session_data.get_latest_bar("AAPL")
+    latest = session_data.get_latest_bar("AAPL")
     # ... process ...
 
 # Get once, use many times
-latest = await session_data.get_latest_bar("AAPL")  # GOOD!
+latest = session_data.get_latest_bar("AAPL")  # GOOD!
 for i in range(100):
     # ... process latest ...
 ```
@@ -434,17 +434,17 @@ class AnalysisEngine:
         """Comprehensive symbol analysis using session_data."""
         
         # 1. Check data availability (O(1))
-        bar_count = await self.session_data.get_bar_count(symbol)
+        bar_count = self.session_data.get_bar_count(symbol)
         if bar_count < 50:
             return {"error": f"Insufficient data: {bar_count} bars"}
         
         # 2. Get latest bar (O(1))
-        latest = await self.session_data.get_latest_bar(symbol)
+        latest = self.session_data.get_latest_bar(symbol)
         if not latest:
             return {"error": "No latest bar"}
         
         # 3. Get bars for indicators (O(n))
-        bars_50 = await self.session_data.get_last_n_bars(symbol, 50)
+        bars_50 = self.session_data.get_last_n_bars(symbol, 50)
         bars_20 = bars_50[-20:]  # Slice from existing list
         
         # 4. Calculate metrics
@@ -454,11 +454,11 @@ class AnalysisEngine:
         # 5. Get recent volume
         from datetime import datetime, timedelta
         five_min_ago = datetime.now() - timedelta(minutes=5)
-        recent_bars = await self.session_data.get_bars_since(symbol, five_min_ago)
+        recent_bars = self.session_data.get_bars_since(symbol, five_min_ago)
         avg_volume_5m = sum(b.volume for b in recent_bars) / len(recent_bars)
         
         # 6. Get session metrics (O(1))
-        metrics = await self.session_data.get_session_metrics(symbol)
+        metrics = self.session_data.get_session_metrics(symbol)
         
         return {
             "symbol": symbol,

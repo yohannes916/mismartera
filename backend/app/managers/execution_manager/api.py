@@ -9,7 +9,7 @@ from typing import List, Optional, Dict, Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.managers.execution_manager.integrations.base import (
-    OrderSide, OrderType, OrderStatus, TimeInForce
+    OrderSide, OrderType, OrderStatus, TimeInForce, BrokerageInterface
 )
 from app.logger import logger
 
@@ -29,18 +29,63 @@ class ExecutionManager:
     Supports both Real and Backtest modes.
     """
     
-    def __init__(self, mode: str = "live", brokerage: str = "schwab"):
+    def __init__(self, mode: str = "live", brokerage: str = "alpaca"):
         """
         Initialize ExecutionManager
         
         Args:
             mode: Operating mode - "live" or "backtest"
-            brokerage: Brokerage to use - "schwab", "paper", etc.
+            brokerage: Brokerage to use - "alpaca", "schwab", etc.
         """
         self.mode = mode
         self.brokerage_name = brokerage
-        self.brokerage = None  # Will be initialized on first use
+        self._brokerage: Optional[BrokerageInterface] = None  # Lazy-loaded
         logger.info(f"ExecutionManager initialized in {mode} mode with {brokerage}")
+    
+    def _get_brokerage(self) -> BrokerageInterface:
+        """Lazy-load and return brokerage client."""
+        if self._brokerage is None:
+            if self.brokerage_name == "alpaca":
+                from app.managers.execution_manager.integrations.alpaca_trading import AlpacaTradingClient
+                self._brokerage = AlpacaTradingClient()
+            elif self.brokerage_name == "schwab":
+                from app.managers.execution_manager.integrations.schwab_trading import SchwabTradingClient
+                self._brokerage = SchwabTradingClient()
+            elif self.brokerage_name == "mismartera":
+                from app.managers.execution_manager.integrations.mismartera_trading import MismarteraTradingClient
+                self._brokerage = MismarteraTradingClient()
+            else:
+                raise ValueError(f"Unknown brokerage: {self.brokerage_name}")
+            logger.info(f"Loaded {self.brokerage_name} brokerage client")
+        return self._brokerage
+    
+    def set_brokerage(self, brokerage: str) -> None:
+        """
+        Switch the active brokerage provider.
+        
+        Args:
+            brokerage: Brokerage name ("alpaca", "schwab", or "mismartera")
+            
+        Raises:
+            ValueError: If brokerage is not supported
+        """
+        brokerage = brokerage.lower()
+        
+        if brokerage not in ["alpaca", "schwab", "mismartera"]:
+            raise ValueError(f"Unknown brokerage: {brokerage}. Supported: alpaca, schwab, mismartera")
+        
+        self.brokerage_name = brokerage
+        self._brokerage = None  # Reset to force reload with new provider
+        logger.info(f"Switched execution manager to {brokerage} brokerage")
+    
+    def get_current_brokerage(self) -> str:
+        """
+        Get the currently active brokerage provider.
+        
+        Returns:
+            Name of the current brokerage
+        """
+        return self.brokerage_name
     
     # ==================== ORDER PLACEMENT ====================
     
@@ -75,6 +120,10 @@ class ExecutionManager:
         from app.models.orders import Order
         import uuid
         
+        # Get current time from TimeManager
+        time_mgr = self.system_manager.get_time_manager()
+        current_time = time_mgr.get_current_time()
+        
         # Validate inputs
         if side not in ["BUY", "SELL"]:
             raise ValueError(f"Invalid side: {side}")
@@ -100,7 +149,7 @@ class ExecutionManager:
             status="PENDING",
             mode=self.mode,
             brokerage=self.brokerage_name,
-            created_at=datetime.utcnow()
+            created_at=current_time
         )
         
         session.add(order)
@@ -115,15 +164,44 @@ class ExecutionManager:
             order.status = "FILLED"
             order.filled_quantity = quantity
             order.avg_fill_price = price or 0.0
-            order.filled_at = datetime.utcnow()
+            order.filled_at = current_time
             await session.commit()
         
         # In live mode, submit to brokerage
         elif self.mode == "live":
-            # TODO: Submit to actual brokerage
-            logger.warning("Real mode order execution not yet implemented")
-            order.status = "PENDING"
-            await session.commit()
+            try:
+                broker = self._get_brokerage()
+                
+                # Convert to enums
+                order_side = OrderSide.BUY if side == "BUY" else OrderSide.SELL
+                order_type_enum = OrderType[order_type]
+                tif_enum = TimeInForce[time_in_force]
+                
+                # Submit to broker
+                broker_response = await broker.place_order(
+                    account_id=account_id,
+                    symbol=symbol,
+                    quantity=quantity,
+                    side=order_side,
+                    order_type=order_type_enum,
+                    price=price,
+                    time_in_force=tif_enum
+                )
+                
+                # Update order with broker details
+                order.broker_order_id = broker_response.get("order_id")
+                order.status = broker_response.get("status", "WORKING")
+                order.submitted_at = current_time
+                await session.commit()
+                
+                logger.info(f"Order submitted to broker: {order.broker_order_id}")
+                
+            except Exception as e:
+                logger.error(f"Failed to submit order to broker: {e}")
+                order.status = "REJECTED"
+                order.error_message = str(e)
+                await session.commit()
+                raise
         
         return {
             "order_id": order.order_id,
@@ -155,6 +233,10 @@ class ExecutionManager:
         from app.models.orders import Order
         from sqlalchemy import select
         
+        # Get current time from TimeManager
+        time_mgr = self.system_manager.get_time_manager()
+        current_time = time_mgr.get_current_time()
+        
         # Find order
         result = await session.execute(
             select(Order).where(Order.order_id == order_id)
@@ -169,7 +251,7 @@ class ExecutionManager:
         
         # Cancel order
         order.status = "CANCELLED"
-        order.cancelled_at = datetime.utcnow()
+        order.cancelled_at = current_time
         await session.commit()
         
         logger.info(f"Order cancelled: {order_id}")
@@ -337,7 +419,8 @@ class ExecutionManager:
     async def get_balance(
         self,
         session: AsyncSession,
-        account_id: str = "default"
+        account_id: str = "default",
+        sync_from_broker: bool = True
     ) -> Dict[str, Any]:
         """
         Get account balance information.
@@ -345,6 +428,7 @@ class ExecutionManager:
         Args:
             session: Database session
             account_id: Account identifier
+            sync_from_broker: If True and in live mode, sync from broker first
             
         Returns:
             Balance information dictionary
@@ -352,13 +436,54 @@ class ExecutionManager:
         from app.models.account import Account
         from sqlalchemy import select
         
+        # Get current time from TimeManager
+        time_mgr = self.system_manager.get_time_manager()
+        current_time = time_mgr.get_current_time()
+        
+        # Sync from broker if in live mode
+        if self.mode == "live" and sync_from_broker:
+            try:
+                broker = self._get_brokerage()
+                broker_balance = await broker.get_account_balance(account_id)
+                
+                # Update or create account in DB
+                result = await session.execute(
+                    select(Account).where(Account.account_id == account_id)
+                )
+                account = result.scalar_one_or_none()
+                
+                if not account:
+                    account = Account(
+                        account_id=account_id,
+                        brokerage=self.brokerage_name,
+                        mode=self.mode
+                    )
+                    session.add(account)
+                
+                # Update with broker data
+                account.brokerage = self.brokerage_name  # Update brokerage in case it changed
+                account.cash_balance = broker_balance.get("cash", 0)
+                account.buying_power = broker_balance.get("buying_power", 0)
+                account.total_value = broker_balance.get("portfolio_value", 0)
+                account.updated_at = current_time
+                
+                await session.commit()
+                await session.refresh(account)
+                
+                logger.info(f"Synced balance from {self.brokerage_name}")
+                
+            except Exception as e:
+                logger.error(f"Failed to sync balance from broker: {e}")
+                # Fall through to return DB data
+        
+        # Return from DB
         result = await session.execute(
             select(Account).where(Account.account_id == account_id)
         )
         account = result.scalar_one_or_none()
         
         if not account:
-            # Create default account if it doesn't exist
+            # Create default account for backtest mode
             account = Account(
                 account_id=account_id,
                 brokerage=self.brokerage_name,
@@ -370,14 +495,22 @@ class ExecutionManager:
             session.add(account)
             await session.commit()
             await session.refresh(account)
+        else:
+            # Update brokerage and mode in DB to match current settings (for record keeping)
+            if account.brokerage != self.brokerage_name or account.mode != self.mode:
+                account.brokerage = self.brokerage_name
+                account.mode = self.mode
+                account.updated_at = current_time
+                await session.commit()
+                await session.refresh(account)
         
         return {
             "account_id": account.account_id,
             "cash_balance": account.cash_balance,
             "buying_power": account.buying_power,
             "total_value": account.total_value,
-            "brokerage": account.brokerage,
-            "mode": account.mode
+            "brokerage": self.brokerage_name,  # Use current brokerage, not DB value
+            "mode": self.mode  # Use current mode, not DB value
         }
     
     async def get_trading_power(
@@ -398,6 +531,111 @@ class ExecutionManager:
         balance = await self.get_balance(session, account_id)
         return balance["buying_power"]
     
+    async def get_positions(
+        self,
+        session: AsyncSession,
+        account_id: str = "default",
+        sync_from_broker: bool = True
+    ) -> List[Dict[str, Any]]:
+        """
+        Get current positions.
+        
+        Args:
+            session: Database session
+            account_id: Account identifier
+            sync_from_broker: If True and in live mode, sync from broker first
+            
+        Returns:
+            List of position dictionaries
+        """
+        from app.models.account import Position
+        from sqlalchemy import select
+        
+        # Get current time from TimeManager
+        time_mgr = self.system_manager.get_time_manager()
+        current_time = time_mgr.get_current_time()
+        
+        # Sync from broker if in live mode
+        if self.mode == "live" and sync_from_broker:
+            try:
+                broker = self._get_brokerage()
+                broker_positions = await broker.get_positions(account_id)
+                
+                # Clear existing positions for this account
+                await session.execute(
+                    select(Position).where(Position.account_id == account_id)
+                )
+                existing_positions = (await session.execute(
+                    select(Position).where(
+                        Position.account_id == account_id,
+                        Position.closed_at.is_(None)
+                    )
+                )).scalars().all()
+                
+                # Mark all as closed first
+                for pos in existing_positions:
+                    pos.closed_at = current_time
+                
+                # Add/update positions from broker
+                for broker_pos in broker_positions:
+                    # Find existing position or create new
+                    result = await session.execute(
+                        select(Position).where(
+                            Position.account_id == account_id,
+                            Position.symbol == broker_pos["symbol"],
+                            Position.closed_at.is_(None)
+                        )
+                    )
+                    position = result.scalar_one_or_none()
+                    
+                    if not position:
+                        position = Position(
+                            account_id=account_id,
+                            symbol=broker_pos["symbol"],
+                            opened_at=current_time
+                        )
+                        session.add(position)
+                    
+                    # Update position data
+                    position.quantity = broker_pos["quantity"]
+                    position.avg_entry_price = broker_pos["avg_entry_price"]
+                    position.current_price = broker_pos["current_price"]
+                    position.market_value = broker_pos["market_value"]
+                    position.unrealized_pnl = broker_pos["unrealized_pnl"]
+                    position.updated_at = current_time
+                    position.closed_at = None  # Reopen if was marked closed
+                
+                await session.commit()
+                logger.info(f"Synced {len(broker_positions)} positions from {self.brokerage_name}")
+                
+            except Exception as e:
+                logger.error(f"Failed to sync positions from broker: {e}")
+                # Fall through to return DB data
+        
+        # Return from DB (open positions only)
+        result = await session.execute(
+            select(Position).where(
+                Position.account_id == account_id,
+                Position.closed_at.is_(None)
+            )
+        )
+        positions = result.scalars().all()
+        
+        return [
+            {
+                "symbol": pos.symbol,
+                "quantity": pos.quantity,
+                "avg_entry_price": pos.avg_entry_price,
+                "current_price": pos.current_price,
+                "market_value": pos.market_value,
+                "unrealized_pnl": pos.unrealized_pnl,
+                "realized_pnl": pos.realized_pnl,
+                "opened_at": pos.opened_at.isoformat() if pos.opened_at else None,
+                "updated_at": pos.updated_at.isoformat() if pos.updated_at else None,
+            }
+            for pos in positions
+        ]
+    
     async def get_pnl(
         self,
         session: AsyncSession,
@@ -417,7 +655,7 @@ class ExecutionManager:
         Returns:
             P&L report dictionary
         """
-        # TODO: Implement P&L calculation
+        # TODO: Implement P&L calculation from closed positions and order history
         logger.warning("P&L calculation not yet implemented")
         
         return {
