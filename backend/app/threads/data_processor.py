@@ -41,7 +41,7 @@ from typing import Optional, Dict, List, Any, Tuple
 from collections import defaultdict
 
 # Phase 1, 2, 3 components
-from app.data.session_data import SessionData
+from app.core.session_data import SessionData
 from app.threads.sync.stream_subscription import StreamSubscription
 from app.monitoring.performance_metrics import PerformanceMetrics
 from app.models.session_config import SessionConfig
@@ -51,9 +51,6 @@ from app.managers.data_manager.derived_bars import (
     compute_derived_bars,
     compute_all_derived_intervals
 )
-
-# Existing infrastructure
-from app.models.database import AsyncSessionLocal
 
 logger = logging.getLogger(__name__)
 
@@ -119,16 +116,18 @@ class DataProcessor(threading.Thread):
         # Notification queue FROM coordinator
         self._notification_queue: queue.Queue[Tuple[str, str, datetime]] = queue.Queue()
         
-        # Subscription TO coordinator (for ready signals)
+        # Subscription for signaling ready TO coordinator
         self._coordinator_subscription: Optional[StreamSubscription] = None
         
         # Notification queue TO analysis engine
         self._analysis_engine_queue: Optional[queue.Queue] = None
         
-        # Configuration
-        upkeep_config = session_config.session_data_config.data_upkeep
-        self._derived_intervals = upkeep_config.derived_intervals
-        self._auto_compute_derived = upkeep_config.auto_compute_derived
+        # Subscription for waiting on analysis engine (Phase 7)
+        self._analysis_subscription: Optional[StreamSubscription] = None
+        
+        # Derived intervals (populated from coordinator markings)
+        # Maps symbol -> list of intervals to generate (e.g., {'AAPL': ['5m', '15m']})
+        self._derived_intervals: Dict[str, List[str]] = {}
         self._realtime_indicators = []  # TODO: From config when indicator config added
         
         # Mode detection
@@ -137,11 +136,7 @@ class DataProcessor(threading.Thread):
         # Performance tracking
         self._processing_times = []
         
-        logger.info(
-            f"DataProcessor initialized: mode={self.mode}, "
-            f"derived_intervals={self._derived_intervals}, "
-            f"auto_compute={self._auto_compute_derived}"
-        )
+        logger.info(f"DataProcessor initialized: mode={self.mode}")
     
     def set_coordinator_subscription(self, subscription: StreamSubscription):
         """Set subscription for signaling ready to coordinator.
@@ -160,6 +155,31 @@ class DataProcessor(threading.Thread):
         """
         self._analysis_engine_queue = queue_ref
         logger.debug("Analysis engine notification queue configured")
+    
+    def set_analysis_subscription(self, subscription: StreamSubscription):
+        """Set subscription for waiting on analysis engine (data-driven mode).
+        
+        Args:
+            subscription: StreamSubscription for analysis engine sync
+        """
+        self._analysis_subscription = subscription
+        logger.debug("Analysis engine subscription configured")
+    
+    def set_derived_intervals(self, generated_data: Dict[str, List[str]]):
+        """Set derived intervals from coordinator's GENERATED markings.
+        
+        Called by SessionCoordinator after it determines what data is GENERATED.
+        
+        Args:
+            generated_data: Map of symbol -> list of intervals to generate
+                           (e.g., {'AAPL': ['5m', '15m'], 'RIVN': ['5m', '15m']})
+        """
+        self._derived_intervals = generated_data.copy()
+        total_intervals = sum(len(v) for v in generated_data.values())
+        logger.info(
+            f"DataProcessor will generate {total_intervals} intervals "
+            f"across {len(generated_data)} symbols: {dict(generated_data)}"
+        )
     
     def notify_data_available(self, symbol: str, interval: str, timestamp: datetime):
         """Receive notification from coordinator that data is available.

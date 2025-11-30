@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from app.models.database import AsyncSessionLocal
 from app.repositories.user_repository import UserRepository
-from app.services.auth_service import auth_service
+from app.services.auth.auth_service import auth_service
 from app.logger import logger
 from app.config import settings
 

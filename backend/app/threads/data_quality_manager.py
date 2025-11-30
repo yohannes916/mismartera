@@ -28,7 +28,7 @@ Key Design:
 - Non-blocking: Does NOT gate coordinator or processor (best effort)
 - No ready signals: Does NOT signal ready to any thread
 - Mode-aware: Backtest (quality only) vs Live (quality + gap filling)
-- Configuration-controlled: enable_session_quality flag
+- Configuration-controlled: enable_session_quality flag (in gap_filler)
 """
 
 import logging
@@ -40,7 +40,7 @@ from typing import Optional, Dict, List, Any, Tuple, Set
 from collections import defaultdict
 
 # Phase 1, 2, 3, 4 components
-from app.data.session_data import SessionData
+from app.core.session_data import SessionData
 from app.monitoring.performance_metrics import PerformanceMetrics
 from app.models.session_config import SessionConfig
 
@@ -52,7 +52,7 @@ from app.threads.quality import (
 )
 
 # Existing infrastructure
-from app.models.database import AsyncSessionLocal
+from app.models.database import SessionLocal
 
 logger = logging.getLogger(__name__)
 
@@ -79,10 +79,10 @@ class DataQualityManager(threading.Thread):
     - Backtest: Quality calculation ONLY (gap filling disabled)
     - Live: Quality calculation + gap filling
     
-    Configuration:
+    Configuration (from session_data_config.gap_filler):
     - enable_session_quality: Enable/disable quality calculation
-    - max_retries: Maximum gap fill retry attempts
-    - retry_interval_seconds: Time between retry attempts
+    - max_retries: Maximum gap fill retry attempts (live mode only)
+    - retry_interval_seconds: Time between retry attempts (live mode only)
     """
     
     def __init__(
@@ -117,19 +117,19 @@ class DataQualityManager(threading.Thread):
         self._stop_event = threading.Event()
         self._running = False
         
-        # Notification queue (for event-driven updates)
+        # Notification queue FROM coordinator (tuples: symbol, interval, timestamp)
         self._notification_queue: queue.Queue[Tuple[str, str, datetime]] = queue.Queue()
         
         # Configuration
         gap_filler_config = session_config.session_data_config.gap_filler
-        self._enable_session_quality = gap_filler_config.enable_session_quality
+        self._enable_quality = gap_filler_config.enable_session_quality
         self._max_retries = gap_filler_config.max_retries
         self._retry_interval_seconds = gap_filler_config.retry_interval_seconds
         
         # Mode detection
         self.mode = "backtest" if session_config.backtest_config else "live"
         self._gap_filling_enabled = (
-            self.mode == "live" and self._enable_session_quality
+            self.mode == "live" and self._enable_quality
         )
         
         # Track failed gaps for retry
@@ -138,12 +138,9 @@ class DataQualityManager(threading.Thread):
         # Track last quality calculation per symbol (for throttling)
         self._last_quality_calc: Dict[str, datetime] = {}
         
-        # Derived intervals (for quality propagation)
-        self._derived_intervals = session_config.session_data_config.data_upkeep.derived_intervals
-        
         logger.info(
             f"DataQualityManager initialized: mode={self.mode}, "
-            f"quality_enabled={self._enable_session_quality}, "
+            f"quality_enabled={self._enable_quality}, "
             f"gap_filling_enabled={self._gap_filling_enabled}, "
             f"max_retries={self._max_retries}"
         )
@@ -241,8 +238,8 @@ class DataQualityManager(threading.Thread):
                 
                 symbol, interval, timestamp = notification
                 
-                # Skip if session quality disabled
-                if not self._enable_session_quality:
+                # Skip if quality disabled
+                if not self._enable_quality:
                     continue
                 
                 logger.debug(
@@ -290,22 +287,8 @@ class DataQualityManager(threading.Thread):
             return
         
         # Get trading hours from TimeManager
-        from app.models.database import AsyncSessionLocal
-        import asyncio
-        
-        # Run async code in sync context
-        async def get_trading_session():
-            async with AsyncSessionLocal() as session:
-                return await self._time_manager.get_trading_session(session, current_date)
-        
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            # No event loop in this thread, create one
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        
-        trading_session = loop.run_until_complete(get_trading_session())
+        with SessionLocal() as db_session:
+            trading_session = self._time_manager.get_trading_session(db_session, current_date)
         
         if trading_session is None or trading_session.is_holiday:
             # Market closed today (holiday)
@@ -400,20 +383,8 @@ class DataQualityManager(threading.Thread):
             return
         
         # Get trading session from TimeManager
-        from app.models.database import AsyncSessionLocal
-        import asyncio
-        
-        async def get_trading_session():
-            async with AsyncSessionLocal() as session:
-                return await self._time_manager.get_trading_session(session, current_date)
-        
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        
-        trading_session = loop.run_until_complete(get_trading_session())
+        with SessionLocal() as db_session:
+            trading_session = self._time_manager.get_trading_session(db_session, current_date)
         
         if trading_session is None or trading_session.is_holiday:
             return
@@ -603,6 +574,7 @@ class DataQualityManager(threading.Thread):
         """Copy quality from base bars to derived bars.
         
         When 1m bar quality changes, copy to 5m, 15m, 30m, etc.
+        Discovers derived intervals from session_data (no explicit config needed).
         
         Args:
             symbol: Symbol with updated quality
@@ -615,22 +587,31 @@ class DataQualityManager(threading.Thread):
         # Get quality for base interval
         base_quality = self.session_data.get_quality_metric(symbol, interval)
         
-        # Propagate to all derived intervals
-        if self._derived_intervals:
-            for derived_interval in self._derived_intervals:
-                derived_interval_str = f"{derived_interval}m"
+        # Get symbol data to discover what intervals exist
+        symbol_data = self.session_data.get_symbol_data(symbol)
+        if not symbol_data:
+            return
+        
+        # Propagate to all bar intervals that exist (derived intervals)
+        # Skip the base interval itself and only propagate to multi-minute intervals
+        for attr_name in dir(symbol_data):
+            if attr_name.startswith('bars_') and attr_name != f'bars_{interval.replace("m", "m")}':
+                # Extract interval from attribute name (e.g., bars_5m -> 5m)
+                derived_interval = attr_name.replace('bars_', '')
                 
-                # Copy base quality to derived interval
-                self.session_data.set_quality_metric(
-                    symbol,
-                    derived_interval_str,
-                    base_quality
-                )
-                
-                logger.debug(
-                    f"Propagated quality {base_quality:.1f}% from {symbol} {interval} "
-                    f"to {derived_interval_str}"
-                )
+                # Only propagate to minute-based intervals (skip 1s, 1d, ticks, quotes)
+                if derived_interval.endswith('m') and derived_interval != interval:
+                    # Copy base quality to derived interval
+                    self.session_data.set_quality_metric(
+                        symbol,
+                        derived_interval,
+                        base_quality
+                    )
+                    
+                    logger.debug(
+                        f"Propagated quality {base_quality:.1f}% from {symbol} {interval} "
+                        f"to {derived_interval}"
+                    )
     
     # =========================================================================
     # Helpers
@@ -658,7 +639,7 @@ class DataQualityManager(threading.Thread):
                 }
         
         return {
-            "enabled": self._enable_session_quality,
+            "enabled": self._enable_quality,
             "gap_filling_enabled": self._gap_filling_enabled,
             "mode": self.mode,
             "total_failed_gaps": total_failed_gaps,

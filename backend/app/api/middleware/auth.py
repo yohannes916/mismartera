@@ -5,7 +5,7 @@ from fastapi import HTTPException, Security, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from typing import Optional, Dict, Any
 
-from app.services.auth_service import auth_service
+from app.services.auth.auth_service import auth_service
 from app.logger import logger
 
 # HTTP Bearer token security scheme

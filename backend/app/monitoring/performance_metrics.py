@@ -66,6 +66,62 @@ class MetricStats:
         }
 
 
+class MetricCounter:
+    """Simple counter for tracking quantities (not timing).
+    
+    Generic counter that can track any countable metric:
+    - Bars processed
+    - Iterations completed
+    - Records streamed
+    - Events handled
+    - Etc.
+    
+    Designed to be reusable across all components.
+    """
+    
+    def __init__(self, name: str):
+        """Initialize metric counter.
+        
+        Args:
+            name: Counter name for identification
+        """
+        self.name = name
+        self.count: int = 0
+    
+    def increment(self, amount: int = 1) -> None:
+        """Increment counter by specified amount.
+        
+        Args:
+            amount: Amount to increment (default 1)
+        """
+        self.count += amount
+    
+    def set(self, value: int) -> None:
+        """Set counter to specific value.
+        
+        Args:
+            value: New counter value
+        """
+        self.count = value
+    
+    def get(self) -> int:
+        """Get current counter value.
+        
+        Returns:
+            Current count
+        """
+        return self.count
+    
+    def reset(self) -> None:
+        """Reset counter to zero."""
+        self.count = 0
+        logger.debug(f"MetricCounter '{self.name}' reset")
+    
+    def __repr__(self) -> str:
+        """String representation."""
+        return f"MetricCounter(name='{self.name}', count={self.count})"
+
+
 class MetricTracker:
     """Tracks min/max/avg for a single metric using running statistics.
     
@@ -139,12 +195,18 @@ class PerformanceMetrics:
     
     def __init__(self):
         """Initialize performance metrics."""
-        # Per-session metrics (reset at session start)
+        # Per-session timing trackers (reset at session start)
         self.analysis_engine = MetricTracker('analysis_engine')
         self.data_processor = MetricTracker('data_processor')
         self.session_gap = MetricTracker('session_gap')
         self.session_duration = MetricTracker('session_duration')
         self.data_loading_subsequent = MetricTracker('data_loading_subsequent')
+        
+        # Generic counters (reusable by all components)
+        self.bars_processed = MetricCounter('bars_processed')
+        self.iterations = MetricCounter('iterations')
+        self.events_handled = MetricCounter('events_handled')
+        self.records_streamed = MetricCounter('records_streamed')
         
         # Initial load (single value, not reset per session)
         self.data_loading_initial: Optional[float] = None
@@ -276,6 +338,66 @@ class PerformanceMetrics:
         """Mark backtest end time."""
         self.backtest_end_time = time.perf_counter()
         logger.info("Backtest timer stopped")
+    
+    # =========================================================================
+    # Counter Methods (Generic, Reusable)
+    # =========================================================================
+    
+    def increment_bars_processed(self, amount: int = 1) -> None:
+        """Increment bars processed counter.
+        
+        Generic counter that can be used by any component processing bars.
+        
+        Args:
+            amount: Number of bars to add (default 1)
+        """
+        self.bars_processed.increment(amount)
+    
+    def increment_iterations(self, amount: int = 1) -> None:
+        """Increment iterations counter.
+        
+        Generic counter for tracking loop iterations, cycles, etc.
+        
+        Args:
+            amount: Number of iterations to add (default 1)
+        """
+        self.iterations.increment(amount)
+    
+    def increment_events_handled(self, amount: int = 1) -> None:
+        """Increment events handled counter.
+        
+        Generic counter for tracking events, notifications, messages, etc.
+        
+        Args:
+            amount: Number of events to add (default 1)
+        """
+        self.events_handled.increment(amount)
+    
+    def increment_records_streamed(self, amount: int = 1) -> None:
+        """Increment records streamed counter.
+        
+        Generic counter for tracking streamed records (bars, ticks, quotes).
+        
+        Args:
+            amount: Number of records to add (default 1)
+        """
+        self.records_streamed.increment(amount)
+    
+    def get_bars_processed(self) -> int:
+        """Get total bars processed."""
+        return self.bars_processed.get()
+    
+    def get_iterations(self) -> int:
+        """Get total iterations."""
+        return self.iterations.get()
+    
+    def get_events_handled(self) -> int:
+        """Get total events handled."""
+        return self.events_handled.get()
+    
+    def get_records_streamed(self) -> int:
+        """Get total records streamed."""
+        return self.records_streamed.get()
     
     # =========================================================================
     # Report Formatting
@@ -442,25 +564,36 @@ class PerformanceMetrics:
     def reset_session_metrics(self) -> None:
         """Reset per-session metrics.
         
-        Called at session start. Does NOT reset backtest summary.
+        Called at session start. Does NOT reset backtest summary or counters.
         """
         self.analysis_engine.reset()
         self.data_processor.reset()
         # Note: session_gap and session_duration are NOT reset (persist across sessions)
         # Note: data_loading_subsequent is NOT reset (persist across sessions)
+        # Note: Counters are NOT reset (persist across sessions)
         logger.debug("Session metrics reset")
     
     def reset_all(self) -> None:
         """Reset all metrics (for new backtest)."""
+        # Reset timing trackers
         self.analysis_engine.reset()
         self.data_processor.reset()
         self.session_gap.reset()
         self.session_duration.reset()
         self.data_loading_subsequent.reset()
+        
+        # Reset counters
+        self.bars_processed.reset()
+        self.iterations.reset()
+        self.events_handled.reset()
+        self.records_streamed.reset()
+        
+        # Reset backtest summary
         self.data_loading_initial = None
         self.backtest_start_time = None
         self.backtest_end_time = None
         self.backtest_trading_days = 0
+        
         logger.info("All metrics reset")
     
     # =========================================================================
@@ -471,7 +604,7 @@ class PerformanceMetrics:
         """Get backtest summary statistics.
         
         Returns:
-            Dictionary with summary stats
+            Dictionary with summary stats including counters
         """
         total_time = None
         avg_per_day = None
@@ -490,6 +623,10 @@ class PerformanceMetrics:
             'data_processor': self.data_processor.get_stats(),
             'session_gap': self.session_gap.get_stats(),
             'session_duration': self.session_duration.get_stats(),
+            'bars_processed': self.bars_processed.get(),
+            'iterations': self.iterations.get(),
+            'events_handled': self.events_handled.get(),
+            'records_streamed': self.records_streamed.get(),
         }
     
     def __repr__(self) -> str:
@@ -497,7 +634,7 @@ class PerformanceMetrics:
         return (
             f"PerformanceMetrics("
             f"trading_days={self.backtest_trading_days}, "
-            f"analysis_cycles={self.analysis_engine.stats.count}, "
-            f"data_items={self.data_processor.stats.count}"
+            f"bars_processed={self.bars_processed.get()}, "
+            f"iterations={self.iterations.get()}"
             f")"
         )

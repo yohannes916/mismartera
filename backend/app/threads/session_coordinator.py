@@ -26,7 +26,6 @@ Dependencies (Phase 1 & 2):
 - TimeManager (Phase 2.2) - Time/calendar with caching
 """
 
-import asyncio
 import logging
 import threading
 from datetime import datetime, date, time, timedelta
@@ -34,13 +33,13 @@ from typing import Optional, Dict, List, Any, Tuple
 from collections import defaultdict
 
 # Phase 1 & 2 components
-from app.data.session_data import SessionData
+from app.core.session_data import SessionData
 from app.threads.sync.stream_subscription import StreamSubscription
 from app.monitoring.performance_metrics import PerformanceMetrics
 from app.models.session_config import SessionConfig
 
 # Existing infrastructure
-from app.models.database import AsyncSessionLocal
+from app.models.database import SessionLocal
 
 logger = logging.getLogger(__name__)
 
@@ -140,8 +139,8 @@ class SessionCoordinator(threading.Thread):
             # Start backtest timing
             self.metrics.start_backtest()
             
-            # Main coordinator loop
-            asyncio.run(self._coordinator_loop())
+            # Main coordinator loop (synchronous)
+            self._coordinator_loop()
             
             # End backtest timing
             self.metrics.end_backtest()
@@ -156,7 +155,7 @@ class SessionCoordinator(threading.Thread):
             self._running = False
             logger.info("SessionCoordinator thread stopped")
     
-    async def _coordinator_loop(self):
+    def _coordinator_loop(self):
         """Main coordinator loop with all lifecycle phases.
         
         This is the heart of the session coordinator. Each iteration
@@ -167,19 +166,19 @@ class SessionCoordinator(threading.Thread):
                 # Phase 1: Initialization
                 logger.info("=" * 70)
                 logger.info("Phase 1: Initialization")
-                await self._initialize_session()
+                self._initialize_session()
                 
                 # Phase 2: Historical Management
                 logger.info("Phase 2: Historical Management")
                 gap_start = self.metrics.start_timer()
-                await self._manage_historical_data()
-                await self._calculate_historical_indicators()
+                self._manage_historical_data()
+                self._calculate_historical_indicators()
                 self._calculate_historical_quality()
                 self.metrics.record_session_gap(gap_start)
                 
                 # Phase 3: Queue Loading
                 logger.info("Phase 3: Queue Loading")
-                await self._load_queues()
+                self._load_queues()
                 
                 # Phase 4: Session Activation
                 logger.info("Phase 4: Session Activation")
@@ -187,11 +186,11 @@ class SessionCoordinator(threading.Thread):
                 
                 # Phase 5: Streaming Phase
                 logger.info("Phase 5: Streaming Phase")
-                await self._streaming_phase()
+                self._streaming_phase()
                 
                 # Phase 6: End-of-Session
                 logger.info("Phase 6: End-of-Session")
-                await self._end_session()
+                self._end_session()
                 
                 # Check termination
                 if self._should_terminate():
@@ -211,7 +210,7 @@ class SessionCoordinator(threading.Thread):
     # Phase 1: Initialization
     # =========================================================================
     
-    async def _initialize_session(self):
+    def _initialize_session(self):
         """Initialize session (called at start of each session).
         
         Tasks:
@@ -222,6 +221,10 @@ class SessionCoordinator(threading.Thread):
         # Mark stream/generate on first session only
         if not self._streamed_data:
             self._mark_stream_generate()
+            
+            # Inform data processor what intervals to generate
+            if self.data_processor:
+                self.data_processor.set_derived_intervals(self._generated_data)
         
         # Reset session state
         self._session_active = False
@@ -244,7 +247,7 @@ class SessionCoordinator(threading.Thread):
     # Phase 2: Historical Management
     # =========================================================================
     
-    async def _manage_historical_data(self):
+    def _manage_historical_data(self):
         """Manage historical data before session starts.
         
         Tasks:
@@ -278,7 +281,7 @@ class SessionCoordinator(threading.Thread):
         
         # Process each historical data configuration
         for hist_data_config in historical_config.data:
-            await self._load_historical_data_config(
+            self._load_historical_data_config(
                 hist_data_config,
                 current_date
             )
@@ -297,7 +300,7 @@ class SessionCoordinator(threading.Thread):
             f"{len(historical_config.data)} configs ({elapsed:.3f}s)"
         )
     
-    async def _calculate_historical_indicators(self):
+    def _calculate_historical_indicators(self):
         """Calculate all historical indicators before EVERY session.
         
         Tasks:
@@ -321,17 +324,17 @@ class SessionCoordinator(threading.Thread):
                 indicator_type = indicator_config['type']
                 
                 if indicator_type == 'trailing_average':
-                    result = await self._calculate_trailing_average(
+                    result = self._calculate_trailing_average(
                         indicator_name,
                         indicator_config
                     )
                 elif indicator_type == 'trailing_max':
-                    result = await self._calculate_trailing_max(
+                    result = self._calculate_trailing_max(
                         indicator_name,
                         indicator_config
                     )
                 elif indicator_type == 'trailing_min':
-                    result = await self._calculate_trailing_min(
+                    result = self._calculate_trailing_min(
                         indicator_name,
                         indicator_config
                     )
@@ -525,7 +528,7 @@ class SessionCoordinator(threading.Thread):
     # Phase 3: Queue Loading
     # =========================================================================
     
-    async def _load_queues(self):
+    def _load_queues(self):
         """Load queues with data for streaming phase.
         
         Backtest: Load prefetch_days of data into queues
@@ -537,9 +540,9 @@ class SessionCoordinator(threading.Thread):
         start_time = self.metrics.start_timer()
         
         if self.mode == "backtest":
-            await self._load_backtest_queues()
+            self._load_backtest_queues()
         else:  # live mode
-            await self._start_live_streams()
+            self._start_live_streams()
         
         elapsed = self.metrics.elapsed_time(start_time)
         logger.info(f"Queues loaded ({elapsed:.3f}s)")
@@ -559,7 +562,7 @@ class SessionCoordinator(threading.Thread):
     # Phase 5: Streaming Phase
     # =========================================================================
     
-    async def _streaming_phase(self):
+    def _streaming_phase(self):
         """Main streaming loop with time advancement.
         
         This is the most complex phase. Handles:
@@ -576,30 +579,23 @@ class SessionCoordinator(threading.Thread):
         3. Data exhaustion: advance to market_close
         4. Support data-driven (speed=0) and clock-driven (speed>0)
         """
-        # Get trading session for today
+        # Get current time and date from TimeManager
         current_time = self._time_manager.get_current_time()
         current_date = current_time.date()
         
-        async with AsyncSessionLocal() as session:
-            trading_session = await self._time_manager.get_trading_session(
+        # Get market hours from TimeManager (timezone-aware datetime objects)
+        with SessionLocal() as session:
+            market_hours = self._time_manager.get_market_hours_datetime(
                 session,
                 current_date,
                 exchange=self.session_config.exchange_group
             )
         
-        if not trading_session or trading_session.is_holiday:
+        if not market_hours:
             logger.warning(f"No trading session for {current_date}, skipping streaming")
             return
         
-        # Get market hours
-        market_open = datetime.combine(
-            current_date,
-            trading_session.regular_open
-        )
-        market_close = datetime.combine(
-            current_date,
-            trading_session.regular_close
-        )
+        market_open, market_close = market_hours
         
         logger.info(
             f"Streaming phase: {market_open.time()} to {market_close.time()}"
@@ -632,7 +628,7 @@ class SessionCoordinator(threading.Thread):
                 )
             
             # Get next data timestamp from queues
-            next_timestamp = await self._get_next_queue_timestamp()
+            next_timestamp = self._get_next_queue_timestamp()
             
             if next_timestamp is None:
                 # No more data - advance to market close and end
@@ -658,7 +654,7 @@ class SessionCoordinator(threading.Thread):
             self._time_manager.set_backtest_time(next_timestamp)
             
             # Process data at this timestamp
-            bars_processed = await self._process_queue_data_at_timestamp(
+            bars_processed = self._process_queue_data_at_timestamp(
                 next_timestamp
             )
             total_bars_processed += bars_processed
@@ -670,7 +666,7 @@ class SessionCoordinator(threading.Thread):
             if self.mode == "backtest" and self.session_config.backtest_config:
                 speed_multiplier = self.session_config.backtest_config.speed_multiplier
                 if speed_multiplier > 0:
-                    await self._apply_clock_driven_delay(speed_multiplier)
+                    self._apply_clock_driven_delay(speed_multiplier)
             
             # Periodic logging (every 100 iterations)
             if iteration % 100 == 0:
@@ -695,7 +691,7 @@ class SessionCoordinator(threading.Thread):
     # Phase 6: End-of-Session
     # =========================================================================
     
-    async def _end_session(self):
+    def _end_session(self):
         """End current session and prepare for next.
         
         Tasks:
@@ -731,23 +727,22 @@ class SessionCoordinator(threading.Thread):
         
         # 6. Advance to next trading day (if in backtest mode)
         if self.mode == "backtest":
-            await self._advance_to_next_trading_day(current_date)
+            self._advance_to_next_trading_day(current_date)
         else:
             # Live mode: just wait for next day (handled by system)
             logger.info("Live mode: waiting for next trading day")
     
-    async def _advance_to_next_trading_day(self, current_date: date):
+    def _advance_to_next_trading_day(self, current_date: date):
         """Advance time to next trading day's market open.
         
         Args:
             current_date: Current session date
         """
         # Find next trading date
-        async with AsyncSessionLocal() as session:
-            next_date = await self._time_manager.get_next_trading_date(
+        with SessionLocal() as session:
+            next_date = self._time_manager.get_next_trading_date(
                 session,
                 current_date,
-                n=1,
                 exchange=self.session_config.exchange_group
             )
         
@@ -773,8 +768,8 @@ class SessionCoordinator(threading.Thread):
             return
         
         # Get next session's market open time
-        async with AsyncSessionLocal() as session:
-            next_session = await self._time_manager.get_trading_session(
+        with SessionLocal() as session:
+            next_session = self._time_manager.get_trading_session(
                 session,
                 next_date,
                 exchange=self.session_config.exchange_group
@@ -785,7 +780,7 @@ class SessionCoordinator(threading.Thread):
                 f"Next date {next_date} is not a trading day, searching further"
             )
             # Recursively find next valid trading day
-            await self._advance_to_next_trading_day(next_date)
+            self._advance_to_next_trading_day(next_date)
             return
         
         # Set time to market open of next day
@@ -1000,7 +995,7 @@ class SessionCoordinator(threading.Thread):
                 "(API capabilities check TODO)"
             )
     
-    async def _load_historical_data_config(
+    def _load_historical_data_config(
         self,
         hist_config,
         current_date: date
@@ -1025,7 +1020,7 @@ class SessionCoordinator(threading.Thread):
         end_date = current_date - timedelta(days=1)
         
         # Start date: count back trailing_days of TRADING days
-        start_date = await self._get_start_date_for_trailing_days(
+        start_date = self._get_start_date_for_trailing_days(
             end_date,
             trailing_days
         )
@@ -1045,7 +1040,7 @@ class SessionCoordinator(threading.Thread):
         # Load bars for each symbol and interval
         for symbol in symbols:
             for interval in intervals:
-                bars = await self._load_historical_bars(
+                bars = self._load_historical_bars(
                     symbol,
                     interval,
                     start_date,
@@ -1080,7 +1075,7 @@ class SessionCoordinator(threading.Thread):
             )
             return self.session_config.session_data_config.symbols
     
-    async def _get_start_date_for_trailing_days(
+    def _get_start_date_for_trailing_days(
         self,
         end_date: date,
         trailing_days: int
@@ -1110,11 +1105,11 @@ class SessionCoordinator(threading.Thread):
             return end_date
         
         # Use TimeManager to count back trading days
-        async with AsyncSessionLocal() as session:
-            start_date = await self._time_manager.get_previous_trading_date(
+        with SessionLocal() as session:
+            start_date = self._time_manager.get_previous_trading_date(
                 session,
                 end_date,
-                n=days_to_go_back,
+                n=trailing_days,
                 exchange=self.session_config.exchange_group
             )
         
@@ -1132,7 +1127,7 @@ class SessionCoordinator(threading.Thread):
         
         return start_date
     
-    async def _load_historical_bars(self,
+    def _load_historical_bars(self,
         symbol: str,
         interval: str,
         start_date: date,
@@ -1160,7 +1155,7 @@ class SessionCoordinator(threading.Thread):
             
             # Placeholder: Return empty list
             # In real implementation:
-            # bars = await self._data_manager.get_historical_bars(
+            # bars = self._data_manager.get_historical_bars(
             #     symbol, interval, start_date, end_date
             # )
             bars = []
@@ -1178,7 +1173,7 @@ class SessionCoordinator(threading.Thread):
     # Historical Indicator Calculation
     # =========================================================================
     
-    async def _calculate_trailing_average(
+    def _calculate_trailing_average(
         self,
         indicator_name: str,
         config: Dict[str, Any]
@@ -1211,12 +1206,12 @@ class SessionCoordinator(threading.Thread):
         
         if granularity == 'daily':
             # Daily: one value per day, return average
-            result = await self._calculate_daily_average(
+            result = self._calculate_daily_average(
                 field, period_days, skip_early_close
             )
         elif granularity == 'minute':
             # Minute: average for each minute of trading day
-            result = await self._calculate_intraday_average(
+            result = self._calculate_intraday_average(
                 field, period_days
             )
         else:
@@ -1224,7 +1219,7 @@ class SessionCoordinator(threading.Thread):
         
         return result
     
-    async def _calculate_trailing_max(
+    def _calculate_trailing_max(
         self,
         indicator_name: str,
         config: Dict[str, Any]
@@ -1248,11 +1243,11 @@ class SessionCoordinator(threading.Thread):
         )
         
         # Get all bars for the period
-        max_value = await self._calculate_field_max(field, period_days)
+        max_value = self._calculate_field_max(field, period_days)
         
         return max_value
     
-    async def _calculate_trailing_min(
+    def _calculate_trailing_min(
         self,
         indicator_name: str,
         config: Dict[str, Any]
@@ -1276,7 +1271,7 @@ class SessionCoordinator(threading.Thread):
         )
         
         # Get all bars for the period
-        min_value = await self._calculate_field_min(field, period_days)
+        min_value = self._calculate_field_min(field, period_days)
         
         return min_value
     
@@ -1312,7 +1307,7 @@ class SessionCoordinator(threading.Thread):
         else:
             raise ValueError(f"Invalid period format: {period}")
     
-    async def _calculate_daily_average(
+    def _calculate_daily_average(
         self,
         field: str,
         period_days: int,
@@ -1344,7 +1339,7 @@ class SessionCoordinator(threading.Thread):
         
         return 0.0
     
-    async def _calculate_intraday_average(
+    def _calculate_intraday_average(
         self,
         field: str,
         period_days: int
@@ -1373,7 +1368,7 @@ class SessionCoordinator(threading.Thread):
         
         return [0.0] * 390
     
-    async def _calculate_field_max(
+    def _calculate_field_max(
         self,
         field: str,
         period_days: int
@@ -1400,7 +1395,7 @@ class SessionCoordinator(threading.Thread):
         
         return 0.0
     
-    async def _calculate_field_min(
+    def _calculate_field_min(
         self,
         field: str,
         period_days: int
@@ -1431,7 +1426,7 @@ class SessionCoordinator(threading.Thread):
     # Queue Loading
     # =========================================================================
     
-    async def _load_backtest_queues(self):
+    def _load_backtest_queues(self):
         """Load queues with prefetch_days of data for backtest mode.
         
         For each symbol:
@@ -1451,7 +1446,7 @@ class SessionCoordinator(threading.Thread):
         
         # Calculate date range for prefetch
         start_date = current_date
-        end_date = await self._get_date_plus_trading_days(
+        end_date = self._get_date_plus_trading_days(
             start_date,
             prefetch_days - 1  # -1 because start_date is day 1
         )
@@ -1488,7 +1483,7 @@ class SessionCoordinator(threading.Thread):
                     )
                     
                     # Placeholder: In real implementation:
-                    # await self._data_manager.start_bar_stream(
+                    # self._data_manager.start_bar_stream(
                     #     symbol, interval, start_date, end_date
                     # )
                     
@@ -1502,7 +1497,7 @@ class SessionCoordinator(threading.Thread):
         
         logger.info(f"Loaded {total_streams} backtest streams")
     
-    async def _start_live_streams(self):
+    def _start_live_streams(self):
         """Start live API streams for live mode.
         
         For each symbol:
@@ -1532,7 +1527,7 @@ class SessionCoordinator(threading.Thread):
                     )
                     
                     # Placeholder: In real implementation:
-                    # await self._data_manager.start_live_stream(
+                    # self._data_manager.start_live_stream(
                     #     symbol, stream_type
                     # )
                     
@@ -1560,7 +1555,7 @@ class SessionCoordinator(threading.Thread):
         """
         return self._streamed_data.get(symbol, [])
     
-    async def _get_date_plus_trading_days(
+    def _get_date_plus_trading_days(
         self,
         start_date: date,
         num_days: int
@@ -1585,8 +1580,8 @@ class SessionCoordinator(threading.Thread):
             return start_date
         
         # Use TimeManager to count forward trading days
-        async with AsyncSessionLocal() as session:
-            end_date = await self._time_manager.get_next_trading_date(
+        with SessionLocal() as session:
+            end_date = self._time_manager.get_next_trading_date(
                 session,
                 start_date,
                 n=num_days,
@@ -1610,7 +1605,7 @@ class SessionCoordinator(threading.Thread):
     # Streaming Phase Helpers
     # =========================================================================
     
-    async def _get_next_queue_timestamp(self) -> Optional[datetime]:
+    def _get_next_queue_timestamp(self) -> Optional[datetime]:
         """Get earliest timestamp across all queues.
         
         Queries DataManager for the next available data timestamp across
@@ -1627,7 +1622,7 @@ class SessionCoordinator(threading.Thread):
         # next_timestamps = []
         # for symbol in self.session_config.session_data_config.symbols:
         #     for interval in self._get_streamed_intervals_for_symbol(symbol):
-        #         ts = await self._data_manager.peek_queue_timestamp(symbol, interval)
+        #         ts = self._data_manager.peek_queue_timestamp(symbol, interval)
         #         if ts:
         #             next_timestamps.append(ts)
         # 
@@ -1638,7 +1633,7 @@ class SessionCoordinator(threading.Thread):
         
         return None
     
-    async def _process_queue_data_at_timestamp(
+    def _process_queue_data_at_timestamp(
         self,
         timestamp: datetime
     ) -> int:
@@ -1666,7 +1661,7 @@ class SessionCoordinator(threading.Thread):
         #     for interval in self._get_streamed_intervals_for_symbol(symbol):
         #         while True:
         #             # Peek at queue head
-        #             bar = await self._data_manager.peek_queue(symbol, interval)
+        #             bar = self._data_manager.peek_queue(symbol, interval)
         #             if not bar:
         #                 break
         #             
@@ -1675,7 +1670,7 @@ class SessionCoordinator(threading.Thread):
         #                 break
         #             
         #             # Consume and add to session_data
-        #             bar = await self._data_manager.consume_queue(symbol, interval)
+        #             bar = self._data_manager.consume_queue(symbol, interval)
         #             self.session_data.append_bar(symbol, interval, bar)
         #             bars_processed += 1
         #             
@@ -1696,7 +1691,7 @@ class SessionCoordinator(threading.Thread):
         
         return bars_processed
     
-    async def _apply_clock_driven_delay(self, speed_multiplier: float):
+    def _apply_clock_driven_delay(self, speed_multiplier: float):
         """Apply clock-driven delay based on speed multiplier.
         
         In clock-driven mode, we simulate real-time by adding delays.
@@ -1721,4 +1716,5 @@ class SessionCoordinator(threading.Thread):
         delay_seconds = min(delay_seconds, 60.0)
         
         if delay_seconds > 0.001:  # Only sleep if > 1ms
-            await asyncio.sleep(delay_seconds)
+            import time
+            time.sleep(delay_seconds)

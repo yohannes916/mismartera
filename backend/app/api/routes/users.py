@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import get_db
 from app.repositories.user_repository import UserRepository
-from app.services.auth_service import auth_service
+from app.services.auth.auth_service import auth_service
 from app.api.middleware.auth import get_current_user, get_admin_user
 from app.logger import logger
 

@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import get_db
 from app.managers.data_manager.parquet_storage import parquet_storage
-from app.services.csv_import_service import csv_import_service
+from app.services.market_data.csv_import_service import csv_import_service
 from app.api.middleware.auth import get_current_user, get_admin_user
 from app.managers import DataManager
 from app.logger import logger

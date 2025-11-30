@@ -305,7 +305,66 @@ def generate_session_display(compact: bool = True) -> Table:
         else:
             main_table.add_row("│  [dim]No active streams[/dim]", "")
     
-    # === SECTION 2: HISTORICAL ===
+    # === SECTION 2: BACKTEST WINDOW ===
+    if mode == "backtest" and compact:
+        main_table.add_row("", "")  # Spacing
+        main_table.add_row("[bold green]━━ BACKTEST WINDOW ━━[/bold green]", "")
+        
+        # Get backtest window from TimeManager (single source of truth)
+        try:
+            backtest_start = time_mgr.backtest_start_date
+            backtest_end = time_mgr.backtest_end_date
+            
+            if backtest_start and backtest_end:
+                start_str = backtest_start.strftime("%Y-%m-%d")
+                end_str = backtest_end.strftime("%Y-%m-%d")
+                
+                # Calculate total days
+                from app.models.database import SessionLocal
+                with SessionLocal() as db_session:
+                    trading_days = time_mgr.count_trading_days(db_session, backtest_start, backtest_end)
+                
+                window_info = f"Start: {start_str} | End: {end_str} | Trading Days: {trading_days}"
+                main_table.add_row("  Window", window_info)
+                
+                # Current progress
+                if current_date:
+                    days_completed = time_mgr.count_trading_days(db_session, backtest_start, current_date)
+                    progress_pct = (days_completed / trading_days * 100) if trading_days > 0 else 0
+                    progress_color = "green" if progress_pct > 0 else "yellow"
+                    main_table.add_row("  Progress", f"[{progress_color}]{progress_pct:.1f}% ({days_completed}/{trading_days} days)[/{progress_color}]")
+            else:
+                main_table.add_row("  Window", "[dim]Not configured[/dim]")
+        except Exception as e:
+            logger.debug(f"Error displaying backtest window: {e}")
+            main_table.add_row("  Window", "[dim]Error loading[/dim]")
+    
+    # === SECTION 3: PERFORMANCE METRICS ===
+    if compact:
+        main_table.add_row("", "")  # Spacing
+        main_table.add_row("[bold yellow]━━ PERFORMANCE ━━[/bold yellow]", "")
+        
+        try:
+            metrics = system_mgr._performance_metrics
+            
+            # Counters
+            bars_processed = metrics.get_bars_processed()
+            iterations = metrics.get_iterations()
+            
+            if bars_processed > 0 or iterations > 0:
+                counters_info = f"Bars: {bars_processed:,} | Iterations: {iterations:,}"
+                main_table.add_row("  Counters", counters_info)
+            
+            # Timing stats (only if we have data)
+            dp_stats = metrics.data_processor.get_stats()
+            if dp_stats['count'] > 0:
+                timing_info = f"Data Processor: {dp_stats['avg']*1000:.2f}ms avg ({dp_stats['count']:,} items)"
+                main_table.add_row("  Timing", timing_info)
+        except Exception as e:
+            logger.debug(f"Error displaying performance metrics: {e}")
+            main_table.add_row("  Metrics", "[dim]Not available[/dim]")
+    
+    # === SECTION 4: HISTORICAL ===
     # Count total historical bars
     total_bars = 0
     total_days = set()
@@ -325,23 +384,32 @@ def generate_session_display(compact: bool = True) -> Table:
         main_table.add_row("", "")  # Spacing
         main_table.add_row("[bold magenta]━━ HISTORICAL ━━[/bold magenta]", "")
         
-        if hasattr(session_data, 'historical_bars_trailing_days'):
-            # Configuration row
-            auto_load = "✓ Enabled" if settings.HISTORICAL_BARS_AUTO_LOAD else "✗ Disabled"
-            config_info = f"Trailing: {session_data.historical_bars_trailing_days} days"
-            
-            if hasattr(session_data, 'historical_bars_intervals') and session_data.historical_bars_intervals:
-                intervals_str = ", ".join([f"{i}m" for i in session_data.historical_bars_intervals])
-                config_info += f" | Intervals: {intervals_str}"
-            
-            config_info += f" | Auto-load: {auto_load}"
-            main_table.add_row("  Config", config_info)
+        # Get config from SessionConfig (not settings or session_data)
+        try:
+            session_config = system_mgr.session_config
+            if session_config and hasattr(session_config, 'historical'):
+                hist_config = session_config.historical
+                trailing_days = hist_config.trailing_days if hist_config else 0
+                intervals = hist_config.intervals if hist_config else []
+                
+                config_info = f"Trailing: {trailing_days} days"
+                
+                if intervals:
+                    intervals_str = ", ".join(intervals)
+                    config_info += f" | Intervals: {intervals_str}"
+                
+                main_table.add_row("  Config", config_info)
+            else:
+                main_table.add_row("  Config", "[dim]Not configured[/dim]")
             
             # Data loaded row
             if total_bars > 0:
                 main_table.add_row("  Loaded", f"{total_bars:,} bars across {len(total_days)} dates")
             else:
                 main_table.add_row("  Loaded", "[dim]No data loaded[/dim]")
+        except Exception as e:
+            logger.debug(f"Error displaying historical config: {e}")
+            main_table.add_row("  Config", "[dim]Error loading[/dim]")
     else:
         main_table.add_row("", "")  # Spacing
         main_table.add_row("[bold magenta]┌─ HISTORICAL[/bold magenta]", "")
@@ -430,17 +498,13 @@ def generate_session_display(compact: bool = True) -> Table:
     else:
         main_table.add_row("│  [dim]No historical data[/dim]", "")
     
-    # === SECTION 3: PREFETCH ===
-    # Compact mode: Multiple rows with details
+    # === SECTION 5: PREFETCH ===
+    # Note: This feature is not yet implemented in new architecture
+    # Keeping section for consistency but showing as unavailable
     if compact:
         main_table.add_row("", "")  # Spacing
         main_table.add_row("[bold blue]━━ PREFETCH ━━[/bold blue]", "")
-        
-        auto_activate = "✓ Enabled" if settings.PREFETCH_AUTO_ACTIVATE else "✗ Disabled"
-        config_info = f"Window: {settings.PREFETCH_WINDOW_MINUTES}min before session | Check interval: {settings.PREFETCH_CHECK_INTERVAL_MINUTES}min | Auto-activate: {auto_activate}"
-        
-        main_table.add_row("  Config", config_info)
-        main_table.add_row("  Status", "[dim]Feature not yet implemented[/dim]")
+        main_table.add_row("  Status", "[dim]Feature not yet implemented (planned)[/dim]")
     else:
         main_table.add_row("", "")  # Spacing
         main_table.add_row("[bold blue]┌─ PREFETCH[/bold blue]", "")
@@ -457,31 +521,12 @@ def generate_session_display(compact: bool = True) -> Table:
         main_table.add_row("│  │", "")
         main_table.add_row("│  [dim]No prefetch data (feature not yet implemented)[/dim]", "")
     
-    # === SECTION 4: MARKET HOURS ===
-    # Get trading hours info
-    try:
-        from app.managers.data_manager.api import get_data_manager
-        data_manager = get_data_manager()
-        current_date = session_data.get_current_session_date()
-        
-        if compact and current_date:
-            # Get trading hours from data_manager (requires async context)
-            try:
-                # Note: We can't call async method here, so we check if data_manager has cached info
-                # For now, show a simplified version
-                main_table.add_row("", "")  # Spacing
-                main_table.add_row("[bold yellow]━━ MARKET HOURS ━━[/bold yellow]", "")
-                
-                # Try to get trading hours info - this is synchronous access
-                hours_info = "Session date: " + current_date.strftime("%Y-%m-%d")
-                # TODO: Add actual trading hours, holiday flag, early close flag when available
-                main_table.add_row("  Info", hours_info + " | Hours: 09:30 - 16:00 | Regular day")
-            except Exception as e:
-                logger.debug(f"Error getting market hours: {e}")
-    except Exception as e:
-        logger.debug(f"Error accessing data manager: {e}")
+    # === SECTION 6: MARKET HOURS ===
+    # Market hours are already shown in SESSION section header
+    # This section is redundant but kept for compatibility
+    # Consider removing in future versions
     
-    # === SECTION 5: STREAM COORDINATOR QUEUES ===
+    # === SECTION 7: STREAM COORDINATOR QUEUES ===
     try:
         from app.managers.data_manager.backtest_stream_coordinator import get_coordinator
         coordinator = get_coordinator(system_manager=system_mgr)
@@ -592,12 +637,17 @@ def extract_session_data_for_csv() -> Dict[str, Any]:
     from app.managers.data_manager.session_data import get_session_data
     from app.managers.data_manager.backtest_stream_coordinator import get_coordinator
     
+    system_mgr = get_system_manager()
+    time_mgr = system_mgr.get_time_manager()
+    
+    # Use TimeManager for current time (architecture compliant)
+    current_time = time_mgr.get_current_time()
+    
     row = {
-        "timestamp": datetime.now().isoformat(),
+        "timestamp": current_time.isoformat() if current_time else "N/A",
     }
     
     try:
-        system_mgr = get_system_manager()
         session_data = get_session_data()
         
         # System info

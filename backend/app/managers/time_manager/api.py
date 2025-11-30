@@ -48,9 +48,7 @@ class TimeManager:
         self._system_manager = system_manager
         self._backtest_time: Optional[datetime] = None
         
-        # Backtest window configuration (expressed in trading days)
-        # Default to 5 trading days if not set (can be changed via set_backtest_window)
-        self.backtest_days: int = getattr(settings, 'DATA_MANAGER_BACKTEST_DAYS', 5)
+        # Backtest window (loaded from session config)
         self.backtest_start_date: Optional[date] = None
         self.backtest_end_date: Optional[date] = None
         
@@ -178,21 +176,33 @@ class TimeManager:
         logger.info("Initialized default market configurations (NYSE, NASDAQ)")
     
     def _auto_initialize_backtest(self) -> None:
-        """Auto-initialize backtest window and time based on settings
+        """Auto-initialize backtest window and time.
+        
+        This is a fallback for cases where init_backtest() wasn't called.
+        Requires SystemManager with session config to be available.
         
         IMPORTANT: _backtest_time is stored as UTC naive internally.
         Timezone information is added on output via get_current_time().
         """
-        # Calculate backtest window
-        self.backtest_start_date = date.today() - timedelta(days=self.backtest_days)
-        self.backtest_end_date = date.today()
+        if self._system_manager is None:
+            raise RuntimeError(
+                "Cannot auto-initialize backtest: SystemManager not available. "
+                "Call init_backtest() explicitly."
+            )
         
-        # Set initial backtest time to start of backtest window at midnight UTC
-        # Store as naive datetime (represents UTC)
-        self._backtest_time = datetime.combine(self.backtest_start_date, time(0, 0))
+        session_config = self._system_manager.session_config
+        if session_config is None or session_config.backtest_config is None:
+            raise RuntimeError(
+                "Cannot auto-initialize backtest: No backtest config available. "
+                "Ensure session config is loaded before accessing backtest time."
+            )
+        
+        # Initialize from config
+        with SessionLocal() as session:
+            self.init_backtest(session)
         
         logger.info(
-            "Backtest window initialized: %s - %s (time stored as UTC naive)",
+            "Backtest auto-initialized from config: %s - %s",
             self.backtest_start_date,
             self.backtest_end_date
         )
@@ -540,6 +550,55 @@ class TimeManager:
                 return True
         
         return False
+    
+    def get_market_hours_datetime(
+        self,
+        session: Session,
+        date: date,
+        exchange: Optional[str] = None,
+        asset_class: Optional[str] = None
+    ) -> Optional[Tuple[datetime, datetime]]:
+        """Get market open and close as timezone-aware datetime objects.
+        
+        This is the CORRECT way to get market hours for time comparisons.
+        Returns complete datetime objects with proper timezone set.
+        
+        Args:
+            session: Database session
+            date: Trading date
+            exchange: Exchange identifier (uses default if None)
+            asset_class: Asset class (uses default if None)
+            
+        Returns:
+            Tuple of (market_open_datetime, market_close_datetime) with timezone,
+            or None if not a trading day
+            
+        Example:
+            market_open, market_close = time_mgr.get_market_hours_datetime(session, date)
+            current = time_mgr.get_current_time()
+            if current >= market_close:
+                # Market is closed
+        """
+        # Use system defaults
+        if exchange is None:
+            exchange = self.default_exchange_group
+        if asset_class is None:
+            asset_class = self.default_asset_class
+        
+        # Get trading session
+        trading_session = self.get_trading_session(session, date, exchange, asset_class)
+        
+        if not trading_session or not trading_session.is_trading_day:
+            return None
+        
+        # Get timezone
+        tz = ZoneInfo(trading_session.timezone)
+        
+        # Create timezone-aware datetime objects
+        market_open = datetime.combine(date, trading_session.regular_open, tzinfo=tz)
+        market_close = datetime.combine(date, trading_session.regular_close, tzinfo=tz)
+        
+        return (market_open, market_close)
     
     def is_trading_day(
         self,
@@ -1043,44 +1102,34 @@ class TimeManager:
         session: Session,
         exchange: Optional[str] = None
     ) -> None:
-        """Compute and cache backtest window based on backtest_days
+        """Initialize backtest window from session config dates.
         
-        The window is defined in trading days (excluding weekends/holidays),
-        ending at yesterday (to avoid incomplete data for "today").
+        Uses start_date and end_date from BacktestConfig.
         
         Args:
             session: Database session
             exchange: Exchange group identifier (uses system default if None)
         """
-        # Use system default if not specified
-        if exchange is None:
-            exchange = self.default_exchange_group
-        # Start from yesterday to avoid incomplete "today" data
-        current = date.today() - timedelta(days=1)
-        trading_days = []
+        # Get backtest config from SystemManager
+        if self._system_manager is None:
+            raise ValueError("SystemManager not available")
         
-        # Walk backwards to find N trading days
-        while len(trading_days) < self.backtest_days:
-            # Check if it's a weekend
-            if current.weekday() >= 5:  # Saturday=5, Sunday=6
-                current -= timedelta(days=1)
-                continue
-            
-            # Check if it's a holiday
-            if self.is_holiday(session, current, exchange):
-                current -= timedelta(days=1)
-                continue
-            
-            trading_days.append(current)
-            current -= timedelta(days=1)
+        session_config = self._system_manager.session_config
+        if session_config is None or session_config.backtest_config is None:
+            raise ValueError("Backtest config not available")
         
-        trading_days.sort()
-        self.backtest_start_date = trading_days[0]
-        self.backtest_end_date = trading_days[-1]
+        backtest_config = session_config.backtest_config
+        
+        # Parse dates from config
+        self.backtest_start_date = datetime.strptime(
+            backtest_config.start_date, "%Y-%m-%d"
+        ).date()
+        self.backtest_end_date = datetime.strptime(
+            backtest_config.end_date, "%Y-%m-%d"
+        ).date()
         
         logger.info(
-            "Backtest window initialized: %s trading days from %s to %s",
-            self.backtest_days,
+            "Backtest window initialized from config: %s to %s",
             self.backtest_start_date,
             self.backtest_end_date,
         )

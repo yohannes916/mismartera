@@ -7,7 +7,7 @@ from typing import Dict, Any, Optional
 
 from app.integrations.claude_client import claude_client
 from app.api.middleware.auth import get_current_user, get_admin_user
-from app.services.claude_usage_tracker import usage_tracker
+from app.services.analysis.claude_usage_tracker import usage_tracker
 from app.logger import logger
 
 router = APIRouter(prefix="/api/claude", tags=["Claude AI"])

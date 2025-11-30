@@ -52,9 +52,9 @@
       }
     },
     "gap_filler": {
+      "enable_session_quality": true,
       "max_retries": 5,
-      "retry_interval_seconds": 60,
-      "enable_session_quality": true
+      "retry_interval_seconds": 60
     }
   },
   "trading_config": {

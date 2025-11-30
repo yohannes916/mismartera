@@ -11,7 +11,7 @@ from rich.table import Table
 from rich.console import Console
 from rich.prompt import Confirm
 
-from app.services.csv_import_service import csv_import_service
+from app.services.market_data.csv_import_service import csv_import_service
 from app.models.database import SessionLocal
 from app.managers import DataManager
 from app.logger import logger

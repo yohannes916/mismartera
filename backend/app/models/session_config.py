@@ -180,19 +180,18 @@ class HistoricalConfig:
 
 @dataclass
 class GapFillerConfig:
-    """Gap filler configuration (live mode only).
+    """Gap filler configuration (DataQualityManager).
     
-    CRITICAL: Gap filling only occurs in LIVE mode and only when
-    enable_session_quality=true.
+    CRITICAL: Gap filling only occurs in LIVE mode.
     
     Attributes:
-        max_retries: Max retry attempts to fill detected gaps (live only)
-        retry_interval_seconds: Interval between retries (live only)
-        enable_session_quality: Calculate quality for session bars (both modes)
+        enable_session_quality: Calculate quality for session bars (default: true)
+        max_retries: Max retry attempts for gap filling - LIVE mode only (default: 5)
+        retry_interval_seconds: Seconds between retry attempts - LIVE mode only (default: 60)
     """
+    enable_session_quality: bool = True
     max_retries: int = 5
     retry_interval_seconds: int = 60
-    enable_session_quality: bool = True
     
     def validate(self) -> None:
         """Validate gap filler configuration."""
@@ -213,7 +212,7 @@ class SessionDataConfig:
         symbols: List of symbols to trade/analyze
         streams: Requested data streams (coordinator determines streamed vs generated)
         historical: Historical data and indicators configuration
-        gap_filler: Gap filler configuration
+        gap_filler: Gap filler configuration (DataQualityManager)
     """
     symbols: List[str]
     streams: List[str]
@@ -523,6 +522,35 @@ class SessionConfig:
         config.validate()
         logger.info(f"Loaded and validated session config: {session_name}")
         return config
+    
+    @classmethod
+    def from_file(cls, file_path: str) -> SessionConfig:
+        """Load SessionConfig from JSON file.
+        
+        Args:
+            file_path: Path to JSON configuration file
+            
+        Returns:
+            SessionConfig instance
+            
+        Raises:
+            FileNotFoundError: If file doesn't exist
+            ValueError: If JSON is invalid or config is invalid
+        """
+        import json
+        from pathlib import Path
+        
+        path = Path(file_path)
+        if not path.exists():
+            raise FileNotFoundError(f"Configuration file not found: {file_path}")
+        
+        try:
+            with open(path, 'r') as f:
+                data = json.load(f)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON in {file_path}: {e}") from e
+        
+        return cls.from_dict(data)
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert config to dictionary for serialization.

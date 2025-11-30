@@ -52,7 +52,8 @@ def start_command(config_file_path: str) -> None:
             console.print("\n[green]✓ System started successfully[/green]")
             if system_mgr.session_config:
                 console.print(f"[dim]Session: {system_mgr.session_config.session_name}[/dim]")
-                console.print(f"[dim]Active streams: {len(system_mgr.session_config.data_streams)}[/dim]")
+                sdc = system_mgr.session_config.session_data_config
+                console.print(f"[dim]Symbols: {', '.join(sdc.symbols)}[/dim]")
                 console.print(f"[dim]State: {system_mgr.state.value}[/dim]")
         else:
             if system_mgr.state == SystemState.RUNNING:

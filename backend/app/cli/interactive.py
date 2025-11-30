@@ -25,12 +25,12 @@ except ImportError:
 
 from app.config import settings
 from app.logger import logger
-from app.services.auth_service import auth_service
+from app.services.auth.auth_service import auth_service
 from app.integrations.claude_client import claude_client
 from app.integrations import alpaca_client
-from app.services.claude_usage_tracker import usage_tracker
+from app.services.analysis.claude_usage_tracker import usage_tracker
 from app.models.database import SessionLocal
-from app.services.csv_import_service import csv_import_service
+from app.services.market_data.csv_import_service import csv_import_service
 from app.managers.data_manager.parquet_storage import parquet_storage
 from app.cli.command_registry import (
     DATA_COMMANDS,
