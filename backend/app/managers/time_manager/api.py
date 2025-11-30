@@ -48,9 +48,8 @@ class TimeManager:
         self._system_manager = system_manager
         self._backtest_time: Optional[datetime] = None
         
-        # Backtest window (loaded from session config)
-        self.backtest_start_date: Optional[date] = None
-        self.backtest_end_date: Optional[date] = None
+        # Backtest window dates are stored in SessionConfig (single source of truth)
+        # Accessed via backtest_start_date and backtest_end_date properties
         
         # Market hours configuration (loaded from database)
         self._market_configs: Dict[Tuple[str, str], MarketHoursConfig] = {}
@@ -71,7 +70,51 @@ class TimeManager:
         if system_manager is None:
             logger.warning("TimeManager initialized without SystemManager - mode checks will fail!")
         else:
-            logger.debug("TimeManager initialized with SystemManager reference")
+            logger.info("TimeManager initialized successfully")
+    
+    # ==================== Backtest Window Properties (Read from SessionConfig) ====================
+    
+    @property
+    def backtest_start_date(self) -> Optional[date]:
+        """Get backtest start date from SessionConfig (single source of truth).
+        
+        Returns:
+            Start date as date object, or None if not configured
+        """
+        if not self._system_manager:
+            return None
+        
+        session_config = self._system_manager.session_config
+        if not session_config or not session_config.backtest_config:
+            return None
+        
+        try:
+            return datetime.strptime(
+                session_config.backtest_config.start_date, "%Y-%m-%d"
+            ).date()
+        except (ValueError, AttributeError):
+            return None
+    
+    @property
+    def backtest_end_date(self) -> Optional[date]:
+        """Get backtest end date from SessionConfig (single source of truth).
+        
+        Returns:
+            End date as date object, or None if not configured
+        """
+        if not self._system_manager:
+            return None
+        
+        session_config = self._system_manager.session_config
+        if not session_config or not session_config.backtest_config:
+            return None
+        
+        try:
+            return datetime.strptime(
+                session_config.backtest_config.end_date, "%Y-%m-%d"
+            ).date()
+        except (ValueError, AttributeError):
+            return None
     
     @property
     def default_timezone(self) -> str:
@@ -1102,15 +1145,19 @@ class TimeManager:
         session: Session,
         exchange: Optional[str] = None
     ) -> None:
-        """Initialize backtest window from session config dates.
+        """Validate backtest window from session config.
         
-        Uses start_date and end_date from BacktestConfig.
+        This method now just validates that backtest config exists.
+        The dates are automatically read from SessionConfig via properties.
         
         Args:
             session: Database session
             exchange: Exchange group identifier (uses system default if None)
+            
+        Raises:
+            ValueError: If backtest config not available or dates invalid
         """
-        # Get backtest config from SystemManager
+        # Validate SystemManager and config exist
         if self._system_manager is None:
             raise ValueError("SystemManager not available")
         
@@ -1118,18 +1165,12 @@ class TimeManager:
         if session_config is None or session_config.backtest_config is None:
             raise ValueError("Backtest config not available")
         
-        backtest_config = session_config.backtest_config
-        
-        # Parse dates from config
-        self.backtest_start_date = datetime.strptime(
-            backtest_config.start_date, "%Y-%m-%d"
-        ).date()
-        self.backtest_end_date = datetime.strptime(
-            backtest_config.end_date, "%Y-%m-%d"
-        ).date()
+        # Validate dates are accessible via properties
+        if self.backtest_start_date is None or self.backtest_end_date is None:
+            raise ValueError("Backtest start_date or end_date not configured")
         
         logger.info(
-            "Backtest window initialized from config: %s to %s",
+            "Backtest window validated from SessionConfig: %s to %s",
             self.backtest_start_date,
             self.backtest_end_date,
         )
@@ -1257,7 +1298,10 @@ class TimeManager:
         end_date: Optional[date] = None,
         exchange: str = "NYSE"
     ) -> None:
-        """Override the backtest window start/end dates and reset the clock
+        """Override the backtest window start/end dates by modifying SessionConfig.
+        
+        This modifies the SessionConfig's BacktestConfig, making it the live config.
+        Properties will automatically reflect the new dates.
         
         Args:
             session: Database session
@@ -1266,29 +1310,39 @@ class TimeManager:
             exchange: Exchange identifier
             
         Raises:
-            ValueError: If start_date > end_date
+            ValueError: If start_date > end_date or config not available
         """
+        # Validate SystemManager and config exist
+        if self._system_manager is None:
+            raise ValueError("SystemManager not available")
+        
+        session_config = self._system_manager.session_config
+        if session_config is None or session_config.backtest_config is None:
+            raise ValueError("Backtest config not available")
+        
         # Determine effective end date
         if end_date:
             effective_end = end_date
         elif self.backtest_end_date and self.backtest_end_date > start_date:
             effective_end = self.backtest_end_date
         else:
-            # Default to yesterday
+            # Default to yesterday (avoid using date.today() in production)
+            logger.warning("No end_date provided, defaulting to yesterday")
             effective_end = date.today() - timedelta(days=1)
         
         if start_date > effective_end:
             raise ValueError("backtest start_date cannot be after end_date")
         
-        self.backtest_start_date = start_date
-        self.backtest_end_date = effective_end
+        # Modify SessionConfig (single source of truth)
+        session_config.backtest_config.start_date = start_date.strftime("%Y-%m-%d")
+        session_config.backtest_config.end_date = effective_end.strftime("%Y-%m-%d")
         
         # Reset clock to new start
         self.reset_backtest_clock(session)
         
         logger.info(
-            "Backtest window set: %s to %s",
-            self.backtest_start_date,
+            "Backtest window updated in SessionConfig: %s to %s",
+            self.backtest_start_date,  # Read from property (SessionConfig)
             self.backtest_end_date
         )
     

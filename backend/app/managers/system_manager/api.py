@@ -16,6 +16,7 @@ Key Responsibilities:
 import logging
 from pathlib import Path
 from typing import Optional
+from datetime import date
 
 from app.logger import logger
 
@@ -557,6 +558,60 @@ class SystemManager:
     def get_state(self) -> SystemState:
         """Get current system state."""
         return self._state
+    
+    # =========================================================================
+    # Backtest Window Management (modifies SessionConfig)
+    # =========================================================================
+    
+    def set_backtest_window(
+        self,
+        start_date: date,
+        end_date: date
+    ) -> None:
+        """Update backtest window in SessionConfig (single source of truth).
+        
+        This modifies the SessionConfig's BacktestConfig, which TimeManager
+        reads via properties. The config becomes the live configuration.
+        
+        Args:
+            start_date: New backtest start date
+            end_date: New backtest end date
+            
+        Raises:
+            RuntimeError: If system not initialized or not in backtest mode
+            ValueError: If dates are invalid
+        """
+        if self._session_config is None:
+            raise RuntimeError("System not initialized")
+        
+        if self._session_config.mode != "backtest":
+            raise RuntimeError("System must be in backtest mode to set backtest window")
+        
+        if self._session_config.backtest_config is None:
+            raise ValueError("Backtest config not available")
+        
+        if start_date > end_date:
+            raise ValueError(f"start_date ({start_date}) cannot be after end_date ({end_date})")
+        
+        # Modify SessionConfig (single source of truth)
+        self._session_config.backtest_config.start_date = start_date.strftime("%Y-%m-%d")
+        self._session_config.backtest_config.end_date = end_date.strftime("%Y-%m-%d")
+        
+        logger.info(
+            "Backtest window updated in SessionConfig: %s to %s",
+            start_date,
+            end_date
+        )
+        
+        # Reset TimeManager clock if time manager exists
+        if self._time_manager is not None:
+            from app.models.database import SessionLocal
+            with SessionLocal() as db_session:
+                self._time_manager.reset_backtest_clock(db_session)
+    
+    # =========================================================================
+    # Properties
+    # =========================================================================
     
     @property
     def session_config(self) -> Optional[SessionConfig]:
