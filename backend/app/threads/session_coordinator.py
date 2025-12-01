@@ -27,8 +27,9 @@ Dependencies (Phase 1 & 2):
 """
 
 import threading
+import queue
 from datetime import datetime, date, time, timedelta
-from typing import Optional, Dict, List, Any, Tuple
+from typing import Optional, Dict, List, Any, Tuple, Set
 from collections import defaultdict
 from collections import deque
 
@@ -127,6 +128,14 @@ class SessionCoordinator(threading.Thread):
         # Queue storage for backtest streaming
         # Structure: {(symbol, interval): deque of BarData}
         self._bar_queues: Dict[Tuple[str, str], 'deque'] = {}
+        
+        # Dynamic symbol management (Phase 1)
+        self._dynamic_symbols: Set[str] = set()  # Symbols added dynamically during session
+        self._pending_symbol_additions = queue.Queue()  # Thread-safe queue for symbol additions
+        self._pending_symbol_removals: Set[str] = set()  # Symbols marked for removal
+        self._symbol_operation_lock = threading.Lock()  # Thread-safe operations
+        self._stream_paused = threading.Event()  # Pause control for backtest mode
+        self._stream_paused.set()  # Initially not paused
         
         logger.info(
             f"SessionCoordinator initialized (mode={mode}, "
@@ -2387,3 +2396,92 @@ class SessionCoordinator(threading.Thread):
         if delay_seconds > 0.001:  # Only sleep if > 1ms
             import time
             time.sleep(delay_seconds)
+    
+    # =========================================================================
+    # Dynamic Symbol Management (Phase 1: Foundation)
+    # =========================================================================
+    
+    def add_symbol(
+        self,
+        symbol: str,
+        streams: Optional[List[str]] = None,
+        blocking: bool = True
+    ) -> bool:
+        """Add a symbol to active session (stub implementation).
+        
+        This is a Phase 1 stub. Full implementation will be added in Phase 4 (backtest)
+        and Phase 5 (live).
+        
+        Args:
+            symbol: Stock symbol to add
+            streams: Stream types to enable (default: base streams from config)
+            blocking: If True, wait for completion; if False, return immediately
+        
+        Returns:
+            True if queued successfully (or completed if blocking)
+            False if failed or already exists
+        
+        Raises:
+            RuntimeError: If session not running
+            ValueError: If invalid symbol or stream types
+        
+        Note:
+            - Backtest mode: Pauses streaming, loads historical data, catches up
+            - Live mode: Starts stream immediately, loads historical (caller blocks)
+        """
+        symbol = symbol.upper()
+        
+        # Common validation
+        if not self._running:
+            raise RuntimeError("Cannot add symbol: session not running")
+        
+        with self._symbol_operation_lock:
+            # Check if already active
+            if symbol in self._dynamic_symbols:
+                logger.warning(f"[DYNAMIC] Symbol {symbol} already added dynamically")
+                return False
+            
+            # Check if symbol is in initial config
+            if symbol in self.session_config.session_data_config.symbols:
+                logger.warning(f"[DYNAMIC] Symbol {symbol} already in initial config")
+                return False
+        
+        logger.info(f"[DYNAMIC] add_symbol({symbol}) - STUB (Phase 1)")
+        logger.warning("[DYNAMIC] Full implementation pending (Phase 4: backtest, Phase 5: live)")
+        
+        # Phase 1: Just log and return success (no actual addition yet)
+        return True
+    
+    def remove_symbol(
+        self,
+        symbol: str,
+        immediate: bool = False
+    ) -> bool:
+        """Remove a symbol from active session (stub implementation).
+        
+        This is a Phase 1 stub. Full implementation will be added in Phase 6.
+        
+        Args:
+            symbol: Stock symbol to remove
+            immediate: If True, remove immediately; if False, graceful shutdown
+        
+        Returns:
+            True if successful, False if not found
+        
+        Note:
+            - Graceful removal: Mark for removal, drain queues, then clean up
+            - Immediate removal: Stop streams, clear queues, clean up now
+        """
+        symbol = symbol.upper()
+        
+        with self._symbol_operation_lock:
+            # Check if symbol is dynamically added
+            if symbol not in self._dynamic_symbols:
+                logger.warning(f"[DYNAMIC] Symbol {symbol} not found in dynamic symbols")
+                return False
+        
+        logger.info(f"[DYNAMIC] remove_symbol({symbol}, immediate={immediate}) - STUB (Phase 1)")
+        logger.warning("[DYNAMIC] Full implementation pending (Phase 6: symbol removal)")
+        
+        # Phase 1: Just log and return success (no actual removal yet)
+        return True
