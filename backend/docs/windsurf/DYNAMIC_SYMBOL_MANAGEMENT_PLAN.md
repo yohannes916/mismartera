@@ -82,13 +82,37 @@ class SessionCoordinator:
         self._pending_additions = dict()          # symbol -> add_request
         self._pending_removals = set()            # symbols to remove
         self._symbol_add_lock = threading.Lock()  # Thread-safe operations
-        
-        # NEW: Session activation state (for dynamic symbol catchup)
-        self._session_active = threading.Event()  # Session active/deactivated
-        self._session_active.set()                # Initially active
 ```
 
-### 1.2 Session Activation Control
+### 1.2 Session Activation Control (REUSE EXISTING)
+
+**Discovery:** SessionData already has `_session_active` flag with activate/deactivate methods!
+
+**Existing Infrastructure (in `session_data.py`):**
+```python
+class SessionData:
+    def __init__(self):
+        self._session_active: bool = False  # ✅ Already exists!
+    
+    def activate_session(self) -> None:
+        """Activate the trading session."""
+        self._session_active = True
+        logger.info("✓ Session activated")
+    
+    def deactivate_session(self) -> None:
+        """Deactivate the trading session."""
+        self._session_active = False
+        logger.info("✓ Session deactivated")
+    
+    def is_session_active(self) -> bool:
+        """Check if session is currently active."""
+        return self._session_active
+```
+
+**Already displayed in CLI:**
+```
+SESSION | 2025-07-03 | 12:03:00 | ✓ Active | Symbols: 2
+```
 
 **Purpose:** Prevent AnalysisEngine from seeing intermediate state during catchup.
 
@@ -101,50 +125,47 @@ class SessionCoordinator:
 **Why this matters:**
 During catchup, we're "fast-forwarding" historical data to reach current backtest time. This isn't real-time simulation - it's initialization. AnalysisEngine should only see data after catchup completes to properly simulate real-world behavior.
 
-**Implementation:**
+**Implementation (SIMPLIFIED - reuse existing methods):**
 ```python
-class SessionCoordinator:
-    def deactivate_session(self):
-        """Deactivate session (block access, drop notifications).
-        
-        Used during dynamic symbol catchup to prevent AnalysisEngine
-        from seeing intermediate state.
-        """
-        logger.info("[SESSION] Deactivating session (catchup mode)")
-        self._session_active.clear()
-        
-        # Notify DataProcessor to drop AnalysisEngine notifications
-        if self.data_processor:
-            self.data_processor.pause_notifications()
-    
-    def activate_session(self):
-        """Reactivate session (resume access, resume notifications).
-        
-        Called after catchup completes to resume normal operations.
-        """
-        logger.info("[SESSION] Reactivating session (normal mode)")
-        self._session_active.set()
-        
-        # Notify DataProcessor to resume AnalysisEngine notifications
-        if self.data_processor:
-            self.data_processor.resume_notifications()
-    
-    def is_session_active(self) -> bool:
-        """Check if session is active (not in catchup mode)."""
-        return self._session_active.is_set()
+# In SessionCoordinator._process_pending_symbol_additions():
+
+# 4. DEACTIVATE SESSION (use existing SessionData method)
+self.session_data.deactivate_session()  # ✅ Reuse existing!
+logger.info("[DYNAMIC] Session deactivated (catchup mode)")
+
+# Also pause DataProcessor notifications
+if self.data_processor:
+    self.data_processor.pause_notifications()
+
+# 5. CATCHUP (while deactivated)
+self._catchup_symbol_to_current_time(symbol)
+
+# 6. REACTIVATE SESSION (use existing SessionData method)
+self.session_data.activate_session()  # ✅ Reuse existing!
+logger.info("[DYNAMIC] Session reactivated (normal mode)")
+
+# Also resume DataProcessor notifications
+if self.data_processor:
+    self.data_processor.resume_notifications()
 ```
 
-### 1.3 SessionData Access Control
+**Benefits of Reusing:**
+- ✅ No redundant state (single source of truth)
+- ✅ Already displayed in CLI (shows "✓ Active" or "⚠ Inactive")
+- ✅ Already has methods (activate/deactivate/is_active)
+- ✅ Simpler architecture (less code to maintain)
+
+### 1.3 SessionData Access Control (SIMPLIFIED)
 
 **Location:** `session_data.py`
 
 **Add access checks to prevent reading during catchup:**
 
+**SIMPLER:** No coordinator reference needed - flag is already in SessionData!
+
 ```python
 class SessionData:
-    def __init__(self, session_coordinator=None):
-        self._session_coordinator = session_coordinator  # Reference for active check
-        # ... existing attributes
+    # Already has self._session_active flag (line 270)
     
     def _check_session_active(self) -> bool:
         """Check if session is active before allowing access.
@@ -152,41 +173,48 @@ class SessionData:
         Returns:
             True if active, False if deactivated (catchup mode)
         """
-        if self._session_coordinator is None:
-            return True  # No coordinator reference, allow access
-        
-        return self._session_coordinator.is_session_active()
+        return self._session_active  # ✅ Use existing flag directly!
     
     # Update all access methods to check session state
     def get_bars(self, symbol: str, interval: str = "1m") -> List[BarData]:
         """Get bars for symbol (if session active)."""
         if not self._check_session_active():
-            logger.debug(f"[SESSION_DATA] Access blocked (session deactivated): get_bars({symbol}, {interval})")
+            logger.debug(f"[SESSION_DATA] Access blocked: get_bars({symbol}, {interval})")
             return []  # Return empty during catchup
         
         # Normal access
-        return self._bars.get((symbol, interval), [])
+        symbol_data = self.get_symbol_data(symbol)
+        if not symbol_data:
+            return []
+        
+        # Return appropriate bars based on interval
+        if interval == "1m":
+            return symbol_data.bars_1m
+        elif interval == "5m":
+            return symbol_data.bars_5m
+        # ... etc
     
     def get_all_symbols(self) -> Set[str]:
         """Get all symbols (if session active)."""
         if not self._check_session_active():
-            logger.debug("[SESSION_DATA] Access blocked (session deactivated): get_all_symbols()")
+            logger.debug("[SESSION_DATA] Access blocked: get_all_symbols()")
             return set()  # Return empty during catchup
         
         # Normal access
-        return set(self._symbols)
+        return set(self._active_symbols)
     
     # Similar checks for:
     # - get_latest_bar()
     # - get_bars_since()
     # - get_historical_bars()
-    # - etc.
+    # - get_symbol_data() (maybe - or let it return but bars methods block)
 ```
 
 **Key Points:**
-- All read operations check `is_session_active()` first
+- ✅ **Simpler:** Check `self._session_active` directly (no coordinator reference needed)
+- All read operations check `_check_session_active()` first
 - During catchup (deactivated), return empty/None instead of real data
-- Write operations (add_bar) continue to work (building state for later)
+- Write operations (add_bar, append_bar) continue to work (building state for later)
 - AnalysisEngine sees empty results during catchup
 
 ### 1.4 DataProcessor Notification Control
@@ -1123,25 +1151,29 @@ def _pause_streaming(self):
 ## Implementation Phases Summary
 
 ### Phase 1: Foundation (Week 1)
-- [ ] Add symbol tracking attributes
-- [ ] Add session activation control (`_session_active` Event)
+- [ ] Add symbol tracking attributes to SessionCoordinator
+  - [ ] `_active_symbols` set
+  - [ ] `_pending_additions` dict
+  - [ ] `_pending_removals` set
+  - [ ] `_symbol_add_lock` Lock
 - [ ] Implement `add_symbol()` method (stub)
 - [ ] Implement `remove_symbol()` method (stub)
-- [ ] Add thread-safety locks
-- [ ] Implement `deactivate_session()` / `activate_session()` / `is_session_active()`
 - [ ] Write unit tests for state management
+- [ ] ✅ **NO NEW SESSION FLAG NEEDED** - Reuse existing `session_data._session_active`
 
 ### Phase 2: SessionData Access Control (Week 2)
-- [ ] Add `_session_coordinator` reference to SessionData
-- [ ] Implement `_check_session_active()` helper
+- [ ] Implement `_check_session_active()` helper in SessionData
+  - [ ] Simply returns `self._session_active` (existing flag)
 - [ ] Update all read methods to check session state:
   - [ ] `get_bars()`
   - [ ] `get_all_symbols()`
   - [ ] `get_latest_bar()`
   - [ ] `get_bars_since()`
   - [ ] `get_historical_bars()`
+  - [ ] `get_symbol_data()` (maybe - or let it return but bars methods block)
 - [ ] Test that reads return empty when deactivated
 - [ ] Verify writes still work when deactivated
+- [ ] ✅ **NO COORDINATOR REFERENCE NEEDED** - Flag already in SessionData
 
 ### Phase 3: DataProcessor Notification Control (Week 3)
 - [ ] Add `_notifications_paused` Event to DataProcessor
@@ -1161,11 +1193,12 @@ def _pause_streaming(self):
   - [ ] Use TimeManager for regular hours
   - [ ] Drop bars outside regular hours
   - [ ] Forward bars before current time to session_data
-- [ ] Integrate session deactivation before catchup
-- [ ] Integrate session reactivation after catchup
+- [ ] ✅ **Integrate session deactivation** (use `self.session_data.deactivate_session()`)
+- [ ] ✅ **Integrate session reactivation** (use `self.session_data.activate_session()`)
 - [ ] Test pause/resume cycle with session control
 - [ ] Verify AnalysisEngine sees no data during catchup
 - [ ] Verify AnalysisEngine sees data after reactivation
+- [ ] Verify CLI shows "⚠ Inactive" during catchup, "✓ Active" after
 
 ### Phase 5: Live Mode (Week 5)
 - [ ] Implement `_load_symbol_historical_live()`
@@ -1281,20 +1314,24 @@ def _pause_streaming(self):
 - ✅ QualityManager auto-detection (exists)
 
 ### New Components
-- ⚠️ Session activation control (Phase 1)
-  - `_session_active` Event
-  - `deactivate_session()` / `activate_session()` / `is_session_active()`
+- ✅ **Session activation control** (Phase 1) - **REUSE EXISTING**
+  - ✅ `session_data._session_active` flag (already exists!)
+  - ✅ `session_data.deactivate_session()` (already exists!)
+  - ✅ `session_data.activate_session()` (already exists!)
+  - ✅ `session_data.is_session_active()` (already exists!)
+  - ✅ CLI display (already shows "✓ Active" or "⚠ Inactive"!)
 - ⚠️ SessionData access blocking (Phase 2)
-  - `_check_session_active()` in all read methods
+  - `_check_session_active()` helper (returns existing `self._session_active`)
+  - Update read methods to check flag before returning data
 - ⚠️ DataProcessor notification control (Phase 3)
   - `_notifications_paused` Event
   - `pause_notifications()` / `resume_notifications()`
   - `_notify_analysis_engine()` wrapper
 - ⚠️ Backtest pause mechanism (Phase 4)
-  - `_stream_paused` Event
-  - `_pending_symbol_additions` Queue
+  - `_stream_paused` Event (in SessionCoordinator)
+  - `_pending_symbol_additions` Queue (in SessionCoordinator)
 - ⚠️ Catchup logic (Phase 4)
-  - `_catchup_symbol_to_current_time()`
+  - `_catchup_symbol_to_current_time()` (in SessionCoordinator)
 - ⚠️ Queue drain detection (Phase 6)
 - ⚠️ CLI commands (Phase 8)
 
