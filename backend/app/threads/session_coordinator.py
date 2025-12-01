@@ -44,6 +44,10 @@ from app.models.session_config import SessionConfig
 # Existing infrastructure
 from app.models.database import SessionLocal
 
+# Stream requirements validation (Phase 1-4)
+from app.threads.quality.stream_requirements_coordinator import StreamRequirementsCoordinator
+from app.threads.quality.parquet_data_checker import create_parquet_data_checker
+
 # Quality calculation helpers
 from app.threads.quality.quality_helpers import (
     parse_interval_to_minutes,
@@ -289,9 +293,19 @@ class SessionCoordinator(threading.Thread):
         logger.info("[SESSION_FLOW] PHASE_1.1: Checking if first session (for stream/generate marking)")
         # Mark stream/generate on first session only
         if not self._streamed_data:
-            logger.info("[SESSION_FLOW] PHASE_1.1: First session - marking STREAMED/GENERATED/IGNORED")
-            self._mark_stream_generate()
-            logger.info("[SESSION_FLOW] PHASE_1.1: Stream/generate marking complete")
+            logger.info("[SESSION_FLOW] PHASE_1.1: First session - validating and marking streams")
+            
+            # Validate and mark streams (with Parquet validation in backtest mode)
+            validation_success = self._validate_and_mark_streams()
+            
+            if not validation_success:
+                logger.error("[SESSION_FLOW] PHASE_1.1: Stream validation FAILED - cannot start session")
+                raise RuntimeError(
+                    "Stream requirements validation failed. "
+                    "Check logs for details. Required data may be missing."
+                )
+            
+            logger.info("[SESSION_FLOW] PHASE_1.1: Stream validation and marking complete")
             
             # Inform data processor what intervals to generate
             if self.data_processor:
@@ -1434,6 +1448,85 @@ class SessionCoordinator(threading.Thread):
         """
         self.quality_manager = quality_manager
         logger.info("Quality manager wired to coordinator")
+    
+    def _validate_and_mark_streams(self) -> bool:
+        """Validate stream requirements and mark streams/generations.
+        
+        Uses stream requirements coordinator to:
+        1. Validate configuration format
+        2. Analyze requirements to determine base interval
+        3. Validate Parquet data availability
+        4. Mark streamed vs generated intervals
+        
+        Returns:
+            True if validation passed and streams marked
+            False if validation failed
+        
+        Note: Only runs in backtest mode. Live mode uses simple marking.
+        """
+        if self.mode != "backtest":
+            # Live mode: use simple marking
+            logger.info("Live mode: using simple stream marking (no validation)")
+            self._mark_stream_generate()
+            return True
+        
+        logger.info("=" * 70)
+        logger.info("STREAM REQUIREMENTS VALIDATION (Backtest Mode)")
+        logger.info("=" * 70)
+        
+        # Create coordinator
+        coordinator = StreamRequirementsCoordinator(
+            session_config=self.session_config,
+            time_manager=self._time_manager
+        )
+        
+        # Create Parquet data checker
+        parquet_storage = self.data_manager._parquet_storage
+        data_checker = create_parquet_data_checker(parquet_storage)
+        
+        # Validate requirements
+        result = coordinator.validate_requirements(data_checker)
+        
+        if not result.valid:
+            logger.error("=" * 70)
+            logger.error("STREAM REQUIREMENTS VALIDATION FAILED")
+            logger.error("=" * 70)
+            logger.error(result.error_message)
+            logger.error("=" * 70)
+            logger.error("Cannot start session: validation failed")
+            logger.error("Suggestions:")
+            logger.error("  1. Check data availability: Is required data downloaded?")
+            logger.error("  2. Check date range: Does backtest window have data?")
+            logger.error("  3. Check config: Are stream intervals correct?")
+            logger.error("=" * 70)
+            return False
+        
+        logger.info("=" * 70)
+        logger.info("✓ STREAM REQUIREMENTS VALIDATION PASSED")
+        logger.info(f"  Stream base interval: {result.required_base_interval}")
+        logger.info(f"  Generate derived: {result.derivable_intervals}")
+        logger.info("=" * 70)
+        
+        # Mark streams based on validation results
+        symbols = self.session_config.session_data_config.symbols
+        
+        for symbol in symbols:
+            self._streamed_data[symbol] = [result.required_base_interval]
+            self._generated_data[symbol] = result.derivable_intervals.copy()
+            
+            # Add quotes if requested
+            streams = self.session_config.session_data_config.streams
+            if "quotes" in streams:
+                self._streamed_data[symbol].append("quotes")
+        
+        # Log results
+        total_streamed = sum(len(v) for v in self._streamed_data.values())
+        total_generated = sum(len(v) for v in self._generated_data.values())
+        logger.info(f"Marked {total_streamed} STREAMED, {total_generated} GENERATED")
+        logger.debug(f"Streamed: {dict(self._streamed_data)}")
+        logger.debug(f"Generated: {dict(self._generated_data)}")
+        
+        return True
     
     def _mark_stream_generate(self):
         """Mark which data types are STREAMED vs GENERATED vs IGNORED.
