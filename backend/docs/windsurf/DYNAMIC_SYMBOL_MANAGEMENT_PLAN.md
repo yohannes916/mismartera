@@ -23,7 +23,7 @@ SessionCoordinator.add_symbol(symbol)
     ↓
 ├─ Common Checks (duplicate prevention)
     ↓
-├─ BACKTEST MODE: PAUSE → NOTIFY → PROCESS → CATCHUP → RESUME
+├─ BACKTEST MODE: PAUSE → NOTIFY → PROCESS → DEACTIVATE → CATCHUP → REACTIVATE → RESUME
 │   ↓
 │   Caller Thread:
 │   ├─ 1.1 Pause streaming/time advance (both clock/data-driven)
@@ -34,11 +34,18 @@ SessionCoordinator.add_symbol(symbol)
 │   ├─ 2. Update config (determine streams/generated/skipped)
 │   ├─ 3. Load full-day historical data (reuse normal process)
 │   ├─ 4. Populate stream input queue (reuse normal process)
-│   ├─ 5. CATCHUP: Advance to current time (NEW - while clock stopped)
-│   │   ├─ 5.1 Drop data outside regular hours (use TimeManager)
-│   │   └─ 5.2 Forward regular-hours data before current time to session_data
-│   ├─ 6. Resume streaming/time advance
-│   └─ 7. DataProcessor/QualityManager auto-detect and process
+│   ├─ 5. DEACTIVATE SESSION (block access, pause notifications)
+│   │   ├─ 5.1 Clear _session_active flag
+│   │   └─ 5.2 DataProcessor.pause_notifications()
+│   ├─ 6. CATCHUP: Advance to current time (NEW - while deactivated)
+│   │   ├─ 6.1 Drop data outside regular hours (use TimeManager)
+│   │   ├─ 6.2 Forward regular-hours data before current time to session_data
+│   │   └─ 6.3 AnalysisEngine sees empty (session_data returns [] when deactivated)
+│   ├─ 7. REACTIVATE SESSION (resume access, resume notifications)
+│   │   ├─ 7.1 Set _session_active flag
+│   │   └─ 7.2 DataProcessor.resume_notifications()
+│   ├─ 8. Resume streaming/time advance
+│   └─ 9. DataProcessor/QualityManager see data and process normally
     ↓
 └─ LIVE MODE: CONFIG → LOAD → STREAM → AUTO-DETECT
     ↓
@@ -75,9 +82,173 @@ class SessionCoordinator:
         self._pending_additions = dict()          # symbol -> add_request
         self._pending_removals = set()            # symbols to remove
         self._symbol_add_lock = threading.Lock()  # Thread-safe operations
+        
+        # NEW: Session activation state (for dynamic symbol catchup)
+        self._session_active = threading.Event()  # Session active/deactivated
+        self._session_active.set()                # Initially active
 ```
 
-### 1.2 Add Symbol API
+### 1.2 Session Activation Control
+
+**Purpose:** Prevent AnalysisEngine from seeing intermediate state during catchup.
+
+**Mechanism:**
+- Deactivate session during catchup (paused + processing historical data)
+- Block session_data access when deactivated
+- Drop DataProcessor → AnalysisEngine notifications when deactivated
+- Reactivate after catchup completes
+
+**Why this matters:**
+During catchup, we're "fast-forwarding" historical data to reach current backtest time. This isn't real-time simulation - it's initialization. AnalysisEngine should only see data after catchup completes to properly simulate real-world behavior.
+
+**Implementation:**
+```python
+class SessionCoordinator:
+    def deactivate_session(self):
+        """Deactivate session (block access, drop notifications).
+        
+        Used during dynamic symbol catchup to prevent AnalysisEngine
+        from seeing intermediate state.
+        """
+        logger.info("[SESSION] Deactivating session (catchup mode)")
+        self._session_active.clear()
+        
+        # Notify DataProcessor to drop AnalysisEngine notifications
+        if self.data_processor:
+            self.data_processor.pause_notifications()
+    
+    def activate_session(self):
+        """Reactivate session (resume access, resume notifications).
+        
+        Called after catchup completes to resume normal operations.
+        """
+        logger.info("[SESSION] Reactivating session (normal mode)")
+        self._session_active.set()
+        
+        # Notify DataProcessor to resume AnalysisEngine notifications
+        if self.data_processor:
+            self.data_processor.resume_notifications()
+    
+    def is_session_active(self) -> bool:
+        """Check if session is active (not in catchup mode)."""
+        return self._session_active.is_set()
+```
+
+### 1.3 SessionData Access Control
+
+**Location:** `session_data.py`
+
+**Add access checks to prevent reading during catchup:**
+
+```python
+class SessionData:
+    def __init__(self, session_coordinator=None):
+        self._session_coordinator = session_coordinator  # Reference for active check
+        # ... existing attributes
+    
+    def _check_session_active(self) -> bool:
+        """Check if session is active before allowing access.
+        
+        Returns:
+            True if active, False if deactivated (catchup mode)
+        """
+        if self._session_coordinator is None:
+            return True  # No coordinator reference, allow access
+        
+        return self._session_coordinator.is_session_active()
+    
+    # Update all access methods to check session state
+    def get_bars(self, symbol: str, interval: str = "1m") -> List[BarData]:
+        """Get bars for symbol (if session active)."""
+        if not self._check_session_active():
+            logger.debug(f"[SESSION_DATA] Access blocked (session deactivated): get_bars({symbol}, {interval})")
+            return []  # Return empty during catchup
+        
+        # Normal access
+        return self._bars.get((symbol, interval), [])
+    
+    def get_all_symbols(self) -> Set[str]:
+        """Get all symbols (if session active)."""
+        if not self._check_session_active():
+            logger.debug("[SESSION_DATA] Access blocked (session deactivated): get_all_symbols()")
+            return set()  # Return empty during catchup
+        
+        # Normal access
+        return set(self._symbols)
+    
+    # Similar checks for:
+    # - get_latest_bar()
+    # - get_bars_since()
+    # - get_historical_bars()
+    # - etc.
+```
+
+**Key Points:**
+- All read operations check `is_session_active()` first
+- During catchup (deactivated), return empty/None instead of real data
+- Write operations (add_bar) continue to work (building state for later)
+- AnalysisEngine sees empty results during catchup
+
+### 1.4 DataProcessor Notification Control
+
+**Location:** `data_processor.py`
+
+**Add notification pausing mechanism:**
+
+```python
+class DataProcessor:
+    def __init__(self, ...):
+        # ... existing attributes
+        
+        # NEW: Notification control
+        self._notifications_paused = threading.Event()
+        self._notifications_paused.set()  # Initially active (not paused)
+    
+    def pause_notifications(self):
+        """Pause AnalysisEngine notifications (during catchup)."""
+        logger.info("[PROCESSOR] Pausing AnalysisEngine notifications")
+        self._notifications_paused.clear()
+    
+    def resume_notifications(self):
+        """Resume AnalysisEngine notifications (after catchup)."""
+        logger.info("[PROCESSOR] Resuming AnalysisEngine notifications")
+        self._notifications_paused.set()
+    
+    def _notify_analysis_engine(self, event_type: str, data: dict):
+        """Notify AnalysisEngine (if not paused).
+        
+        Args:
+            event_type: Type of event (bar_update, derived_computed, etc.)
+            data: Event data
+        """
+        # Check if notifications are paused
+        if not self._notifications_paused.is_set():
+            logger.debug(f"[PROCESSOR] Dropping notification (paused): {event_type}")
+            return  # Drop notification during catchup
+        
+        # Normal notification
+        if self.analysis_engine:
+            self.analysis_engine.on_data_update(event_type, data)
+    
+    # Update all notification call sites:
+    def _process_derived_intervals(self):
+        # ... compute derived bars ...
+        
+        # Notify (will be dropped if paused)
+        self._notify_analysis_engine("derived_computed", {
+            "symbol": symbol,
+            "interval": interval,
+            "bar": derived_bar
+        })
+```
+
+**Key Points:**
+- Notifications paused via threading.Event (thread-safe)
+- All notifications go through `_notify_analysis_engine()` (single point of control)
+- Dropped notifications during catchup (no queue buildup)
+- Resume after catchup completes
+
+### 1.5 Add Symbol API
 
 **New method signature:**
 ```python
@@ -226,18 +397,28 @@ def _process_pending_symbol_additions(self):
             # 3. POPULATE STREAM INPUT QUEUE (reuse normal process)
             self._populate_symbol_queue(symbol)
             
-            # 4. CATCH UP TO CURRENT TIME (unique handling)
+            # 4. DEACTIVATE SESSION (prevent AnalysisEngine access)
+            self.deactivate_session()
+            logger.info("[DYNAMIC] Session deactivated (catchup mode)")
+            
+            # 5. CATCH UP TO CURRENT TIME (unique handling - while deactivated)
             self._catchup_symbol_to_current_time(symbol)
             
-            # 5. SUCCESS - mark active
+            # 6. REACTIVATE SESSION (resume AnalysisEngine access)
+            self.activate_session()
+            logger.info("[DYNAMIC] Session reactivated (normal mode)")
+            
+            # 7. SUCCESS - mark active
             self._active_symbols.add(symbol)
             logger.info(f"[DYNAMIC] ✓ {symbol} ready for streaming")
             
         except Exception as e:
             logger.error(f"[DYNAMIC] Error adding {symbol}: {e}")
+            # Ensure session is reactivated on error
+            self.activate_session()
         
         finally:
-            # 6. RESUME streaming/time advance
+            # 8. RESUME streaming/time advance
             logger.info("[DYNAMIC] Resuming streaming/time advance")
             self._stream_paused.set()
 
@@ -411,9 +592,57 @@ def _catchup_symbol_to_current_time(self, symbol: str):
     logger.info(f"  Current backtest time: {current_time}")
 ```
 
-### 2.6 Resume Flow
+### 2.6 Session Deactivation During Catchup
 
-**After catch-up, resume normal operations:**
+**Critical for real-world simulation:**
+
+During catchup, we're processing historical data to reach current backtest time. This is NOT real-time trading - it's initialization. To properly simulate real-world behavior:
+
+1. **Deactivate session** before catchup
+2. **Block session_data access** (returns empty to AnalysisEngine)
+3. **Drop DataProcessor notifications** (no AnalysisEngine updates)
+4. **Reactivate session** after catchup completes
+
+**Flow:**
+```python
+# 4. DEACTIVATE SESSION
+self.deactivate_session()
+# - Clears _session_active flag
+# - Calls data_processor.pause_notifications()
+
+# 5. CATCHUP (while deactivated)
+self._catchup_symbol_to_current_time(symbol)
+# - session_data.add_bar() still works (writes continue)
+# - session_data.get_bars() returns [] (reads blocked)
+# - DataProcessor notifications dropped
+# - AnalysisEngine sees no data
+
+# 6. REACTIVATE SESSION
+self.activate_session()
+# - Sets _session_active flag
+# - Calls data_processor.resume_notifications()
+# - AnalysisEngine can now see data
+```
+
+**Why this matters:**
+```
+WITHOUT deactivation (WRONG):
+  Catchup adds bar at 09:30 → DataProcessor notifies → AnalysisEngine processes
+  Catchup adds bar at 09:31 → DataProcessor notifies → AnalysisEngine processes
+  ...
+  [AnalysisEngine sees 100+ bars instantly, not realistic]
+
+WITH deactivation (CORRECT):
+  Catchup adds bars 09:30-11:30 (session deactivated)
+  → DataProcessor sees empty from session_data (blocked)
+  → No AnalysisEngine notifications
+  Session reactivated at 11:30
+  → AnalysisEngine starts seeing bars from 11:30 forward (realistic)
+```
+
+### 2.7 Resume Flow
+
+**After catch-up and reactivation, resume normal operations:**
 
 **Implementation:**
 ```python
@@ -426,9 +655,18 @@ finally:
 # Normal streaming resumes in _streaming_phase:
 # - New symbol's remaining bars (>= current_time) are in queue
 # - Will be processed chronologically with other symbols
+# - Session is ACTIVE (AnalysisEngine can see data)
+# - DataProcessor notifications ACTIVE (AnalysisEngine gets updates)
 # - DataProcessor will detect new symbol and generate derivatives
 # - QualityManager will detect new symbol and compute quality scores
 ```
+
+**State after resume:**
+- ✅ Streaming/time advance resumed
+- ✅ Session active (reads allowed)
+- ✅ Notifications active (AnalysisEngine receiving updates)
+- ✅ New symbol integrated seamlessly
+- ✅ AnalysisEngine sees data from current time forward (realistic)
 
 ---
 
@@ -886,57 +1124,109 @@ def _pause_streaming(self):
 
 ### Phase 1: Foundation (Week 1)
 - [ ] Add symbol tracking attributes
+- [ ] Add session activation control (`_session_active` Event)
 - [ ] Implement `add_symbol()` method (stub)
 - [ ] Implement `remove_symbol()` method (stub)
 - [ ] Add thread-safety locks
+- [ ] Implement `deactivate_session()` / `activate_session()` / `is_session_active()`
 - [ ] Write unit tests for state management
 
-### Phase 2: Backtest Mode (Week 2)
-- [ ] Implement pause mechanism
-- [ ] Implement `_load_symbol_historical_backtest()`
-- [ ] Integrate with stream coordinator queue
-- [ ] Handle resume logic
-- [ ] Test pause/resume cycle
+### Phase 2: SessionData Access Control (Week 2)
+- [ ] Add `_session_coordinator` reference to SessionData
+- [ ] Implement `_check_session_active()` helper
+- [ ] Update all read methods to check session state:
+  - [ ] `get_bars()`
+  - [ ] `get_all_symbols()`
+  - [ ] `get_latest_bar()`
+  - [ ] `get_bars_since()`
+  - [ ] `get_historical_bars()`
+- [ ] Test that reads return empty when deactivated
+- [ ] Verify writes still work when deactivated
 
-### Phase 3: Live Mode (Week 3)
-- [ ] Implement non-blocking stream start
+### Phase 3: DataProcessor Notification Control (Week 3)
+- [ ] Add `_notifications_paused` Event to DataProcessor
+- [ ] Implement `pause_notifications()` / `resume_notifications()`
+- [ ] Create `_notify_analysis_engine()` wrapper
+- [ ] Update all notification call sites to use wrapper
+- [ ] Test that notifications drop when paused
+- [ ] Verify resume re-enables notifications
+
+### Phase 4: Backtest Mode Catchup (Week 4)
+- [ ] Implement pause mechanism (`_stream_paused` Event)
+- [ ] Implement queue-based notification (`_pending_symbol_additions`)
+- [ ] Implement `_process_pending_symbol_additions()`
+- [ ] Implement `_load_symbol_historical()`
+- [ ] Implement `_populate_symbol_queue()`
+- [ ] Implement `_catchup_symbol_to_current_time()`
+  - [ ] Use TimeManager for regular hours
+  - [ ] Drop bars outside regular hours
+  - [ ] Forward bars before current time to session_data
+- [ ] Integrate session deactivation before catchup
+- [ ] Integrate session reactivation after catchup
+- [ ] Test pause/resume cycle with session control
+- [ ] Verify AnalysisEngine sees no data during catchup
+- [ ] Verify AnalysisEngine sees data after reactivation
+
+### Phase 5: Live Mode (Week 5)
 - [ ] Implement `_load_symbol_historical_live()`
+- [ ] Implement stream start (caller thread)
 - [ ] Handle concurrent operations
 - [ ] Test with mock streams
 - [ ] Verify gap filling works
+- [ ] Verify SessionCoordinator auto-detection
+- [ ] Test that no pause occurs (live continues)
 
-### Phase 4: Symbol Removal (Week 4)
+### Phase 6: Symbol Removal (Week 6)
 - [ ] Implement immediate removal
 - [ ] Implement graceful removal
 - [ ] Add queue drain detection
 - [ ] Test removal scenarios
 - [ ] Verify cleanup
+- [ ] Test session_data cleanup (optional)
 
-### Phase 5: Integration (Week 5)
+### Phase 7: Integration Testing (Week 7)
 - [ ] Verify DataProcessor auto-detection
 - [ ] Verify QualityManager auto-detection
 - [ ] Add logging for new symbol detection
-- [ ] Test derivative generation
-- [ ] Test quality scoring
+- [ ] Test derivative generation for new symbols
+- [ ] Test quality scoring for new symbols
+- [ ] Test session deactivation/reactivation cycle
+- [ ] Test notification pause/resume
 
-### Phase 6: CLI & UX (Week 6)
-- [ ] Add CLI commands
+### Phase 8: CLI & UX (Week 8)
+- [ ] Add CLI commands (`data symbol-add`, `data symbol-remove`, `data symbol-list`)
 - [ ] Add command help text
 - [ ] Test CLI integration
 - [ ] Document user workflows
 - [ ] Add examples
+- [ ] Test blocking vs non-blocking modes
 
-### Phase 7: Testing & Polish (Week 7)
+### Phase 9: Testing & Polish (Week 9)
 - [ ] Write all unit tests
+  - [ ] Session activation control
+  - [ ] SessionData access blocking
+  - [ ] DataProcessor notification dropping
+  - [ ] Catchup logic
 - [ ] Write integration tests
+  - [ ] Full backtest flow with session control
+  - [ ] Full live flow
+  - [ ] Symbol removal flows
 - [ ] Write E2E tests
+  - [ ] Real backtest with dynamic symbol addition
+  - [ ] Verify AnalysisEngine behavior
 - [ ] Performance testing
 - [ ] Documentation
 
-### Phase 8: Production Ready (Week 8)
+### Phase 10: Production Ready (Week 10)
 - [ ] Error handling review
+  - [ ] Ensure session always reactivated (even on error)
+  - [ ] Ensure notifications always resumed
 - [ ] Thread safety audit
+  - [ ] Verify all Event usage is safe
+  - [ ] Verify lock usage is correct
 - [ ] Logging audit
+  - [ ] Add debug logs for session state changes
+  - [ ] Add debug logs for notification drops
 - [ ] Documentation complete
 - [ ] Release notes
 
@@ -948,6 +1238,10 @@ def _pause_streaming(self):
 - ✅ Can add symbol during active backtest session
 - ✅ Can add symbol during live session
 - ✅ New symbol data processed up to current time
+- ✅ Session deactivated during backtest catchup
+- ✅ AnalysisEngine sees no data during catchup (realistic simulation)
+- ✅ Session reactivated after catchup
+- ✅ AnalysisEngine sees data from current time forward (realistic)
 - ✅ DataProcessor auto-generates derivatives
 - ✅ QualityManager auto-scores quality
 - ✅ Can remove symbol gracefully
@@ -987,9 +1281,22 @@ def _pause_streaming(self):
 - ✅ QualityManager auto-detection (exists)
 
 ### New Components
-- ⚠️ Pause mechanism (Phase 2)
-- ⚠️ Queue drain detection (Phase 4)
-- ⚠️ CLI commands (Phase 6)
+- ⚠️ Session activation control (Phase 1)
+  - `_session_active` Event
+  - `deactivate_session()` / `activate_session()` / `is_session_active()`
+- ⚠️ SessionData access blocking (Phase 2)
+  - `_check_session_active()` in all read methods
+- ⚠️ DataProcessor notification control (Phase 3)
+  - `_notifications_paused` Event
+  - `pause_notifications()` / `resume_notifications()`
+  - `_notify_analysis_engine()` wrapper
+- ⚠️ Backtest pause mechanism (Phase 4)
+  - `_stream_paused` Event
+  - `_pending_symbol_additions` Queue
+- ⚠️ Catchup logic (Phase 4)
+  - `_catchup_symbol_to_current_time()`
+- ⚠️ Queue drain detection (Phase 6)
+- ⚠️ CLI commands (Phase 8)
 
 ---
 
@@ -998,6 +1305,9 @@ def _pause_streaming(self):
 | Risk | Impact | Mitigation |
 |------|--------|------------|
 | Pause disrupts time consistency | HIGH | Verify time unchanged after resume |
+| Session not reactivated on error | CRITICAL | Use try/finally, always reactivate |
+| Notifications not resumed on error | CRITICAL | Use try/finally, always resume |
+| AnalysisEngine sees catchup data | HIGH | Verify session deactivation works |
 | Live historical load blocks too long | MEDIUM | Set timeout, continue with gaps |
 | Race condition on state | HIGH | Use locks, audit thread safety |
 | Queue overflow on add | LOW | Check capacity before load |
