@@ -361,6 +361,22 @@ class SessionData:
         """
         return self._session_active
     
+    def _check_session_active(self) -> bool:
+        """
+        Check if session is active before allowing data access.
+        
+        Used by read methods to block access during catchup (dynamic symbol addition).
+        
+        Returns:
+            True if active (allow access), False if deactivated (block access)
+        
+        Note:
+            This is used for dynamic symbol management (Phase 2).
+            During catchup, session is deactivated to prevent AnalysisEngine
+            from seeing intermediate state.
+        """
+        return self._session_active
+    
     def register_symbol(self, symbol: str) -> SymbolSessionData:
         """Register a new symbol for tracking.
         
@@ -389,8 +405,12 @@ class SessionData:
             symbol: Stock symbol
             
         Returns:
-            SymbolSessionData if symbol is registered, None otherwise
+            SymbolSessionData or None if not found (None if session deactivated)
         """
+        # Block access during catchup (Phase 2: Dynamic symbol management)
+        if not self._check_session_active():
+            return None
+        
         symbol = symbol.upper()
         with self._lock:
             return self._symbols.get(symbol)
@@ -601,8 +621,12 @@ class SessionData:
             interval: Bar interval in minutes (1, 5, 15, etc.)
             
         Returns:
-            Most recent bar or None
+            Most recent bar or None (None if session deactivated)
         """
+        # Block access during catchup (Phase 2: Dynamic symbol management)
+        if not self._check_session_active():
+            return None
+        
         symbol = symbol.upper()
         with self._lock:
             symbol_data = self._symbols.get(symbol)
@@ -626,8 +650,12 @@ class SessionData:
             interval: Bar interval in minutes
             
         Returns:
-            List of last N bars (oldest to newest)
+            List of last N bars (empty list if session deactivated)
         """
+        # Block access during catchup (Phase 2: Dynamic symbol management)
+        if not self._check_session_active():
+            return []
+        
         symbol = symbol.upper()
         with self._lock:
             symbol_data = self._symbols.get(symbol)
@@ -649,8 +677,12 @@ class SessionData:
             interval: Bar interval in minutes
             
         Returns:
-            List of bars after timestamp
+            List of bars after timestamp (empty list if session deactivated)
         """
+        # Block access during catchup (Phase 2: Dynamic symbol management)
+        if not self._check_session_active():
+            return []
+        
         symbol = symbol.upper()
         with self._lock:
             symbol_data = self._symbols.get(symbol)
@@ -666,8 +698,12 @@ class SessionData:
             interval: Bar interval in minutes
             
         Returns:
-            Number of bars available
+            Number of bars available (0 if session deactivated)
         """
+        # Block access during catchup (Phase 2: Dynamic symbol management)
+        if not self._check_session_active():
+            return 0
+        
         symbol = symbol.upper()
         with self._lock:
             symbol_data = self._symbols.get(symbol)
@@ -1173,7 +1209,15 @@ class SessionData:
         self.clear()
     
     def get_active_symbols(self) -> Set[str]:
-        """Get set of active symbols (thread-safe read)."""
+        """Get set of active symbols (thread-safe read).
+        
+        Returns:
+            Set of active symbols (empty set if session deactivated)
+        """
+        # Block access during catchup (Phase 2: Dynamic symbol management)
+        if not self._check_session_active():
+            return set()
+        
         symbols = self._active_symbols.copy()
         logger.debug(f"get_active_symbols() returning {len(symbols)} symbols: {symbols}")
         return symbols
