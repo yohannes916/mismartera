@@ -23,21 +23,35 @@ SessionCoordinator.add_symbol(symbol)
     ↓
 ├─ Common Checks (duplicate prevention)
     ↓
-├─ Backtest Mode: PAUSE → LOAD → CATCHUP → RESUME
+├─ BACKTEST MODE: PAUSE → NOTIFY → PROCESS → CATCHUP → RESUME
 │   ↓
-│   ├─ Pause streaming/time advance
-│   ├─ Load full-day historical data
-│   ├─ Populate queue with data
-│   ├─ Advance to current simulated time
-│   ├─ Resume streaming/time advance
-│   └─ DataProcessor/QualityManager auto-detect
+│   Caller Thread:
+│   ├─ 1.1 Pause streaming/time advance (both clock/data-driven)
+│   ├─ 1.2 Notify session_coordinator thread (via queue)
+│   └─ 1.3 Return (or block waiting for completion)
+│   ↓
+│   SessionCoordinator Thread:
+│   ├─ 2. Update config (determine streams/generated/skipped)
+│   ├─ 3. Load full-day historical data (reuse normal process)
+│   ├─ 4. Populate stream input queue (reuse normal process)
+│   ├─ 5. CATCHUP: Advance to current time (NEW - while clock stopped)
+│   │   ├─ 5.1 Drop data outside regular hours (use TimeManager)
+│   │   └─ 5.2 Forward regular-hours data before current time to session_data
+│   ├─ 6. Resume streaming/time advance
+│   └─ 7. DataProcessor/QualityManager auto-detect and process
     ↓
-└─ Live Mode: IMMEDIATE → LOAD (blocking) → CONTINUE
+└─ LIVE MODE: CONFIG → LOAD → STREAM → AUTO-DETECT
     ↓
-    ├─ Start stream immediately (non-blocking)
-    ├─ Load historical data (caller blocks)
-    ├─ SessionCoordinator continues
-    └─ Gap filling + derivatives (retry-based)
+    Caller Thread (blocks):
+    ├─ 1. Update config (determine streams/generated/skipped)
+    ├─ 2. Load historical data (CALLER BLOCKS)
+    ├─ 3. Start stream from data API
+    └─ 4. Return
+    ↓
+    SessionCoordinator Thread (continues normally):
+    ├─ 5. Detects new queue automatically
+    ├─ 6. Forwards data to session_data (normal process)
+    └─ 7. DataProcessor/QualityManager handle gaps + derivatives
 ```
 
 ---
@@ -117,19 +131,66 @@ def remove_symbol(
 
 ## Phase 2: Backtest Mode Implementation
 
-### 2.1 Pause Mechanism
+### 2.1 Thread Coordination
 
-**Challenge:** Pause both time advancement and data streaming
+**Flow:**
+1. **Caller thread:** Calls `session_coordinator.add_symbol(symbol)`
+2. **Caller thread:** Pauses streaming/time advance (both clock-driven and data-driven)
+3. **Caller thread:** Notifies session_coordinator thread via flag/queue
+4. **Caller thread:** Returns immediately
+5. **Session coordinator thread:** Detects notification, processes symbol addition
+6. **Session coordinator thread:** Resumes streaming/time advance when complete
 
 **Implementation:**
 ```python
-# Add pause control
+# Add notification mechanism
+self._pending_symbol_additions = queue.Queue()  # Thread-safe queue
 self._stream_paused = threading.Event()
 self._stream_paused.set()  # Initially not paused
 
-# In _streaming_phase():
+# Caller thread API
+def add_symbol(self, symbol: str, blocking: bool = True) -> bool:
+    """Add symbol to backtest (caller thread).
+    
+    Args:
+        symbol: Symbol to add
+        blocking: If True, wait for completion; if False, return immediately
+    
+    Returns:
+        True if queued successfully (non-blocking) or completed (blocking)
+    """
+    if self.mode == "backtest":
+        logger.info(f"[DYNAMIC] Queueing {symbol} for addition (BACKTEST)")
+        
+        # 1. PAUSE streaming/time advance
+        logger.debug("[DYNAMIC] Pausing streaming/time advance")
+        self._stream_paused.clear()
+        
+        # 2. NOTIFY session coordinator thread
+        self._pending_symbol_additions.put(symbol)
+        logger.debug(f"[DYNAMIC] Queued {symbol} for processing")
+        
+        # 3. RETURN (or wait if blocking)
+        if blocking:
+            # Wait for symbol to appear in active set
+            timeout = 10  # seconds
+            start = time.time()
+            while symbol not in self._active_symbols:
+                if time.time() - start > timeout:
+                    logger.error(f"[DYNAMIC] Timeout waiting for {symbol}")
+                    return False
+                time.sleep(0.1)
+            logger.info(f"[DYNAMIC] ✓ {symbol} added successfully")
+        
+        return True
+
+# Session coordinator thread processing
 def _streaming_phase(self):
     while not self._stop_event.is_set():
+        # Check for pending symbol additions
+        if not self._pending_symbol_additions.empty():
+            self._process_pending_symbol_additions()
+        
         # Wait if paused
         self._stream_paused.wait()
         
@@ -137,184 +198,324 @@ def _streaming_phase(self):
         ...
 ```
 
-### 2.2 Historical Data Load
+### 2.2 Config Update & Stream Determination
 
-**Steps:**
-1. Query TimeManager for current session date
-2. Fetch full-day data for new symbol (1m bars)
-3. Filter to regular trading hours
-4. Load into BacktestStreamCoordinator queue
+**Reuse existing logic from session initialization:**
 
 **Implementation:**
 ```python
-def _load_symbol_historical_backtest(
-    self,
-    symbol: str,
-    up_to_time: datetime
-) -> bool:
-    """Load historical data for symbol up to current backtest time.
+def _process_pending_symbol_additions(self):
+    """Process pending symbol additions (session coordinator thread)."""
+    while not self._pending_symbol_additions.empty():
+        symbol = self._pending_symbol_additions.get()
+        
+        logger.info(f"[DYNAMIC] Processing addition: {symbol}")
+        
+        try:
+            # 1. UPDATE CONFIG (determine streams/generated/skipped)
+            self._update_symbol_config(symbol)
+            
+            # 2. LOAD HISTORICAL DATA (reuse normal process)
+            success = self._load_symbol_historical(symbol)
+            
+            if not success:
+                logger.error(f"[DYNAMIC] Failed to load {symbol}")
+                self._stream_paused.set()  # Resume anyway
+                continue
+            
+            # 3. POPULATE STREAM INPUT QUEUE (reuse normal process)
+            self._populate_symbol_queue(symbol)
+            
+            # 4. CATCH UP TO CURRENT TIME (unique handling)
+            self._catchup_symbol_to_current_time(symbol)
+            
+            # 5. SUCCESS - mark active
+            self._active_symbols.add(symbol)
+            logger.info(f"[DYNAMIC] ✓ {symbol} ready for streaming")
+            
+        except Exception as e:
+            logger.error(f"[DYNAMIC] Error adding {symbol}: {e}")
+        
+        finally:
+            # 6. RESUME streaming/time advance
+            logger.info("[DYNAMIC] Resuming streaming/time advance")
+            self._stream_paused.set()
+
+def _update_symbol_config(self, symbol: str):
+    """Determine what gets loaded/streamed/generated/skipped.
     
-    Args:
-        symbol: Symbol to load
-        up_to_time: Current simulated time (don't load data after this)
+    Reuses validation logic from StreamRequirementsCoordinator.
+    """
+    # Get base streams from session config
+    streams = self.session_config.session_data_config.streams
     
-    Returns:
-        True if data loaded successfully
+    # Determine base interval (use existing logic)
+    # For now, assume 1m base + derived from config
+    base_interval = "1m"
+    derived_intervals = self.session_config.session_data_config.data_upkeep.derived_intervals
+    
+    # Mark streams
+    self._streamed_data[symbol] = [base_interval]
+    self._generated_data[symbol] = derived_intervals.copy()
+    
+    # Add quotes if requested
+    if "quotes" in streams:
+        self._streamed_data[symbol].append("quotes")
+    
+    logger.debug(f"[DYNAMIC] {symbol} config: stream={self._streamed_data[symbol]}, "
+                f"generate={self._generated_data[symbol]}")
+```
+
+### 2.3 Historical Data Load (Reuse Normal Process)
+
+**Reuse existing `_load_historical_bars()` logic:**
+
+**Implementation:**
+```python
+def _load_symbol_historical(self, symbol: str) -> bool:
+    """Load historical data for symbol (reuse normal process).
+    
+    This is the SAME process used during session initialization.
     """
     # Get current session date
     current_date = self._time_manager.get_current_time().date()
     
-    # Get trading session for date
+    # Reuse existing historical load logic
+    # (Same as what runs in _initialize_session for initial symbols)
+    data_manager = self._system_manager.get_data_manager()
+    
+    # Load full day
+    bars = data_manager.get_bars(
+        session=None,
+        symbol=symbol,
+        start=datetime.combine(current_date, time.min),
+        end=datetime.combine(current_date, time.max),
+        interval="1m",
+        regular_hours_only=False  # Get all data, filter later
+    )
+    
+    if not bars:
+        logger.error(f"[DYNAMIC] No data found for {symbol} on {current_date}")
+        return False
+    
+    logger.info(f"[DYNAMIC] Loaded {len(bars)} bars for {symbol}")
+    return True
+```
+
+### 2.4 Populate Stream Queue (Reuse Normal Process)
+
+**Reuse existing queue population logic:**
+
+**Implementation:**
+```python
+def _populate_symbol_queue(self, symbol: str):
+    """Populate stream coordinator queue for symbol (reuse normal process).
+    
+    This is the SAME process used during session initialization.
+    """
+    # Get data from DataManager (already loaded in previous step)
+    data_manager = self._system_manager.get_data_manager()
+    current_date = self._time_manager.get_current_time().date()
+    
+    bars = data_manager.get_bars(
+        session=None,
+        symbol=symbol,
+        start=datetime.combine(current_date, time.min),
+        end=datetime.combine(current_date, time.max),
+        interval="1m",
+        regular_hours_only=False  # Get all, filter in next step
+    )
+    
+    # Add to stream coordinator (same as normal startup)
+    for bar in bars:
+        self._stream_coordinator.add_bar(symbol, bar)
+    
+    logger.debug(f"[DYNAMIC] Populated queue for {symbol}: {len(bars)} bars")
+```
+
+### 2.5 Catch Up to Current Time (NEW - Unique Handling)
+
+**This is the CRITICAL new logic specific to dynamic symbol addition:**
+
+**Implementation:**
+```python
+def _catchup_symbol_to_current_time(self, symbol: str):
+    """Advance symbol's data to current backtest time (WHILE CLOCK STOPPED).
+    
+    This is NEW logic specific to dynamic symbol addition.
+    
+    Process:
+        1. Get current backtest time (clock is paused)
+        2. Process symbol's queue chronologically
+        3. Drop data outside regular hours (use TimeManager)
+        4. Forward data within regular hours but before current time to session_data
+        5. Leave data >= current time in queue (for normal streaming)
+    
+    Args:
+        symbol: Symbol to catch up
+    """
+    current_time = self._time_manager.get_current_time()
+    current_date = current_time.date()
+    
+    logger.info(f"[DYNAMIC] Catching up {symbol} to {current_time}")
+    
+    # Get trading session for today (for regular hours)
     trading_session = await self._time_manager.get_trading_session(
         session=db_session,
         date=current_date
     )
     
     if not trading_session or trading_session.is_holiday:
-        logger.warning(f"No trading session for {current_date}")
-        return False
+        logger.warning(f"[DYNAMIC] No trading session for {current_date}")
+        return
     
-    # Fetch data via DataManager
-    data_manager = self._system_manager.get_data_manager()
+    # Define regular hours for today
+    market_open = datetime.combine(current_date, trading_session.regular_open)
+    market_close = datetime.combine(current_date, trading_session.regular_close)
     
-    start_dt = datetime.combine(current_date, trading_session.regular_open)
-    end_dt = up_to_time  # Only up to current time
+    logger.debug(f"[DYNAMIC] Regular hours: {market_open} to {market_close}")
     
-    bars = data_manager.get_bars(
-        session=None,
-        symbol=symbol,
-        start=start_dt,
-        end=end_dt,
-        interval="1m",
-        regular_hours_only=True  # Only regular hours
-    )
+    # Process queue chronologically (while clock is stopped)
+    bars_dropped = 0
+    bars_forwarded = 0
+    bars_remaining = 0
     
-    if not bars:
-        logger.error(f"No historical data found for {symbol}")
-        return False
+    queue = self._stream_coordinator.get_symbol_queue(symbol)
+    processed_bars = []
     
-    # Add to stream coordinator queue
-    self._stream_coordinator.add_symbol_data(symbol, bars)
+    while queue:
+        bar = queue.popleft()  # Get oldest bar
+        
+        # 4.1 DROP: Outside regular hours
+        if bar.timestamp < market_open or bar.timestamp >= market_close:
+            bars_dropped += 1
+            continue
+        
+        # 4.2 FORWARD: Within regular hours but before current time
+        if bar.timestamp < current_time:
+            self.session_data.add_bar(symbol, bar)
+            bars_forwarded += 1
+        else:
+            # KEEP: At or after current time (for normal streaming)
+            processed_bars.append(bar)
+            bars_remaining += 1
     
-    logger.info(f"Loaded {len(bars)} bars for {symbol} up to {up_to_time}")
-    return True
+    # Put remaining bars back in queue (chronologically ordered)
+    for bar in processed_bars:
+        queue.append(bar)
+    
+    logger.info(f"[DYNAMIC] Catchup complete for {symbol}:")
+    logger.info(f"  Dropped (non-regular hours): {bars_dropped}")
+    logger.info(f"  Forwarded (before current time): {bars_forwarded}")
+    logger.info(f"  Remaining (for streaming): {bars_remaining}")
+    logger.info(f"  Current backtest time: {current_time}")
 ```
 
-### 2.3 Catch-Up Processing
+### 2.6 Resume Flow
 
-**Challenge:** Process new symbol's data up to current time before resuming
-
-**Strategy:**
-- Data already filtered to `up_to_time` during load
-- Stream coordinator queue now has bars ≤ current_time
-- When time resumes, normal processing continues
-- DataProcessor will detect new symbol and generate derivatives
-
-**No special catch-up needed** - data is already at correct position.
-
-### 2.4 Resume Flow
+**After catch-up, resume normal operations:**
 
 **Implementation:**
 ```python
-def add_symbol(self, symbol: str, ...) -> bool:
-    # 1. Common checks
-    if symbol in self._active_symbols:
-        logger.warning(f"Symbol {symbol} already active")
-        return False
-    
-    if self.mode == "backtest":
-        logger.info(f"[DYNAMIC] Adding {symbol} (BACKTEST MODE)")
-        
-        # 2. PAUSE
-        logger.info("[DYNAMIC] Pausing streaming/time advance")
-        self._stream_paused.clear()  # Pause streaming
-        time.sleep(0.1)  # Let current iteration complete
-        
-        # 3. LOAD
-        logger.info(f"[DYNAMIC] Loading historical data for {symbol}")
-        current_time = self._time_manager.get_current_time()
-        success = self._load_symbol_historical_backtest(symbol, current_time)
-        
-        if not success:
-            logger.error(f"[DYNAMIC] Failed to load data for {symbol}")
-            self._stream_paused.set()  # Resume
-            return False
-        
-        # 4. MARK STREAMS
-        self._streamed_data[symbol] = ["1m"]  # Base interval
-        self._generated_data[symbol] = [5, 15]  # Derived (from config)
-        self._active_symbols.add(symbol)
-        
-        # 5. RESUME
-        logger.info("[DYNAMIC] Resuming streaming/time advance")
-        self._stream_paused.set()
-        
-        # 6. AUTO-PROCESSING
-        # DataProcessor will detect new symbol automatically in next iteration
-        # QualityManager will detect new symbol automatically
-        
-        logger.info(f"[DYNAMIC] ✓ Symbol {symbol} added successfully")
-        return True
+# In _process_pending_symbol_additions (already shown above):
+finally:
+    # RESUME streaming/time advance
+    logger.info("[DYNAMIC] Resuming streaming/time advance")
+    self._stream_paused.set()
+
+# Normal streaming resumes in _streaming_phase:
+# - New symbol's remaining bars (>= current_time) are in queue
+# - Will be processed chronologically with other symbols
+# - DataProcessor will detect new symbol and generate derivatives
+# - QualityManager will detect new symbol and compute quality scores
 ```
 
 ---
 
 ## Phase 3: Live Mode Implementation
 
-### 3.1 Non-Blocking Stream Start
+### 3.1 Flow Overview
 
-**Challenge:** Can't pause real-time market data
+**LIVE MODE FLOW:**
+1. **Caller thread:** Update config, determine streams/generated/skipped
+2. **Caller thread:** Load historical data (BLOCKING - caller waits)
+3. **Caller thread:** Start stream from data API
+4. **Caller thread:** Return
+5. **SessionCoordinator thread:** Detects new queue, forwards data normally
+6. **DataProcessor/QualityManager:** Handle gaps and derivatives
 
-**Strategy:**
-- Start stream immediately (via data_manager)
-- Load historical data in caller thread (blocking)
-- Session coordinator continues processing existing symbols
+**Key Difference from Backtest:**
+- No pause needed (real-time streams can't pause)
+- Caller blocks for historical load (not session coordinator)
+- Stream starts immediately, session coordinator adapts
 
-**Implementation:**
+### 3.2 Implementation
+
+**Caller thread API:**
 ```python
-def add_symbol(self, symbol: str, ...) -> bool:
+def add_symbol(self, symbol: str, blocking: bool = True) -> bool:
+    """Add symbol to live session (caller thread).
+    
+    Args:
+        symbol: Symbol to add
+        blocking: If True, wait for historical load; if False, return immediately
+    
+    Returns:
+        True if successful
+    """
     if self.mode == "live":
         logger.info(f"[DYNAMIC] Adding {symbol} (LIVE MODE)")
         
-        # 1. START STREAM (non-blocking)
-        logger.info(f"[DYNAMIC] Starting stream for {symbol}")
-        data_manager = self._system_manager.get_data_manager()
-        
-        # Start stream (returns immediately)
-        data_manager.start_stream(
-            symbol=symbol,
-            interval="1m",
-            callback=self._on_live_data  # Existing callback
-        )
-        
-        # 2. MARK AS ACTIVE (stream is live now)
-        self._streamed_data[symbol] = ["1m"]
-        self._generated_data[symbol] = [5, 15]
-        self._active_symbols.add(symbol)
-        
-        # 3. LOAD HISTORICAL (BLOCKING - caller waits)
-        logger.info(f"[DYNAMIC] Loading historical data for {symbol} (caller blocks)")
-        success = self._load_symbol_historical_live(symbol)
-        
-        if not success:
-            logger.warning(f"[DYNAMIC] Historical load failed for {symbol}")
-            # Stream continues, gaps will be handled by retry logic
-        
-        # 4. CONTINUE
-        # SessionCoordinator was never paused
-        # DataProcessor handles gap filling (if historical load failed)
-        # QualityManager generates quality scores
-        
-        logger.info(f"[DYNAMIC] ✓ Symbol {symbol} added (stream active)")
-        return True
+        try:
+            # 1. UPDATE CONFIG (determine streams/generated/skipped)
+            self._update_symbol_config(symbol)
+            logger.debug(f"[DYNAMIC] Config updated for {symbol}")
+            
+            # 2. LOAD HISTORICAL DATA (caller thread blocks)
+            logger.info(f"[DYNAMIC] Loading historical data for {symbol} (caller blocks)")
+            success = self._load_symbol_historical_live(symbol)
+            
+            if not success:
+                logger.warning(f"[DYNAMIC] Historical load failed for {symbol}")
+                # Continue anyway - stream will handle gaps
+            
+            # 3. START STREAM FROM DATA API (caller thread)
+            logger.info(f"[DYNAMIC] Starting stream for {symbol}")
+            data_manager = self._system_manager.get_data_manager()
+            
+            # Start stream (returns immediately after setup)
+            data_manager.start_stream(
+                symbol=symbol,
+                interval="1m",
+                callback=self._on_live_data  # Existing callback
+            )
+            
+            # Mark as active
+            self._active_symbols.add(symbol)
+            logger.info(f"[DYNAMIC] ✓ {symbol} stream started")
+            
+            # 4. RETURN
+            # SessionCoordinator will detect new queue automatically
+            # No notification needed - just starts appearing in data stream
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"[DYNAMIC] Failed to add {symbol}: {e}")
+            return False
+
+# _update_symbol_config is shared with backtest (already defined above)
 ```
 
-### 3.2 Historical Data Load (Live)
+### 3.3 Historical Data Load (Caller Thread Blocks)
 
 **Implementation:**
 ```python
 def _load_symbol_historical_live(self, symbol: str) -> bool:
     """Load historical data for live symbol (caller blocks).
+    
+    This is the SAME process used during session initialization,
+    but runs in CALLER THREAD instead of session coordinator thread.
     
     Args:
         symbol: Symbol to load
@@ -323,18 +524,18 @@ def _load_symbol_historical_live(self, symbol: str) -> bool:
         True if loaded successfully
         
     Note:
-        This runs in CALLER THREAD (blocking).
+        Caller thread blocks here.
         SessionCoordinator continues processing other symbols.
     """
-    # Get trailing days from config
+    # Get trailing days from config (same as initial symbols)
     trailing_days = self.session_config.session_data_config.historical.trailing_days
     
     # Calculate date range
     time_mgr = self._time_manager
     current_date = time_mgr.get_current_time().date()
     
-    # Go back trailing_days trading days
-    start_date = current_date - timedelta(days=trailing_days * 1.5)  # Buffer
+    # Go back trailing_days trading days (with buffer)
+    start_date = current_date - timedelta(days=int(trailing_days * 1.5))
     
     # Fetch via DataManager
     data_manager = self._system_manager.get_data_manager()
@@ -344,29 +545,63 @@ def _load_symbol_historical_live(self, symbol: str) -> bool:
         start=datetime.combine(start_date, time.min),
         end=time_mgr.get_current_time(),
         interval="1m",
-        regular_hours_only=True
+        regular_hours_only=True  # Only regular hours for live
     )
     
     if not bars:
-        logger.error(f"No historical data for {symbol}")
+        logger.error(f"[DYNAMIC] No historical data for {symbol}")
         return False
     
-    # Add to session_data (bypassing queue - direct insertion)
+    # Add to session_data (direct insertion, bypassing queue)
     for bar in bars:
         self.session_data.add_bar(symbol, bar)
     
-    logger.info(f"Loaded {len(bars)} historical bars for {symbol}")
+    logger.info(f"[DYNAMIC] Loaded {len(bars)} historical bars for {symbol}")
     return True
 ```
 
-### 3.3 Gap Filling & Retry
+### 3.4 SessionCoordinator Auto-Detection
 
-**Existing Infrastructure:**
-- DataProcessor already has retry logic for gaps
-- QualityManager tracks data quality scores
-- No changes needed - auto-detection works
+**SessionCoordinator automatically handles new symbol:**
 
-**Note:** If historical load fails, gaps will trigger retry up to max attempts.
+**No code changes needed** - existing logic already works:
+```python
+# In _streaming_phase (existing code):
+def _streaming_phase(self):
+    while not self._stop_event.is_set():
+        # Process all queues (including newly added symbols)
+        for symbol in self._active_symbols:
+            # Get next bar for this symbol
+            bar = self._stream_coordinator.get_next_bar(symbol)
+            
+            if bar:
+                # Forward to session_data (normal processing)
+                self.session_data.add_bar(symbol, bar)
+                
+                # Notify processors (they auto-detect new symbols)
+                self._notify_processors(symbol, bar)
+```
+
+**Key point:** When `start_stream()` creates a new queue, it's automatically 
+detected and processed in the next iteration.
+
+### 3.5 Gap Filling & Derivatives (Auto-Handled)
+
+**Existing Infrastructure Works:**
+
+**DataProcessor:**
+- Iterates over `session_data.get_all_symbols()`
+- Automatically detects new symbol
+- Generates derivatives (5m, 15m, etc.)
+- Handles gaps with retry logic
+
+**QualityManager:**
+- Monitors all symbols in session_data
+- Automatically detects new symbol
+- Computes quality scores
+- Triggers gap-fill if needed (up to retry limit)
+
+**No changes needed** - both components already auto-detect new symbols.
 
 ---
 
