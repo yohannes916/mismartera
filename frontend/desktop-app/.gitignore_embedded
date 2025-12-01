@@ -1,0 +1,22 @@
+# Embedded Node.js environment
+.node/
+
+# Compiled output
+out/
+.build/
+
+# Dependencies (will be installed locally)
+# node_modules/  # Uncomment if you want to exclude from git
+
+# Build cache
+.eslintcache
+*.tsbuildinfo
+
+# Test artifacts
+.vscode-test/
+test/smoke/out/
+test/integration/browser/out/
+
+# OS
+.DS_Store
+Thumbs.db
