@@ -46,7 +46,7 @@ from app.models.database import SessionLocal
 
 # Stream requirements validation (Phase 1-4)
 from app.threads.quality.stream_requirements_coordinator import StreamRequirementsCoordinator
-from app.threads.quality.parquet_data_checker import create_parquet_data_checker
+from app.threads.quality.parquet_data_checker import create_data_manager_checker
 
 # Quality calculation helpers
 from app.threads.quality.quality_helpers import (
@@ -1480,10 +1480,9 @@ class SessionCoordinator(threading.Thread):
             time_manager=self._time_manager
         )
         
-        # Create Parquet data checker (access data_manager via system_manager singleton)
+        # Create data checker using DataManager API (proper abstraction)
         data_manager = self._system_manager.get_data_manager()
-        parquet_storage = data_manager._parquet_storage
-        data_checker = create_parquet_data_checker(parquet_storage)
+        data_checker = create_data_manager_checker(data_manager)
         
         # Validate requirements
         result = coordinator.validate_requirements(data_checker)
