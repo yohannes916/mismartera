@@ -1481,7 +1481,7 @@ class SessionCoordinator(threading.Thread):
         )
         
         # Create Parquet data checker
-        parquet_storage = self.data_manager._parquet_storage
+        parquet_storage = self._data_manager._parquet_storage
         data_checker = create_parquet_data_checker(parquet_storage)
         
         # Validate requirements
