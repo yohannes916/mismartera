@@ -74,6 +74,7 @@ case "$1" in
         # Launch Code-OSS using the scripts/code.sh wrapper
         echo "Launching Code-OSS application..."
         echo ""
-        exec "${SCRIPT_DIR}/scripts/code.sh" "$@"
+        # Disable sandbox for development (avoids chrome-sandbox permission issues)
+        exec "${SCRIPT_DIR}/scripts/code.sh" --no-sandbox "$@"
         ;;
 esac
