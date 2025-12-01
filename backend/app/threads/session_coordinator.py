@@ -1480,8 +1480,9 @@ class SessionCoordinator(threading.Thread):
             time_manager=self._time_manager
         )
         
-        # Create Parquet data checker
-        parquet_storage = self._data_manager._parquet_storage
+        # Create Parquet data checker (access data_manager via system_manager singleton)
+        data_manager = self._system_manager.get_data_manager()
+        parquet_storage = data_manager._parquet_storage
         data_checker = create_parquet_data_checker(parquet_storage)
         
         # Validate requirements
