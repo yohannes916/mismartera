@@ -139,6 +139,10 @@ class DataProcessor(threading.Thread):
         # Performance tracking
         self._processing_times = []
         
+        # Notification control (Phase 3: Dynamic symbol management)
+        self._notifications_paused = threading.Event()
+        self._notifications_paused.set()  # Initially NOT paused (active)
+        
         logger.info(f"DataProcessor initialized: mode={self.mode}")
     
     def set_coordinator_subscription(self, subscription: StreamSubscription):
@@ -167,6 +171,33 @@ class DataProcessor(threading.Thread):
         """
         self._analysis_subscription = subscription
         logger.debug("Analysis engine subscription configured")
+    
+    def pause_notifications(self):
+        """Pause AnalysisEngine notifications (during catchup).
+        
+        Used during dynamic symbol addition to prevent AnalysisEngine from
+        seeing intermediate state during catchup phase.
+        
+        When paused:
+        - All calls to _notify_analysis_engine() are dropped (not queued)
+        - DataProcessor continues to process data normally
+        - Notifications resume after catchup completes
+        
+        Thread-safe via Event object.
+        """
+        logger.info("[PROCESSOR] Pausing AnalysisEngine notifications (catchup mode)")
+        self._notifications_paused.clear()  # Clear = paused
+    
+    def resume_notifications(self):
+        """Resume AnalysisEngine notifications (after catchup).
+        
+        Called after dynamic symbol catchup completes to resume normal
+        notification flow to AnalysisEngine.
+        
+        Thread-safe via Event object.
+        """
+        logger.info("[PROCESSOR] Resuming AnalysisEngine notifications (normal mode)")
+        self._notifications_paused.set()  # Set = active
     
     def set_derived_intervals(self, generated_data: Dict[str, List[str]]):
         """Set derived intervals from coordinator's GENERATED markings.
@@ -493,7 +524,19 @@ class DataProcessor(threading.Thread):
         Args:
             symbol: Symbol with new data
             interval: Interval with new data
+        
+        Note:
+            Notifications are dropped (not queued) when paused during dynamic
+            symbol catchup. This prevents AnalysisEngine from seeing intermediate
+            state during initialization.
         """
+        # Check if notifications are paused (Phase 3: Dynamic symbol management)
+        if not self._notifications_paused.is_set():
+            logger.debug(
+                f"[PROCESSOR] Dropping notification (paused): {symbol} {interval}"
+            )
+            return  # Drop notification during catchup
+        
         if not self._analysis_engine_queue:
             return
         
