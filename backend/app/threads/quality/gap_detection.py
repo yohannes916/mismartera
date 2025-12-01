@@ -164,37 +164,6 @@ def detect_gaps(
     return gaps
 
 
-def calculate_bar_quality(
-    session_start: datetime,
-    current_time: datetime,
-    actual_bar_count: int,
-    interval_minutes: int = 1
-) -> float:
-    """Calculate bar quality as percentage of expected bars present.
-    
-    Args:
-        session_start: Start of trading session
-        current_time: Current time
-        actual_bar_count: Number of bars actually present
-        interval_minutes: Bar interval in minutes
-        
-    Returns:
-        Quality percentage (0-100)
-    """
-    # Calculate expected number of bars
-    time_delta = (current_time - session_start).total_seconds()
-    expected_count = time_delta / (interval_minutes * 60)
-    
-    if expected_count <= 0:
-        return 100.0
-    
-    # Calculate quality percentage
-    quality = (actual_bar_count / expected_count) * 100
-    
-    # Cap at 100%
-    return min(quality, 100.0)
-
-
 def merge_overlapping_gaps(gaps: List[GapInfo]) -> List[GapInfo]:
     """Merge overlapping or adjacent gaps.
     
@@ -265,53 +234,3 @@ def get_gap_summary(gaps: List[GapInfo]) -> Dict[str, any]:
         "largest_gap": largest,
         "average_gap_size": total_missing / len(gaps)
     }
-
-
-# Example usage and testing
-if __name__ == "__main__":
-    # Test gap detection
-    from datetime import datetime
-    
-    # Create sample bars with gaps
-    session_start = datetime(2025, 1, 1, 9, 30)
-    bars = [
-        BarData(
-            symbol="AAPL",
-            timestamp=datetime(2025, 1, 1, 9, 30),
-            open=150.0, high=151.0, low=149.0, close=150.5, volume=1000
-        ),
-        # Missing 9:31
-        BarData(
-            symbol="AAPL",
-            timestamp=datetime(2025, 1, 1, 9, 32),
-            open=150.5, high=151.5, low=149.5, close=151.0, volume=1100
-        ),
-        BarData(
-            symbol="AAPL",
-            timestamp=datetime(2025, 1, 1, 9, 33),
-            open=151.0, high=152.0, low=150.0, close=151.5, volume=1200
-        ),
-        # Missing 9:34, 9:35
-        BarData(
-            symbol="AAPL",
-            timestamp=datetime(2025, 1, 1, 9, 36),
-            open=151.5, high=152.5, low=150.5, close=152.0, volume=1300
-        ),
-    ]
-    
-    current_time = datetime(2025, 1, 1, 9, 37)
-    
-    # Detect gaps
-    gaps = detect_gaps("AAPL", session_start, current_time, bars)
-    
-    print(f"Detected {len(gaps)} gaps:")
-    for gap in gaps:
-        print(f"  {gap}")
-    
-    # Calculate quality
-    quality = calculate_bar_quality(session_start, current_time, len(bars))
-    print(f"\nBar quality: {quality:.1f}%")
-    
-    # Get summary
-    summary = get_gap_summary(gaps)
-    print(f"\nSummary: {summary}")

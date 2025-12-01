@@ -25,11 +25,11 @@ async def fetch_1m_bars(
     Returns a list of bar dicts for Parquet storage:
     symbol, timestamp, interval, open, high, low, close, volume.
     """
-    if not settings.ALPACA_API_KEY_ID or not settings.ALPACA_API_SECRET_KEY:
+    if not settings.ALPACA.api_key_id or not settings.ALPACA.api_secret_key:
         raise RuntimeError("Alpaca API credentials are missing")
 
     # Use Alpaca historical data endpoint base URL
-    base_url = settings.ALPACA_DATA_BASE_URL.rstrip("/")
+    base_url = settings.ALPACA.data_base_url.rstrip("/")
 
     # Alpaca expects RFC 3339 / ISO timestamps
     def _to_alpaca_ts(dt: datetime) -> str:
@@ -48,8 +48,8 @@ async def fetch_1m_bars(
     url = f"{base_url}/v2/stocks/{symbol.upper()}/bars"
 
     headers = {
-        "APCA-API-KEY-ID": settings.ALPACA_API_KEY_ID,
-        "APCA-API-SECRET-KEY": settings.ALPACA_API_SECRET_KEY,
+        "APCA-API-KEY-ID": settings.ALPACA.api_key_id,
+        "APCA-API-SECRET-KEY": settings.ALPACA.api_secret_key,
     }
 
     all_bars: List[Dict] = []
@@ -134,11 +134,11 @@ async def fetch_1d_bars(
     Returns a list of bar dicts for Parquet storage:
     symbol, timestamp, interval, open, high, low, close, volume.
     """
-    if not settings.ALPACA_API_KEY_ID or not settings.ALPACA_API_SECRET_KEY:
+    if not settings.ALPACA.api_key_id or not settings.ALPACA.api_secret_key:
         raise RuntimeError("Alpaca API credentials are missing")
 
     # Use Alpaca historical data endpoint base URL
-    base_url = settings.ALPACA_DATA_BASE_URL.rstrip("/")
+    base_url = settings.ALPACA.data_base_url.rstrip("/")
 
     # Alpaca expects RFC 3339 / ISO timestamps
     def _to_alpaca_ts(dt: datetime) -> str:
@@ -157,8 +157,8 @@ async def fetch_1d_bars(
     url = f"{base_url}/v2/stocks/{symbol.upper()}/bars"
 
     headers = {
-        "APCA-API-KEY-ID": settings.ALPACA_API_KEY_ID,
-        "APCA-API-SECRET-KEY": settings.ALPACA_API_SECRET_KEY,
+        "APCA-API-KEY-ID": settings.ALPACA.api_key_id,
+        "APCA-API-SECRET-KEY": settings.ALPACA.api_secret_key,
     }
 
     all_bars: List[Dict] = []
@@ -244,10 +244,10 @@ async def fetch_ticks(
     ``interval='tick'`` and setting open/high/low/close to the trade
     price, and volume to the trade size.
     """
-    if not settings.ALPACA_API_KEY_ID or not settings.ALPACA_API_SECRET_KEY:
+    if not settings.ALPACA.api_key_id or not settings.ALPACA.api_secret_key:
         raise RuntimeError("Alpaca API credentials are missing")
 
-    base_url = settings.ALPACA_DATA_BASE_URL.rstrip("/")
+    base_url = settings.ALPACA.data_base_url.rstrip("/")
 
     def _to_alpaca_ts(dt: datetime) -> str:
         if dt.tzinfo is None:
@@ -263,8 +263,8 @@ async def fetch_ticks(
     url = f"{base_url}/v2/stocks/{symbol.upper()}/trades"
 
     headers = {
-        "APCA-API-KEY-ID": settings.ALPACA_API_KEY_ID,
-        "APCA-API-SECRET-KEY": settings.ALPACA_API_SECRET_KEY,
+        "APCA-API-KEY-ID": settings.ALPACA.api_key_id,
+        "APCA-API-SECRET-KEY": settings.ALPACA.api_secret_key,
     }
 
     ticks: List[Dict] = []
@@ -352,10 +352,10 @@ async def fetch_quotes(
     with keys: symbol, timestamp, bid_price, bid_size, ask_price, ask_size,
     exchange.
     """
-    if not settings.ALPACA_API_KEY_ID or not settings.ALPACA_API_SECRET_KEY:
+    if not settings.ALPACA.api_key_id or not settings.ALPACA.api_secret_key:
         raise RuntimeError("Alpaca API credentials are missing")
 
-    base_url = settings.ALPACA_DATA_BASE_URL.rstrip("/")
+    base_url = settings.ALPACA.data_base_url.rstrip("/")
 
     def _to_alpaca_ts(dt: datetime) -> str:
         if dt.tzinfo is None:
@@ -371,8 +371,8 @@ async def fetch_quotes(
     url = f"{base_url}/v2/stocks/{symbol.upper()}/quotes"
 
     headers = {
-        "APCA-API-KEY-ID": settings.ALPACA_API_KEY_ID,
-        "APCA-API-SECRET-KEY": settings.ALPACA_API_SECRET_KEY,
+        "APCA-API-KEY-ID": settings.ALPACA.api_key_id,
+        "APCA-API-SECRET-KEY": settings.ALPACA.api_secret_key,
     }
 
     quotes: List[Dict] = []
@@ -462,15 +462,15 @@ async def fetch_snapshot(symbol: str) -> Optional[Dict]:
     Returns:
         Dict with snapshot data or None if failed
     """
-    if not settings.ALPACA_API_KEY_ID or not settings.ALPACA_API_SECRET_KEY:
+    if not settings.ALPACA.api_key_id or not settings.ALPACA.api_secret_key:
         raise RuntimeError("Alpaca API credentials are missing")
     
-    base_url = settings.ALPACA_DATA_BASE_URL.rstrip("/")
+    base_url = settings.ALPACA.data_base_url.rstrip("/")
     url = f"{base_url}/v2/stocks/{symbol.upper()}/snapshot"
     
     headers = {
-        "APCA-API-KEY-ID": settings.ALPACA_API_KEY_ID,
-        "APCA-API-SECRET-KEY": settings.ALPACA_API_SECRET_KEY,
+        "APCA-API-KEY-ID": settings.ALPACA.api_key_id,
+        "APCA-API-SECRET-KEY": settings.ALPACA.api_secret_key,
     }
     
     async with httpx.AsyncClient() as client:
@@ -569,10 +569,10 @@ async def fetch_session_data(symbol: str, session_date: date) -> Optional[Dict]:
     Returns:
         Dict with session data (high, low, volume, open, close) or None if failed
     """
-    if not settings.ALPACA_API_KEY_ID or not settings.ALPACA_API_SECRET_KEY:
+    if not settings.ALPACA.api_key_id or not settings.ALPACA.api_secret_key:
         raise RuntimeError("Alpaca API credentials are missing")
     
-    base_url = settings.ALPACA_DATA_BASE_URL.rstrip("/")
+    base_url = settings.ALPACA.data_base_url.rstrip("/")
     url = f"{base_url}/v2/stocks/{symbol.upper()}/bars"
     
     # Request daily bar for specific session
@@ -593,8 +593,8 @@ async def fetch_session_data(symbol: str, session_date: date) -> Optional[Dict]:
     }
     
     headers = {
-        "APCA-API-KEY-ID": settings.ALPACA_API_KEY_ID,
-        "APCA-API-SECRET-KEY": settings.ALPACA_API_SECRET_KEY,
+        "APCA-API-KEY-ID": settings.ALPACA.api_key_id,
+        "APCA-API-SECRET-KEY": settings.ALPACA.api_secret_key,
     }
     
     async with httpx.AsyncClient() as client:

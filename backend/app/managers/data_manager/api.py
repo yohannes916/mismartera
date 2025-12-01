@@ -16,10 +16,7 @@ from app.models.trading import BarData, TickData
 from app.managers.data_manager.parquet_storage import parquet_storage
 from app.managers.data_manager.config import DataManagerConfig
 # Holiday import and time functionality moved to time_manager
-from app.managers.data_manager.backtest_stream_coordinator import (
-    get_coordinator,
-    StreamType,
-)
+# Old backtest_stream_coordinator removed - SessionCoordinator is used now
 from app.config import settings
 from app.logger import logger
 
@@ -150,9 +147,9 @@ class DataManager:
         # Stop all quote streams
         self.stop_quotes_stream()
         
-        # Stop the BacktestStreamCoordinator worker
-        coordinator = get_coordinator(self.system_manager, self)
-        coordinator.stop_worker()
+        # OLD ARCHITECTURE REMOVED:
+        # BacktestStreamCoordinator is no longer used
+        # SessionCoordinator handles all streaming now
         
         logger.info("All active streams stopped")
         
@@ -246,23 +243,24 @@ class DataManager:
         return market_open <= t < market_close
 
     def set_backtest_speed(self, speed: float) -> None:
-        """Set the global backtest speed multiplier.
+        """Set the backtest speed multiplier in session config.
 
-        This updates the single source of truth on the Settings object. Valid
-        values are:
+        Valid values:
+        - 0: Maximum speed (no pacing)
+        - 1.0: Realtime speed
+        - 2.0: 2x speed
+        - 0.5: Half speed
 
-        - 0.0: run backtests as fast as possible (no pacing)
-        - 1.0: realtime speed (pace according to actual timestamps)
-        - 2.0: 2x speed (twice as fast as realtime)
-        - 0.5: half speed (slower than realtime)
-        
         Args:
             speed: Speed multiplier (0 = max, 1.0 = realtime, >1 = faster, <1 = slower)
         """
         if speed < 0:
-            raise ValueError("DATA_MANAGER_BACKTEST_SPEED must be >= 0")
-
-        settings.DATA_MANAGER_BACKTEST_SPEED = speed
+            raise ValueError("speed_multiplier must be >= 0")
+        
+        if self.system_manager and self.system_manager.session_config and self.system_manager.session_config.backtest_config:
+            self.system_manager.session_config.backtest_config.speed_multiplier = speed
+        else:
+            raise RuntimeError("Session config not loaded")
     
     # ==================== MARKET DATA (BARS) ====================
     
@@ -272,7 +270,8 @@ class DataManager:
         symbol: str,
         start: datetime,
         end: datetime,
-        interval: str = "1m"
+        interval: str = "1m",
+        regular_hours_only: bool = False
     ) -> List[BarData]:
         """
         Get historical bar data.
@@ -283,6 +282,7 @@ class DataManager:
             start: Start datetime
             end: End datetime
             interval: Time interval (default: 1m)
+            regular_hours_only: If True, filter to regular trading hours only (default: False)
             
         Returns:
             List of BarData objects
@@ -292,7 +292,8 @@ class DataManager:
             interval,
             symbol,
             start_date=start,
-            end_date=end
+            end_date=end,
+            regular_hours_only=regular_hours_only
         )
         
         if df.empty:

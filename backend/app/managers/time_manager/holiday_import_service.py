@@ -5,13 +5,12 @@ Handles importing holidays from JSON or CSV files with exchange awareness
 import json
 import csv
 from pathlib import Path
-from datetime import date, time as dt_time
+from datetime import date, time as dt_time, datetime
 from typing import Dict, List, Any, Optional
 from sqlalchemy.orm import Session
 
 from app.logger import logger
 from app.managers.time_manager.exchange_groups import (
-    get_all_exchanges_for_import,
     is_valid_group,
     get_group_metadata
 )
@@ -94,14 +93,8 @@ class HolidayImportService:
             timezone = data.get('timezone', 'UTC')
             description = data.get('description', '')
             
-            # Get all exchanges this applies to
-            exchanges = get_all_exchanges_for_import(exchange_group)
-            
-            if not exchanges:
-                return {
-                    "success": False,
-                    "error": f"No exchanges found for: {exchange_group}"
-                }
+            # Store at exchange group level (no expansion)
+            # e.g., US_EQUITY stored once, not NYSE+NASDAQ+AMEX+ARCA separately
             
             # Parse holidays
             holidays_data = []
@@ -139,26 +132,24 @@ class HolidayImportService:
                     "success": True,
                     "dry_run": True,
                     "holidays_count": len(holidays_data),
-                    "exchanges": list(exchanges),
-                    "would_insert": len(holidays_data) * len(exchanges),
+                    "exchanges": [exchange_group],
+                    "would_insert": len(holidays_data),
                     "country": country,
                     "timezone": timezone,
                     "description": description
                 }
             
-            # Import for each exchange
-            total_imported = 0
-            for exchange in exchanges:
-                count = TradingCalendarRepository.bulk_create_holidays(
-                    session, holidays_data, exchange=exchange
-                )
-                total_imported += count
-                logger.info(f"Imported {count} holidays for {exchange}")
+            # Import once for the exchange group
+            count = TradingCalendarRepository.bulk_create_holidays(
+                session, holidays_data, exchange_group=exchange_group
+            )
+            logger.info(f"Imported {count} holidays for {exchange_group}")
+            total_imported = count
             
             return {
                 "success": True,
                 "inserted": total_imported,
-                "exchanges": list(exchanges),
+                "exchanges": [exchange_group],
                 "holidays_count": len(holidays_data),
                 "country": country,
                 "timezone": timezone,
@@ -227,11 +218,32 @@ class HolidayImportService:
                     if not row.get('Date'):
                         continue
                     
-                    # Parse date
+                    # Parse date - handle multiple formats
                     try:
-                        holiday_date = date.fromisoformat(row['Date'])
-                    except:
-                        logger.warning(f"Invalid date in CSV: {row.get('Date')}")
+                        date_str = row['Date'].strip().strip('"')
+                        
+                        # Try ISO format first (2024-01-01)
+                        try:
+                            holiday_date = date.fromisoformat(date_str)
+                        except:
+                            # Try full text format (Wednesday, January 1, 2025)
+                            # Remove day name if present
+                            if ',' in date_str:
+                                parts = date_str.split(',')
+                                if len(parts) >= 3:  # "Wednesday, January 1, 2025"
+                                    date_str = ','.join(parts[1:]).strip()  # "January 1, 2025"
+                                
+                            # Parse with multiple formats
+                            for fmt in ['%B %d, %Y', '%b %d, %Y', '%m/%d/%Y', '%Y-%m-%d']:
+                                try:
+                                    holiday_date = datetime.strptime(date_str, fmt).date()
+                                    break
+                                except:
+                                    continue
+                            else:
+                                raise ValueError(f"Could not parse date: {row['Date']}")
+                    except Exception as e:
+                        logger.warning(f"Invalid date in CSV: {row.get('Date')} - {e}")
                         continue
                     
                     # Parse early close time
@@ -264,21 +276,19 @@ class HolidayImportService:
                     "error": "No valid holidays found in CSV"
                 }
             
-            # Group by exchange
-            by_exchange = {}
+            # Group by exchange_group (no expansion)
+            by_exchange_group = {}
             for h in holidays_data:
                 exch_group = h.pop('exchange_group')
-                exchanges = get_all_exchanges_for_import(exch_group)
-                for exchange in exchanges:
-                    if exchange not in by_exchange:
-                        by_exchange[exchange] = []
-                    # Avoid duplicates within same exchange
-                    if h not in by_exchange[exchange]:
-                        by_exchange[exchange].append(h)
+                if exch_group not in by_exchange_group:
+                    by_exchange_group[exch_group] = []
+                # Avoid duplicates
+                if h not in by_exchange_group[exch_group]:
+                    by_exchange_group[exch_group].append(h)
             
             # Calculate totals
-            total_holidays = len(set(h['date'] for exch_holidays in by_exchange.values() for h in exch_holidays))
-            total_entries = sum(len(exch_holidays) for exch_holidays in by_exchange.values())
+            total_holidays = len(set(h['date'] for group_holidays in by_exchange_group.values() for h in group_holidays))
+            total_entries = sum(len(group_holidays) for group_holidays in by_exchange_group.values())
             
             # Dry run - just validate
             if dry_run:
@@ -286,23 +296,23 @@ class HolidayImportService:
                     "success": True,
                     "dry_run": True,
                     "holidays_count": total_holidays,
-                    "exchanges": list(by_exchange.keys()),
+                    "exchanges": list(by_exchange_group.keys()),
                     "would_insert": total_entries
                 }
             
-            # Import for each exchange
+            # Import for each exchange group (no expansion)
             total_imported = 0
-            for exchange, exch_holidays in by_exchange.items():
+            for exch_group, group_holidays in by_exchange_group.items():
                 count = TradingCalendarRepository.bulk_create_holidays(
-                    session, exch_holidays, exchange=exchange
+                    session, group_holidays, exchange_group=exch_group
                 )
                 total_imported += count
-                logger.info(f"Imported {count} holidays for {exchange}")
+                logger.info(f"Imported {count} holidays for {exch_group}")
             
             return {
                 "success": True,
                 "inserted": total_imported,
-                "exchanges": list(by_exchange.keys()),
+                "exchanges": list(by_exchange_group.keys()),
                 "holidays_count": total_holidays
             }
             

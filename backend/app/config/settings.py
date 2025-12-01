@@ -1,115 +1,134 @@
 """
-Application configuration using pydantic-settings
+Application configuration using pydantic-settings with nested structure
 """
+from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from typing import Optional
+from typing import Optional, List
 
+
+# ============================================================================
+# NESTED CONFIGURATION MODELS
+# ============================================================================
+
+class SystemConfig(BaseModel):
+    """System-level configuration."""
+    operating_mode: str = "backtest"                 # "backtest" or "live"
+    disable_cli_login: bool = True                   # Disable login requirement for CLI
+
+
+class APIConfig(BaseModel):
+    """HTTP API server configuration."""
+    host: str = "127.0.0.1"                         # API server host
+    port: int = 8000                                 # API server port
+
+
+class SecurityConfig(BaseModel):
+    """Security and authentication configuration."""
+    secret_key: str = "INSECURE-DEFAULT-CHANGE-IN-PRODUCTION"  # JWT secret key (MUST set via SECURITY__SECRET_KEY)
+    algorithm: str = "HS256"                         # JWT algorithm
+    access_token_expire_minutes: int = 1440          # Token expiration (24 hours)
+
+
+class DatabaseConfig(BaseModel):
+    """Database connection configuration."""
+    url: str = "sqlite+aiosqlite:///./data/trading_app.db"  # Database connection string
+
+
+class SchwabConfig(BaseModel):
+    """Charles Schwab API credentials and configuration."""
+    app_key: str = ""                                # Schwab app key
+    app_secret: str = ""                             # Schwab app secret
+    callback_url: str = "https://127.0.0.1:8000/callback"  # OAuth callback URL
+    api_base_url: str = "https://api.schwabapi.com"  # Schwab API base URL
+
+
+class AlpacaConfig(BaseModel):
+    """Alpaca API credentials and configuration."""
+    api_key_id: str = ""                             # Alpaca API key ID
+    api_secret_key: str = ""                         # Alpaca API secret key
+    api_base_url: str = "https://api.alpaca.markets"  # Trading API base URL
+    data_base_url: str = "https://data.alpaca.markets"  # Historical data API base URL
+    paper_trading: bool = True                       # Use paper trading account
+
+
+class ClaudeConfig(BaseModel):
+    """Anthropic Claude API configuration."""
+    api_key: str = ""                                # Anthropic API key
+    model: str = "claude-opus-4-20250514"            # Claude model to use
+
+
+class LoggerConfig(BaseModel):
+    """Logger configuration settings."""
+    # Core logging settings
+    default_level: str = "INFO"                      # Log level (TRACE, DEBUG, INFO, WARNING, ERROR, CRITICAL)
+    file_path: str = "./data/logs/app.log"          # Log file location
+    rotation: str = "10 MB"                          # Rotate when file reaches this size
+    retention: str = "30 days"                       # Keep logs for this duration
+    
+    # Deduplication filter settings
+    filter_enabled: bool = True                      # Enable log deduplication filter
+    filter_max_history: int = 5                      # Number of recent log locations to track
+    filter_time_threshold_seconds: float = 1.0       # Suppress duplicates within this time window (seconds)
+
+
+class DataManagerConfig(BaseModel):
+    """Data Manager configuration."""
+    data_api: str = "alpaca"                         # Data provider: "alpaca" or "schwab"
+
+
+class ExecutionConfig(BaseModel):
+    """Execution Manager configuration."""
+    default_brokerage: str = "mismartera"            # Default brokerage: "alpaca", "schwab", or "mismartera"
+
+
+class MismarteraConfig(BaseModel):
+    """Mismartera simulated trading configuration."""
+    initial_balance: float = 100000.0                # Starting cash balance
+    buying_power_multiplier: float = 1.0             # Margin multiplier (1.0=cash, 2.0=2x leverage)
+    execution_cost_pct: float = 0.001                # Total execution cost as % (0.1% = 10 bps)
+    slippage_pct: float = 0.0001                     # Market order slippage (0.01% = 1 bp)
+
+
+# ============================================================================
+# MAIN SETTINGS CLASS
+# ============================================================================
 
 class Settings(BaseSettings):
-    """Application settings loaded from environment variables"""
+    """Application settings loaded from environment variables.
     
-    # Application
+    Configuration is organized into nested sections for better organization.
+    Use double underscore (__) in env vars to access nested configs.
+    
+    Example:
+        LOGGER__DEFAULT_LEVEL=DEBUG
+        SYSTEM__OPERATING_MODE=live
+        SESSION__HISTORICAL_TRAILING_DAYS=10
+    """
+    
+    # Application metadata
     APP_NAME: str = "MisMartera Trading Backend"
     APP_VERSION: str = "1.0.0"
     DEBUG: bool = True
-
-    # System defaults
-    SYSTEM_OPERATING_MODE: str = "backtest"        # "backtest" or "live"
-    DISABLE_CLI_LOGIN_REQUIREMENT: bool = True # Disable login requirement for CLI (HTTP API still requires login)
     
-    # API Configuration
-    API_HOST: str = "127.0.0.1"
-    API_PORT: int = 8000
-    
-    # Security
-    SECRET_KEY: str
-    ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440
-    
-    # Database
-    DATABASE_URL: str = "sqlite+aiosqlite:///./data/trading_app.db"
-    
-    # Charles Schwab API
-    SCHWAB_APP_KEY: str = ""
-    SCHWAB_APP_SECRET: str = ""
-    SCHWAB_CALLBACK_URL: str = "https://127.0.0.1:8000/callback"
-    SCHWAB_API_BASE_URL: str = "https://api.schwabapi.com"
-    
-    # Alpaca API
-    ALPACA_API_KEY_ID: str = ""
-    ALPACA_API_SECRET_KEY: str = ""
-    # Trading API base URL (orders, account, etc.)
-    ALPACA_API_BASE_URL: str = "https://api.alpaca.markets"
-    # Historical data API base URL (bars, quotes, etc.)
-    ALPACA_DATA_BASE_URL: str = "https://data.alpaca.markets"
-    ALPACA_PAPER_TRADING: bool = True
-    
-    # Anthropic Claude API
-    ANTHROPIC_API_KEY: str = ""
-    CLAUDE_MODEL: str = "claude-opus-4-20250514"
-    
-    # Logging
-    LOG_LEVEL: str = "INFO"
-    LOG_FILE_PATH: str = "./data/logs/app.log"
-    LOG_ROTATION: str = "10 MB"
-    LOG_RETENTION: str = "30 days"
-    
-    # Trading Configuration
-    PAPER_TRADING: bool = True
-    MAX_POSITION_SIZE: float = 10000.0
-    DEFAULT_ORDER_TIMEOUT: int = 60
-
-    # DataManager defaults
-    DATA_MANAGER_DATA_API: str = "alpaca"          # e.g. "alpaca", "schwab"
-    DATA_MANAGER_BACKTEST_DAYS: int = 60           # trading days for backtests
-    # Backtest speed multiplier: 0 = max speed (no pacing), 1.0 = realtime, 2.0 = 2x speed, 0.5 = half speed
-    DATA_MANAGER_BACKTEST_SPEED: float = 60.0
-    
-    # ExecutionManager defaults
-    EXECUTION_MANAGER_DEFAULT_BROKERAGE: str = "mismartera"  # Default brokerage: "alpaca", "schwab", or "mismartera"
-    
-    # Mismartera Simulated Trading Configuration
-    MISMARTERA_INITIAL_BALANCE: float = 100000.0          # Starting cash balance
-    MISMARTERA_BUYING_POWER_MULTIPLIER: float = 1.0       # Margin multiplier (1.0 = cash account, 2.0 = 2x leverage)
-    MISMARTERA_EXECUTION_COST_PCT: float = 0.001          # Total execution cost as % of order value (0.1% = fees + commission + slippage)
-    MISMARTERA_SLIPPAGE_PCT: float = 0.0001               # Market order slippage (0.01% = 1 basis point)
-    
-    # Data-Upkeep Thread Configuration (Phase 2)
-    DATA_UPKEEP_ENABLED: bool = True
-    DATA_UPKEEP_CHECK_INTERVAL_SECONDS: int = 60   # How often to check data quality
-    DATA_UPKEEP_RETRY_MISSING_BARS: bool = True    # Automatically fill gaps
-    DATA_UPKEEP_MAX_RETRIES: int = 5               # Max retries for failed gap fills
-    DATA_UPKEEP_DERIVED_INTERVALS: list = [5, 15]  # Derived bar intervals (minutes)
-    DATA_UPKEEP_AUTO_COMPUTE_DERIVED: bool = True  # Auto-compute derived bars
-    
-    # Historical Bars Configuration (Phase 3)
-    HISTORICAL_BARS_ENABLED: bool = True
-    HISTORICAL_BARS_TRAILING_DAYS: int = 5         # Number of trailing days to keep
-    HISTORICAL_BARS_INTERVALS: list = ['1m', '5m', '1d']  # Which intervals to load (e.g., '1m', '5m', '1h', '1d')
-    HISTORICAL_BARS_AUTO_LOAD: bool = True         # Auto-load on session start
-    
-    # Prefetch Configuration (Phase 4)
-    PREFETCH_ENABLED: bool = True
-    PREFETCH_WINDOW_MINUTES: int = 60              # Start prefetch 60min before session
-    PREFETCH_CHECK_INTERVAL_MINUTES: int = 5       # Check for prefetch every 5 minutes
-    PREFETCH_AUTO_ACTIVATE: bool = True            # Auto-activate prefetch on session start
-    
-    # Session Boundary Configuration (Phase 5)
-    SESSION_AUTO_ROLL: bool = True                 # Automatically roll to next session
-    SESSION_TIMEOUT_SECONDS: int = 300             # Timeout if no data for 5 minutes
-    SESSION_BOUNDARY_CHECK_INTERVAL: int = 60      # Check boundaries every minute
-    SESSION_POST_MARKET_ROLL_DELAY: int = 30       # Minutes after close to auto-roll
-    
-    # Timezone configuration
-    TRADING_TIMEZONE: str = "America/New_York"     # canonical market timezone (ET)
-    LOCAL_TIMEZONE: str = "America/Los_Angeles"    # default local display timezone
-    DISPLAY_LOCAL_TIMEZONE: bool = True            # if True, CLI converts ET to LOCAL_TIMEZONE
+    # Nested configuration sections (initialized with defaults, overridden by env vars via env_nested_delimiter)
+    SYSTEM: SystemConfig = Field(default_factory=SystemConfig)
+    API: APIConfig = Field(default_factory=APIConfig)
+    SECURITY: SecurityConfig = Field(default_factory=SecurityConfig)  # Requires SECURITY__SECRET_KEY in .env
+    DATABASE: DatabaseConfig = Field(default_factory=DatabaseConfig)
+    SCHWAB: SchwabConfig = Field(default_factory=SchwabConfig)
+    ALPACA: AlpacaConfig = Field(default_factory=AlpacaConfig)
+    CLAUDE: ClaudeConfig = Field(default_factory=ClaudeConfig)
+    LOGGER: LoggerConfig = Field(default_factory=LoggerConfig)
+    DATA_MANAGER: DataManagerConfig = Field(default_factory=DataManagerConfig)
+    EXECUTION: ExecutionConfig = Field(default_factory=ExecutionConfig)
+    MISMARTERA: MismarteraConfig = Field(default_factory=MismarteraConfig)
     
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=True,
-        extra="ignore"
+        extra="ignore",
+        env_nested_delimiter="__"
     )
 
 

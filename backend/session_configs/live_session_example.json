@@ -1,36 +1,76 @@
 {
-  "session_name": "Live Trading Session",
-  "mode": "live",
-  "data_streams": [
-    {
-      "type": "bars",
-      "symbol": "SPY",
-      "interval": "1m"
+  "session_name": "Example Trading Session",
+  "exchange_group": "US_EQUITY",
+  "asset_class": "EQUITY",
+  "mode": "backtest",
+  "backtest_config": {
+    "start_date": "2025-07-02",
+    "end_date": "2025-07-07",
+    "speed_multiplier": 360.0,
+    "prefetch_days": 3
+  },
+  "session_data_config": {
+    "symbols": ["RIVN", "AAPL"],
+    "streams": ["1s", "1m", "5m", "10m", "quotes"],
+    "historical": {
+      "enable_quality": true,
+      "data": [
+        {
+          "trailing_days": 3,
+          "intervals": ["1m"],
+          "apply_to": "all"
+        },
+        {
+          "trailing_days": 10,
+          "intervals": ["1d"],
+          "apply_to": "all"
+        }
+      ],
+      "indicators": {
+        "avg_volume": {
+          "type": "trailing_average",
+          "period": "10d",
+          "granularity": "daily",
+          "field": "volume"
+        },
+        "avg_volume_intraday": {
+          "type": "trailing_average",
+          "period": "10d",
+          "granularity": "minute",
+          "field": "volume"
+        },
+        "high_52w": {
+          "type": "trailing_max",
+          "period": "52w",
+          "field": "high"
+        },
+        "low_52w": {
+          "type": "trailing_min",
+          "period": "52w",
+          "field": "low"
+        }
+      }
     },
-    {
-      "type": "ticks",
-      "symbol": "SPY"
-    },
-    {
-      "type": "quotes",
-      "symbol": "SPY"
+    "gap_filler": {
+      "enable_session_quality": true,
+      "max_retries": 5,
+      "retry_interval_seconds": 60
     }
-  ],
+  },
   "trading_config": {
-    "max_buying_power": 50000.0,
-    "max_per_trade": 5000.0,
-    "max_per_symbol": 10000.0,
-    "max_open_positions": 3,
-    "paper_trading": true
+    "max_buying_power": 100000.0,
+    "max_per_trade": 10000.0,
+    "max_per_symbol": 20000.0,
+    "max_open_positions": 5
   },
   "api_config": {
     "data_api": "alpaca",
-    "trade_api": "alpaca",
-    "account_id": "paper_live_trading"
+    "trade_api": "alpaca"
   },
   "metadata": {
     "created_by": "user",
-    "description": "Live paper trading session for SPY",
-    "strategy": "day_trading"
+    "description": "Example session configuration matching SESSION_ARCHITECTURE.md",
+    "strategy": "momentum_scalping",
+    "version": "2.0"
   }
 }

@@ -9,7 +9,7 @@ from pathlib import Path
 
 # Create database directory if it doesn't exist
 # Convert async URL to sync URL (remove +aiosqlite)
-db_url = settings.DATABASE_URL.replace("sqlite+aiosqlite://", "sqlite://")
+db_url = settings.DATABASE.url.replace("sqlite+aiosqlite://", "sqlite://")
 db_path = Path(db_url.replace("sqlite:///", ""))
 db_path.parent.mkdir(parents=True, exist_ok=True)
 

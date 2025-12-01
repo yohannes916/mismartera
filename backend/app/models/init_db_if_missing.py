@@ -37,12 +37,12 @@ def _sqlite_path_from_url(url: str) -> Path | None:
 
 
 async def _init_db_if_needed() -> None:
-    db_path = _sqlite_path_from_url(settings.DATABASE_URL)
+    db_path = _sqlite_path_from_url(settings.DATABASE.url)
 
     if db_path is None:
         logger.info(
             "DATABASE_URL is not sqlite+aiosqlite (got %s); init_db_if_missing will just create_all on current engine",
-            settings.DATABASE_URL,
+            settings.DATABASE.url,
         )
     else:
         # Ensure parent directory exists

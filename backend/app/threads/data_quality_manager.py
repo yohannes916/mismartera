@@ -31,7 +31,6 @@ Key Design:
 - Configuration-controlled: enable_session_quality flag (in gap_filler)
 """
 
-import logging
 import threading
 import queue
 import time
@@ -39,8 +38,11 @@ from datetime import datetime, timedelta
 from typing import Optional, Dict, List, Any, Tuple, Set
 from collections import defaultdict
 
+# Logging
+from app.logger import logger
+
 # Phase 1, 2, 3, 4 components
-from app.core.session_data import SessionData
+from app.managers.data_manager.session_data import SessionData, get_session_data
 from app.monitoring.performance_metrics import PerformanceMetrics
 from app.models.session_config import SessionConfig
 
@@ -50,11 +52,13 @@ from app.threads.quality import (
     detect_gaps,
     merge_overlapping_gaps
 )
+from app.threads.quality.quality_helpers import (
+    parse_interval_to_minutes,
+    calculate_quality_for_current_session
+)
 
 # Existing infrastructure
 from app.models.database import SessionLocal
-
-logger = logging.getLogger(__name__)
 
 
 class DataQualityManager(threading.Thread):
@@ -152,10 +156,11 @@ class DataQualityManager(threading.Thread):
         
         Args:
             symbol: Symbol with new data
-            interval: Interval with new data
+            interval: Interval of new data
             timestamp: Timestamp of new data
         """
-        # Only process streamed bar intervals (not derived)
+        # Only queue notifications for base intervals (streamed data)
+        # Derived bars get quality copied from base bars
         if interval in ["1m", "1s", "1d"]:  # Streamed intervals
             self._notification_queue.put((symbol, interval, timestamp))
     
@@ -242,10 +247,6 @@ class DataQualityManager(threading.Thread):
                 if not self._enable_quality:
                     continue
                 
-                logger.debug(
-                    f"Processing quality for: {symbol} {interval} @ {timestamp.time()}"
-                )
-                
                 # 2. Calculate quality for symbol
                 self._calculate_quality(symbol, interval)
                 
@@ -269,9 +270,17 @@ class DataQualityManager(threading.Thread):
     # =========================================================================
     
     def _calculate_quality(self, symbol: str, interval: str):
-        """Calculate quality score for a symbol/interval.
+        """Calculate quality score for CURRENT SESSION bars.
         
-        Quality = (actual_bars / expected_bars) * 100
+        Uses shared quality_helpers to ensure consistency with SessionCoordinator.
+        
+        CRITICAL Rules:
+        - Gets current time from TimeManager (never datetime.now())
+        - Gets trading hours from TimeManager (never hardcoded)
+        - Only counts regular trading hours (not pre/post market)
+        - Caps at market close time (don't count after-hours)
+        
+        Quality = (actual_bars / expected_bars_so_far) * 100
         
         Args:
             symbol: Symbol to calculate quality for
@@ -286,78 +295,93 @@ class DataQualityManager(threading.Thread):
             logger.debug(f"Cannot calculate quality for {symbol} - time not set")
             return
         
-        # Get trading hours from TimeManager
-        with SessionLocal() as db_session:
-            trading_session = self._time_manager.get_trading_session(db_session, current_date)
-        
-        if trading_session is None or trading_session.is_holiday:
-            # Market closed today (holiday)
-            logger.debug(f"Cannot calculate quality for {symbol} - market closed/holiday")
+        # Get CURRENT SESSION bars only (not historical)
+        # Session coordinator clears bars_base at start of each day, so these are today's bars
+        symbol_data = self.session_data.get_symbol_data(symbol)
+        if not symbol_data:
+            logger.warning(f"No symbol data for {symbol}")
             return
         
-        # Get session start time from TradingSession
-        session_start_time = trading_session.get_regular_open_datetime()
-        if session_start_time is None:
-            logger.warning(f"Cannot calculate quality for {symbol} - no session start time")
-            return
+        # Get current session bars based on interval
+        # bars_base contains the base interval (1s, 1m, or 1d)
+        # bars_derived contains all other intervals
         
-        # Get bars for this symbol/interval (zero-copy)
-        bars = list(self.session_data.get_bars(symbol, interval))
-        
-        # Detect gaps using gap detection module
-        gaps = detect_gaps(
-            symbol=symbol,
-            session_start=session_start_time,
-            current_time=current_time,
-            existing_bars=bars
-        )
-        
-        # Calculate expected bars based on interval
-        interval_minutes = self._parse_interval_minutes(interval)
-        elapsed_minutes = int((current_time - session_start_time).total_seconds() / 60)
-        
-        if elapsed_minutes <= 0:
-            quality = 100.0  # Session hasn't started yet
+        if interval == symbol_data.base_interval:
+            # This is the base interval - use bars_base
+            bars = list(symbol_data.bars_base)
         else:
-            # Quality = (actual bars / expected bars) * 100
-            expected_bars = elapsed_minutes // interval_minutes
-            missing_bars = sum(g.bar_count for g in gaps)
-            actual_bars = expected_bars - missing_bars
-            
-            if expected_bars > 0:
-                quality = (actual_bars / expected_bars) * 100.0
-            else:
-                quality = 100.0
+            # This is a derived interval - check bars_derived
+            bars = symbol_data.bars_derived.get(interval, [])
+        
+        actual_bars = len(bars)
+        
+        # Calculate quality using shared helper
+        # This handles: TimeManager queries, early closes, holidays, all intervals
+        with SessionLocal() as db_session:
+            quality = calculate_quality_for_current_session(
+                time_manager=self._time_manager,
+                db_session=db_session,
+                symbol=symbol,
+                interval=interval,
+                current_time=current_time,
+                actual_bars=actual_bars
+            )
+        
+        if quality is None:
+            logger.debug(f"Cannot calculate quality for {symbol} {interval}")
+            return
         
         # Update quality in SessionData
-        self.session_data.set_quality_metric(symbol, interval, quality)
+        self.session_data.set_quality(symbol, interval, quality)
         
-        # Log quality update
+        # Detect gaps for logging (using proper interval parsing)
+        with SessionLocal() as db_session:
+            trading_session = self._time_manager.get_trading_session(db_session, current_date)
+            interval_minutes = parse_interval_to_minutes(interval, trading_session)
+        
+        if interval_minutes is None:
+            logger.warning(f"Cannot parse interval {interval} for gap detection")
+            gaps = []
+        else:
+            # Get trading hours for gap detection
+            with SessionLocal() as db_session:
+                from app.threads.quality.quality_helpers import get_regular_trading_hours
+                hours = get_regular_trading_hours(self._time_manager, db_session, current_date)
+            
+            if hours:
+                session_start_time, session_close_time = hours
+                # Cap at close time for gap detection
+                effective_end = min(current_time, session_close_time)
+                
+                gaps = detect_gaps(
+                    symbol=symbol,
+                    session_start=session_start_time,
+                    current_time=effective_end,
+                    existing_bars=bars,
+                    interval_minutes=interval_minutes
+                )
+            else:
+                gaps = []
+        
+        # Log quality update with detailed info
+        first_bar_time = bars[0].timestamp.strftime('%H:%M') if bars else 'N/A'
+        missing_bars = sum(g.bar_count for g in gaps)
+        
+        # Calculate expected bars for logging
+        if hours:
+            session_start_time, session_close_time = hours
+            effective_end = min(current_time, session_close_time)
+            elapsed_seconds = (effective_end - session_start_time).total_seconds()
+            elapsed_minutes = elapsed_seconds / 60
+            expected_bars = int(elapsed_minutes / interval_minutes) if interval_minutes else 0
+        else:
+            expected_bars = 0
+        
         logger.info(
             f"{symbol} {interval} quality: {quality:.1f}% | "
-            f"bars={len(bars)}, expected={elapsed_minutes // interval_minutes}, "
-            f"gaps={len(gaps)} ({sum(g.bar_count for g in gaps)} missing)"
+            f"actual={actual_bars}, expected={expected_bars}, missing={missing_bars}, "
+            f"first_bar={first_bar_time}, gaps={len(gaps)}"
         )
-    
-    def _parse_interval_minutes(self, interval: str) -> int:
-        """Parse interval string to minutes.
-        
-        Args:
-            interval: Interval string (e.g., "1m", "5m", "1d")
-        
-        Returns:
-            Number of minutes in interval
-        """
-        if interval.endswith("m"):
-            return int(interval[:-1])
-        elif interval.endswith("s"):
-            # 1s = 1/60 minute, but for quality we still count per minute
-            return 1
-        elif interval.endswith("d"):
-            return 390  # 6.5 hour trading day
-        else:
-            logger.warning(f"Unknown interval format: {interval}, assuming 1m")
-            return 1
     
     # =========================================================================
     # Gap Filling (Live Mode Only)
@@ -382,15 +406,26 @@ class DataQualityManager(threading.Thread):
         except ValueError:
             return
         
-        # Get trading session from TimeManager
+        # Get trading hours from TimeManager using shared helper
         with SessionLocal() as db_session:
-            trading_session = self._time_manager.get_trading_session(db_session, current_date)
+            from app.threads.quality.quality_helpers import get_regular_trading_hours
+            hours = get_regular_trading_hours(self._time_manager, db_session, current_date)
         
-        if trading_session is None or trading_session.is_holiday:
+        if hours is None:
             return
         
-        session_start_time = trading_session.get_regular_open_datetime()
-        if session_start_time is None:
+        session_start_time, session_close_time = hours
+        
+        # Cap at close time
+        effective_end = min(current_time, session_close_time)
+        
+        # Parse interval using shared helper
+        with SessionLocal() as db_session:
+            trading_session = self._time_manager.get_trading_session(db_session, current_date)
+            interval_minutes = parse_interval_to_minutes(interval, trading_session)
+        
+        if interval_minutes is None:
+            logger.warning(f"Cannot parse interval {interval} for gap filling")
             return
         
         # Detect gaps
@@ -398,8 +433,9 @@ class DataQualityManager(threading.Thread):
         gaps = detect_gaps(
             symbol=symbol,
             session_start=session_start_time,
-            current_time=current_time,
-            existing_bars=bars
+            current_time=effective_end,
+            existing_bars=bars,
+            interval_minutes=interval_minutes
         )
         
         # Add previously failed gaps for retry
@@ -576,6 +612,9 @@ class DataQualityManager(threading.Thread):
         When 1m bar quality changes, copy to 5m, 15m, 30m, etc.
         Discovers derived intervals from session_data (no explicit config needed).
         
+        ARCHITECTURE: Both session coordinator (historical) and data quality manager (current session)
+        propagate quality from base to derived intervals.
+        
         Args:
             symbol: Symbol with updated quality
             interval: Base interval (e.g., "1m")
@@ -586,32 +625,38 @@ class DataQualityManager(threading.Thread):
         
         # Get quality for base interval
         base_quality = self.session_data.get_quality_metric(symbol, interval)
+        if base_quality is None:
+            return
         
-        # Get symbol data to discover what intervals exist
+        # Get symbol data to discover what derived intervals exist
         symbol_data = self.session_data.get_symbol_data(symbol)
         if not symbol_data:
             return
         
-        # Propagate to all bar intervals that exist (derived intervals)
-        # Skip the base interval itself and only propagate to multi-minute intervals
-        for attr_name in dir(symbol_data):
-            if attr_name.startswith('bars_') and attr_name != f'bars_{interval.replace("m", "m")}':
-                # Extract interval from attribute name (e.g., bars_5m -> 5m)
-                derived_interval = attr_name.replace('bars_', '')
+        # Propagate to all derived intervals in bars_derived dictionary
+        if hasattr(symbol_data, 'bars_derived') and symbol_data.bars_derived:
+            for derived_key, derived_bars in symbol_data.bars_derived.items():
+                # derived_key can be int (5) or string ("5m")
+                if isinstance(derived_key, int):
+                    derived_interval = f"{derived_key}m"
+                else:
+                    derived_interval = derived_key
                 
-                # Only propagate to minute-based intervals (skip 1s, 1d, ticks, quotes)
-                if derived_interval.endswith('m') and derived_interval != interval:
-                    # Copy base quality to derived interval
-                    self.session_data.set_quality_metric(
-                        symbol,
-                        derived_interval,
-                        base_quality
-                    )
-                    
-                    logger.debug(
-                        f"Propagated quality {base_quality:.1f}% from {symbol} {interval} "
-                        f"to {derived_interval}"
-                    )
+                # Skip if no bars or if it's the same as base
+                if not derived_bars or derived_interval == interval:
+                    continue
+                
+                # Copy base quality to derived interval
+                self.session_data.set_quality(
+                    symbol,
+                    derived_interval,
+                    base_quality
+                )
+                
+                logger.debug(
+                    f"Propagated quality {base_quality:.1f}% from {symbol} {interval} "
+                    f"to {derived_interval}"
+                )
     
     # =========================================================================
     # Helpers

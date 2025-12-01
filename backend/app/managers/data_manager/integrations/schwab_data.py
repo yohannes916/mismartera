@@ -28,7 +28,7 @@ async def fetch_1m_bars(
     Note: Schwab uses OAuth 2.0. This requires a valid access token obtained
     through the OAuth authorization flow. Currently this is not fully implemented.
     """
-    if not settings.SCHWAB_APP_KEY or not settings.SCHWAB_APP_SECRET:
+    if not settings.SCHWAB.app_key or not settings.SCHWAB.app_secret:
         raise RuntimeError("Schwab API credentials are missing")
     
     # Get valid OAuth access token
@@ -46,7 +46,7 @@ async def fetch_1m_bars(
         ) from e
 
     # Use Schwab historical data endpoint base URL
-    base_url = settings.SCHWAB_API_BASE_URL.rstrip("/")
+    base_url = settings.SCHWAB.api_base_url.rstrip("/")
 
     # Schwab expects Unix timestamps in SECONDS (not milliseconds!)
     def _to_schwab_ts(dt: datetime) -> int:
@@ -251,7 +251,7 @@ async def fetch_1d_bars(
         ) from e
 
     # Use Schwab historical data endpoint base URL
-    base_url = settings.SCHWAB_API_BASE_URL.rstrip("/")
+    base_url = settings.SCHWAB.api_base_url.rstrip("/")
 
     # Schwab expects Unix timestamps in SECONDS (not milliseconds!)
     def _to_schwab_ts(dt: datetime) -> int:
@@ -468,7 +468,7 @@ async def get_latest_quote(symbol: str) -> Optional[Dict]:
 
     Returns a quote dict with: symbol, bid_price, bid_size, ask_price, ask_size, last_price.
     """
-    if not settings.SCHWAB_APP_KEY or not settings.SCHWAB_APP_SECRET:
+    if not settings.SCHWAB.app_key or not settings.SCHWAB.app_secret:
         raise RuntimeError("Schwab API credentials are missing")
 
     # Get valid OAuth access token
@@ -481,7 +481,7 @@ async def get_latest_quote(symbol: str) -> Optional[Dict]:
             "To authorize Schwab, run 'schwab auth-start'"
         ) from e
 
-    base_url = settings.SCHWAB_API_BASE_URL.rstrip("/")
+    base_url = settings.SCHWAB.api_base_url.rstrip("/")
     url = f"{base_url}/marketdata/v1/quotes"
 
     # Headers for GET request - do NOT include Content-Type for GET requests

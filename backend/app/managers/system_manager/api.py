@@ -13,15 +13,15 @@ Key Responsibilities:
 6. Handle start() and stop() lifecycle
 """
 
-import logging
 from pathlib import Path
 from typing import Optional
 from datetime import date
 
+# Logging
 from app.logger import logger
 
 # Core primitives
-from app.core.session_data import SessionData
+from app.managers.data_manager.session_data import SessionData, get_session_data
 from app.core.enums import SystemState, OperationMode
 
 # Models
@@ -96,6 +96,102 @@ class SystemManager:
         self.timezone: Optional[str] = None  # Derived from exchange+asset
         
         logger.info("SystemManager initialized")
+    
+    # =========================================================================
+    # Session Configuration Properties (Single Source of Truth)
+    # =========================================================================
+    
+    @property
+    def backtest_start_date(self) -> Optional['date']:
+        """Get backtest start date from session config (single source of truth).
+        
+        This is a reference to session_config.backtest_config.start_date.
+        Reading or writing this property reads/writes the session config value.
+        
+        Returns:
+            Start date as date object, or None if not configured
+        """
+        from datetime import datetime
+        
+        if not self._session_config or not self._session_config.backtest_config:
+            return None
+        
+        try:
+            return datetime.strptime(
+                self._session_config.backtest_config.start_date,
+                "%Y-%m-%d"
+            ).date()
+        except (ValueError, AttributeError):
+            return None
+    
+    @backtest_start_date.setter
+    def backtest_start_date(self, value: 'date') -> None:
+        """Set backtest start date in session config.
+        
+        Args:
+            value: Date to set as backtest start
+        """
+        if not self._session_config or not self._session_config.backtest_config:
+            raise RuntimeError("Session config not loaded")
+        
+        self._session_config.backtest_config.start_date = value.strftime("%Y-%m-%d")
+        logger.info(f"Backtest start date set to: {value}")
+    
+    @property
+    def backtest_end_date(self) -> Optional['date']:
+        """Get backtest end date from session config (single source of truth).
+        
+        This is a reference to session_config.backtest_config.end_date.
+        Reading or writing this property reads/writes the session config value.
+        
+        Returns:
+            End date as date object, or None if not configured
+        """
+        from datetime import datetime
+        
+        if not self._session_config or not self._session_config.backtest_config:
+            return None
+        
+        try:
+            return datetime.strptime(
+                self._session_config.backtest_config.end_date,
+                "%Y-%m-%d"
+            ).date()
+        except (ValueError, AttributeError):
+            return None
+    
+    @backtest_end_date.setter
+    def backtest_end_date(self, value: 'date') -> None:
+        """Set backtest end date in session config.
+        
+        Args:
+            value: Date to set as backtest end
+        """
+        if not self._session_config or not self._session_config.backtest_config:
+            raise RuntimeError("Session config not loaded")
+        
+        self._session_config.backtest_config.end_date = value.strftime("%Y-%m-%d")
+        logger.info(f"Backtest end date set to: {value}")
+    
+    @property
+    def session_config(self) -> Optional[SessionConfig]:
+        """Get current session configuration.
+        
+        Returns:
+            SessionConfig instance or None if not loaded
+        """
+        return self._session_config
+    
+    @property
+    def mode(self) -> str:
+        """Get current system mode (live or backtest).
+        
+        Returns:
+            'live' or 'backtest'
+        """
+        if self._session_config:
+            return self._session_config.mode
+        return "backtest"  # Default
     
     # =========================================================================
     # Manager Access (Singleton Pattern)
@@ -272,16 +368,23 @@ class SystemManager:
         
         try:
             # 1. Load configuration
+            logger.info("[SESSION_FLOW] 2.a: SystemManager - Loading configuration")
             logger.info(f"Loading configuration: {config_file}")
             self._session_config = self.load_session_config(config_file)
+            logger.info(f"[SESSION_FLOW] 2.a: Complete - Config loaded: {self._session_config.session_name}")
             
             # 2. Initialize managers
+            logger.info("[SESSION_FLOW] 2.b: SystemManager - Initializing managers")
             logger.info("Initializing managers...")
             time_manager = self.get_time_manager()
+            logger.info("[SESSION_FLOW] 2.b.1: TimeManager created")
             data_manager = self.get_data_manager()
+            logger.info("[SESSION_FLOW] 2.b.2: DataManager created")
+            logger.info("[SESSION_FLOW] 2.b: Complete - Managers initialized")
             
             # 3. Apply backtest configuration (if needed)
             if self._session_config.mode == "backtest" and self._session_config.backtest_config:
+                logger.info("[SESSION_FLOW] 2.c: SystemManager - Applying backtest configuration")
                 logger.info("Applying backtest configuration...")
                 with SessionLocal() as db:
                     # Initialize backtest window
@@ -290,28 +393,61 @@ class SystemManager:
                         f"Backtest window: {time_manager.backtest_start_date} to "
                         f"{time_manager.backtest_end_date}"
                     )
+                    logger.info(
+                        f"[SESSION_FLOW] 2.c: Complete - Backtest window set: "
+                        f"{time_manager.backtest_start_date} to {time_manager.backtest_end_date}"
+                    )
             
-            # 4. Create SessionData (unified store)
-            logger.info("Creating SessionData...")
-            session_data = SessionData()
+            # 4. Create SessionData (unified store) - use singleton
+            logger.info("[SESSION_FLOW] 2.d: SystemManager - Getting SessionData singleton")
+            logger.info("Getting SessionData singleton...")
+            session_data = get_session_data()  # Use singleton
+            logger.info("[SESSION_FLOW] 2.d: Complete - SessionData singleton obtained")
             
             # 5. Create thread pool
+            logger.info("[SESSION_FLOW] 2.e: SystemManager - Creating 4-thread pool")
             logger.info("Creating thread pool...")
             self._create_thread_pool(session_data, time_manager, data_manager)
+            logger.info("[SESSION_FLOW] 2.e: Complete - Thread pool created")
             
             # 6. Wire threads together
+            logger.info("[SESSION_FLOW] 2.f: SystemManager - Wiring threads together")
             logger.info("Wiring thread pool...")
             self._wire_threads()
+            logger.info("[SESSION_FLOW] 2.f: Complete - Threads wired")
             
-            # 7. Start coordinator (orchestrates everything)
-            logger.info("Starting session coordinator...")
+            # 7. Start all threads in correct order
+            logger.info("[SESSION_FLOW] 2.g: SystemManager - Starting thread pool")
+            
+            # Start Data Processor (generates derived bars + indicators)
+            logger.info("Starting DataProcessor thread...")
+            self._data_processor.start()
+            logger.info("[SESSION_FLOW] 2.g.1: DataProcessor thread started")
+            
+            # Start Data Quality Manager (measures quality, fills gaps)
+            logger.info("Starting DataQualityManager thread...")
+            self._quality_manager.start()
+            logger.info("[SESSION_FLOW] 2.g.2: DataQualityManager thread started")
+            
+            # Start Analysis Engine (trading signals)
+            logger.info("Starting AnalysisEngine thread...")
+            self._analysis_engine.start()
+            logger.info("[SESSION_FLOW] 2.g.3: AnalysisEngine thread started")
+            
+            # Start SessionCoordinator last (orchestrates everything)
+            logger.info("Starting SessionCoordinator thread...")
             self._coordinator.start()
+            logger.info("[SESSION_FLOW] 2.g.4: SessionCoordinator thread started")
+            
+            logger.info("[SESSION_FLOW] 2.g: Complete - All threads started")
             
             # 8. Update state
             self._state = SystemState.RUNNING
+            logger.info("[SESSION_FLOW] 2.h: SystemManager - State set to RUNNING")
             
             # 9. Success message
             self._log_startup_success()
+            logger.info("[SESSION_FLOW] 2: Complete - SystemManager.start() finished")
             
             return True
             

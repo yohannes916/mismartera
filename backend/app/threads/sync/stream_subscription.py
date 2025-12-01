@@ -24,10 +24,10 @@ Reference: SESSION_ARCHITECTURE.md - Thread Synchronization
 """
 
 import threading
-import logging
 from typing import Optional
 
-logger = logging.getLogger(__name__)
+# Logging
+from app.logger import logger
 
 
 class StreamSubscription:

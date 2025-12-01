@@ -230,6 +230,103 @@
                 "PYTHONPATH": "${workspaceFolder}/backend"
             },
             "python": "${workspaceFolder}/backend/.venv/bin/python"
+        },
+        {
+            "name": "Tests: All Quality Tests",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "pytest",
+            "args": [
+                "tests/unit/test_quality_helpers.py",
+                "tests/integration/test_quality_calculation_flow.py",
+                "-v",
+                "-s",
+                "--tb=short"
+            ],
+            "cwd": "${workspaceFolder}/backend",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/backend"
+            },
+            "python": "${workspaceFolder}/backend/.venv/bin/python"
+        },
+        {
+            "name": "Tests: Quality Unit Tests",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "pytest",
+            "args": [
+                "tests/unit/test_quality_helpers.py",
+                "-v",
+                "-s",
+                "--tb=short"
+            ],
+            "cwd": "${workspaceFolder}/backend",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/backend"
+            },
+            "python": "${workspaceFolder}/backend/.venv/bin/python"
+        },
+        {
+            "name": "Tests: Quality Integration Tests",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "pytest",
+            "args": [
+                "tests/integration/test_quality_calculation_flow.py",
+                "-v",
+                "-s",
+                "--tb=short"
+            ],
+            "cwd": "${workspaceFolder}/backend",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/backend"
+            },
+            "python": "${workspaceFolder}/backend/.venv/bin/python"
+        },
+        {
+            "name": "Tests: All Backend Tests",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "pytest",
+            "args": [
+                "tests/",
+                "-v",
+                "-s",
+                "--tb=short"
+            ],
+            "cwd": "${workspaceFolder}/backend",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/backend"
+            },
+            "python": "${workspaceFolder}/backend/.venv/bin/python"
+        },
+        {
+            "name": "Tests: All Backend Tests with Coverage",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "pytest",
+            "args": [
+                "tests/",
+                "-v",
+                "--cov=app/threads/quality",
+                "--cov-report=html",
+                "--cov-report=term"
+            ],
+            "cwd": "${workspaceFolder}/backend",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/backend"
+            },
+            "python": "${workspaceFolder}/backend/.venv/bin/python"
         }
     ]
 }

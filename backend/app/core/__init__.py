@@ -22,7 +22,7 @@ from app.core.exceptions import (
     IntegrationError,
     ThreadError
 )
-from app.core.session_data import SessionData
+from app.managers.data_manager.session_data import SessionData, get_session_data
 from app.core.data_structures import Bar, Quote, Tick
 
 __all__ = [

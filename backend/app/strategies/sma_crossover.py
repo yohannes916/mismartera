@@ -9,13 +9,13 @@ Buy Signal: Fast SMA crosses above Slow SMA
 Sell Signal: Fast SMA crosses below Slow SMA
 """
 
-import logging
 from typing import List, Any
 from datetime import datetime
 
-from app.threads.analysis_engine import BaseStrategy, Signal, SignalAction
+# Logging
+from app.logger import logger
 
-logger = logging.getLogger(__name__)
+from app.threads.analysis_engine import BaseStrategy, Signal, SignalAction
 
 
 class SMAcrossoverStrategy(BaseStrategy):

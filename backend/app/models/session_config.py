@@ -17,9 +17,9 @@ from __future__ import annotations
 from typing import List, Optional, Dict, Any, Union
 from dataclasses import dataclass, field
 from datetime import datetime
-import logging
 
-logger = logging.getLogger(__name__)
+# Logging
+from app.logger import logger
 
 
 # =============================================================================

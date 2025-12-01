@@ -1,0 +1,43 @@
+{
+  "session_name": "test_perfect",
+  "description": "Test configuration with perfect data (no gaps)",
+  "data_streams": [
+    {
+      "type": "bars",
+      "symbol": "SYMBOL_X",
+      "interval": "1m"
+    },
+    {
+      "type": "bars",
+      "symbol": "SYMBOL_Z",
+      "interval": "1m"
+    }
+  ],
+  "session_data_config": {
+    "symbols": ["SYMBOL_X", "SYMBOL_Z"],
+    "historical": {
+      "enabled": true,
+      "trailing_days": 5,
+      "intervals": [1],
+      "auto_load": true,
+      "enable_quality": true
+    },
+    "data_upkeep": {
+      "enabled": true,
+      "derived_intervals": [5, 15],
+      "auto_compute_derived": true
+    },
+    "gap_filler": {
+      "enabled": false,
+      "enable_session_quality": true,
+      "max_retries": 3,
+      "retry_interval_seconds": 30
+    }
+  },
+  "backtest_config": {
+    "enabled": true,
+    "start_date": "2025-01-02",
+    "end_date": "2025-01-03",
+    "prefetch_days": 1
+  }
+}

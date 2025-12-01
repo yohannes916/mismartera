@@ -117,15 +117,73 @@ Returns `TradingSession` with:
 
 ### Holiday Management
 
+**CRITICAL**: Holidays are stored at **exchange group level**, not per exchange.
+
+**Why Exchange Groups for Holidays?**
+- NYSE, NASDAQ, AMEX share identical holiday schedules
+- Storing per exchange = unnecessary duplication
+- Single source of truth per market group
+- Matches `MarketHours` architecture
+
+**Database Schema:**
+```sql
+trading_holidays (
+    date,
+    exchange_group,  -- US_EQUITY, LSE, TSE (NOT NYSE, NASDAQ)
+    holiday_name,
+    is_closed,
+    early_close_time
+    UNIQUE(date, exchange_group)
+)
+```
+
+**Auto-Mapping:**
+All holiday APIs automatically map individual exchanges to groups:
+```python
+# User provides NYSE → Auto-maps to US_EQUITY
+time_mgr.is_holiday(db, date, exchange="NYSE")     # → US_EQUITY
+time_mgr.is_holiday(db, date, exchange="NASDAQ")   # → US_EQUITY
+time_mgr.is_holiday(db, date, exchange="US_EQUITY") # → US_EQUITY
+
+# Default uses system configuration
+time_mgr.is_holiday(db, date)  # → system_manager.exchange_group
+```
+
+**API Methods:**
+
 **`is_holiday(session, date, exchange=None) -> Tuple[bool, Optional[str]]`**
 - Returns: `(is_holiday, holiday_name)`
+- Full closures only (early closes return False)
+- Auto-maps exchanges to groups
 
 **`is_early_close(session, date, exchange=None) -> Tuple[bool, Optional[time]]`**
 - Returns: `(is_early_close, close_time)`
+- Auto-maps exchanges to groups
 
-**`import_holidays(session, year, exchange=None) -> int`**
-- Imports holidays from exchange API
+**`get_holidays_in_range(session, start_date, end_date, exchange=None) -> List[Dict]`**
+- Returns all holidays in range
+- Auto-maps exchanges to groups
+
+**`bulk_import_holidays(session, holidays, exchange_group=None) -> int`**
+- Bulk insert holidays for a group
+- Uses system default if not specified
 - Returns: Number imported
+
+**Examples:**
+```python
+with SessionLocal() as db:
+    # Uses system default (US_EQUITY)
+    is_holiday, name = time_mgr.is_holiday(db, date(2025, 7, 4))
+    
+    # Explicit group
+    is_holiday, name = time_mgr.is_holiday(db, date, "US_EQUITY")
+    
+    # Individual exchange (auto-mapped to US_EQUITY)
+    is_holiday, name = time_mgr.is_holiday(db, date, "NYSE")
+    
+    # Different market
+    is_holiday, name = time_mgr.is_holiday(db, date, "LSE")
+```
 
 ### Backtest Operations
 
@@ -255,9 +313,16 @@ time advance         # Advance to next market open
 time reset           # Reset to start of window
 time set 2025-07-02 09:30  # Set to specific time
 
-# Holidays
-time import-holidays 2025
-time import-holidays 2025 --exchange LSE
+# Holidays (Exchange Group Level)
+time holidays                              # List current year (system default)
+time holidays 2025                         # List specific year
+time holidays 2025 --exchange US_EQUITY    # Specific group
+time holidays 2025 --exchange NYSE         # Auto-maps NYSE → US_EQUITY
+
+time holidays import data/holidays/us_equity_2024-2026.json
+time holidays import data/holidays/2025_Holiday_Schedule.csv
+time holidays delete 2025                  # Delete by year (system default)
+time holidays delete 2025 --exchange LSE   # Different group
 
 # Configuration
 time config          # Show current config
@@ -359,6 +424,71 @@ class MockTimeManager:
 
 ---
 
-**Version:** 2.0  
-**Last Updated:** 2025-11-26  
+## Holiday Data Import Workflow
+
+### Initial Setup
+
+**1. Delete Old Data (if reimporting)**
+```bash
+./start_cli.sh
+system@mismartera: time holidays delete 2025
+```
+
+**2. Import Fresh Data**
+```bash
+# From CSV (simpler, year-by-year)
+system@mismartera: time holidays import data/holidays/2025_Holiday_Schedule.csv
+
+# From JSON (multi-year, more structured)
+system@mismartera: time holidays import data/holidays/us_equity/us_equity_2024-2026.json
+```
+
+**3. Verify Import**
+```bash
+system@mismartera: time holidays 2025
+```
+
+Expected output:
+```
+Holidays 2025 (US_EQUITY)
+┌────────────┬───────────┬─────────────────────────────┬────────────────────────┐
+│ Date       │ Day       │ Holiday Name                │ Status                 │
+├────────────┼───────────┼─────────────────────────────┼────────────────────────┤
+│ 2025-07-03 │ Thursday  │ Day before Independence Day │ Early Close (13:00:00) │
+│ 2025-07-04 │ Friday    │ Independence Day            │ Closed                 │
+└────────────┴───────────┴─────────────────────────────┴────────────────────────┘
+```
+
+### Important Notes
+
+**Data Source Files**:
+- CSV files: `data/holidays/YYYY_Holiday_Schedule.csv` (NYSE published)
+- JSON files: `data/holidays/us_equity/us_equity_YYYY-YYYY.json` (consolidated)
+
+**Both formats supported** - choose based on preference:
+- CSV: Official NYSE format, year-by-year
+- JSON: More structured, can span multiple years
+
+**Exchange Group Mapping**:
+The import service automatically:
+1. Reads exchange from file or uses `--exchange` parameter
+2. Maps to exchange group (NYSE → US_EQUITY)
+3. Stores once per group (no duplicates)
+4. Creates unique constraint on (date, exchange_group)
+
+**Upsert Behavior**:
+- If holiday already exists: Updates with new data
+- If holiday doesn't exist: Inserts new record
+- Safe to re-import without deleting first
+
+**System Integration**:
+- TimeManager queries holidays on-demand
+- Display shows correct hours: `(09:30-13:00) ⚡Short Day`
+- Stream coordinator filters bars after early close
+- All components use TimeManager as single source
+
+---
+
+**Version:** 2.1  
+**Last Updated:** 2025-11-30  
 **Status:** Production Ready

@@ -5,13 +5,13 @@
   "mode": "backtest",
   "backtest_config": {
     "start_date": "2025-07-02",
-    "end_date": "2025-07-07",
-    "speed_multiplier": 360.0,
+    "end_date": "2025-07-03",
+    "speed_multiplier": 720.0,
     "prefetch_days": 3
   },
   "session_data_config": {
     "symbols": ["RIVN", "AAPL"],
-    "streams": ["1s", "1m", "5m", "10m", "quotes"],
+    "streams": ["1m", "5m", "10m", "quotes"],
     "historical": {
       "enable_quality": true,
       "data": [
@@ -32,22 +32,6 @@
           "period": "10d",
           "granularity": "daily",
           "field": "volume"
-        },
-        "avg_volume_intraday": {
-          "type": "trailing_average",
-          "period": "10d",
-          "granularity": "minute",
-          "field": "volume"
-        },
-        "high_52w": {
-          "type": "trailing_max",
-          "period": "52w",
-          "field": "high"
-        },
-        "low_52w": {
-          "type": "trailing_min",
-          "period": "52w",
-          "field": "low"
         }
       }
     },

@@ -12,29 +12,38 @@ from zoneinfo import ZoneInfo
 
 class TradingHoliday(Base):
     """
-    Market holidays and early close days with multi-exchange support
+    Market holidays and early close days at exchange group level.
+    
+    Holidays apply to entire exchange groups (US_EQUITY, LSE, etc.), not individual exchanges.
+    This avoids duplication since NYSE and NASDAQ have identical holiday schedules.
+    
+    Examples:
+        US_EQUITY: Applies to NYSE, NASDAQ, AMEX, ARCA
+        LSE: Applies to London Stock Exchange
+        TSE: Applies to Tokyo Stock Exchange
     """
     __tablename__ = "trading_holidays"
     
     id = Column(Integer, primary_key=True, autoincrement=True)
     date = Column(Date, nullable=False, index=True)
-    exchange = Column(String(50), nullable=False, default="NYSE", index=True)
+    exchange_group = Column(String(50), nullable=False, default="US_EQUITY", index=True)
     holiday_name = Column(String(200), nullable=False)
     notes = Column(String(500))
     is_closed = Column(Boolean, default=True)  # True = market closed, False = early close
     early_close_time = Column(Time)  # e.g., 13:00 for 1pm early close
     created_at = Column(Date, server_default=func.current_date())
     
-    # Unique constraint: one holiday per date per exchange
+    # Unique constraint: one holiday per date per exchange group
     __table_args__ = (
+        UniqueConstraint('date', 'exchange_group', name='uix_date_exchange_group'),
         {"sqlite_autoincrement": True},
     )
     
     def __repr__(self):
         if self.is_closed:
-            return f"<TradingHoliday {self.exchange} {self.date}: {self.holiday_name} (CLOSED)>"
+            return f"<TradingHoliday {self.exchange_group} {self.date}: {self.holiday_name} (CLOSED)>"
         else:
-            return f"<TradingHoliday {self.exchange} {self.date}: {self.holiday_name} (Early close: {self.early_close_time})>"
+            return f"<TradingHoliday {self.exchange_group} {self.date}: {self.holiday_name} (Early close: {self.early_close_time})>"
 
 
 class MarketHours(Base):

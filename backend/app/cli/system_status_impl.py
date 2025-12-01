@@ -10,7 +10,7 @@ from typing import Optional
 
 from app.managers.system_manager import get_system_manager, SystemState
 from app.managers.data_manager.session_data import get_session_data
-from app.managers.data_manager.backtest_stream_coordinator import get_coordinator
+# Old backtest_stream_coordinator removed - SessionCoordinator is used now
 from app.models.database import SessionLocal
 from app.config import settings
 from app.logger import logger
@@ -188,10 +188,14 @@ def _show_data_manager_details(data_mgr, system_mgr):
     if system_mgr.mode.value == "backtest":
         dm_table.add_row("", "")  # Spacing
         dm_table.add_row("[bold]Backtest Configuration[/bold]", "")
-        dm_table.add_row("  └─ Days", f"{data_mgr.backtest_days} trading days")
-        dm_table.add_row("  └─ Start Date", data_mgr.backtest_start_date.strftime("%Y-%m-%d"))
-        dm_table.add_row("  └─ End Date", data_mgr.backtest_end_date.strftime("%Y-%m-%d"))
-        dm_table.add_row("  └─ Speed Multiplier", f"{settings.DATA_MANAGER_BACKTEST_SPEED}x")
+        time_mgr = system_mgr.get_time_manager()
+        if time_mgr.backtest_start_date and time_mgr.backtest_end_date:
+            dm_table.add_row("  └─ Start Date", time_mgr.backtest_start_date.strftime("%Y-%m-%d"))
+            dm_table.add_row("  └─ End Date", time_mgr.backtest_end_date.strftime("%Y-%m-%d"))
+        else:
+            dm_table.add_row("  └─ Window", "[dim]Not configured[/dim]")
+        speed = system_mgr.session_config.backtest_config.speed_multiplier if system_mgr.session_config and system_mgr.session_config.backtest_config else 0.0
+        dm_table.add_row("  └─ Speed Multiplier", f"{speed}x")
     
     # Active streams
     dm_table.add_row("", "")  # Spacing
@@ -351,11 +355,6 @@ def _show_session_data(session_data):
             intervals_str = ", ".join([f"{i}m" for i in session_data.historical_bars_intervals])
             session_table.add_row("  └─ Intervals", intervals_str)
         
-        if settings.HISTORICAL_BARS_AUTO_LOAD:
-            session_table.add_row("  └─ Auto-load", "[green]Enabled[/green]")
-        else:
-            session_table.add_row("  └─ Auto-load", "[yellow]Disabled[/yellow]")
-        
         # Count total historical bars across all symbols
         total_bars = 0
         total_days = set()
@@ -430,38 +429,11 @@ def _show_configuration_flags():
     
     # System
     config_table.add_row("[bold]System[/bold]", "")
-    config_table.add_row("  └─ Operating Mode", settings.SYSTEM_OPERATING_MODE)
+    config_table.add_row("  └─ Operating Mode", settings.SYSTEM.operating_mode)
     config_table.add_row("  └─ Debug Mode", "True" if settings.DEBUG else "False")
-    config_table.add_row("  └─ Paper Trading", "True" if settings.PAPER_TRADING else "False")
+    config_table.add_row("  └─ Alpaca Paper Trading", "True" if settings.ALPACA.paper_trading else "False")
     
-    # Session Boundaries
-    config_table.add_row("", "")
-    config_table.add_row("[bold]Session Boundaries[/bold]", "")
-    config_table.add_row("  └─ Auto-roll", "Enabled" if settings.SESSION_AUTO_ROLL else "Disabled")
-    config_table.add_row("  └─ Timeout", f"{settings.SESSION_TIMEOUT_SECONDS} seconds")
-    config_table.add_row("  └─ Check Interval", f"{settings.SESSION_BOUNDARY_CHECK_INTERVAL} seconds")
-    config_table.add_row("  └─ Post-market Delay", f"{settings.SESSION_POST_MARKET_ROLL_DELAY} minutes")
-    
-    # Data Quality
-    config_table.add_row("", "")
-    config_table.add_row("[bold]Data Quality[/bold]", "")
-    config_table.add_row("  └─ Upkeep Enabled", "Yes" if settings.DATA_UPKEEP_ENABLED else "No")
-    config_table.add_row("  └─ Gap Filling", "Automatic" if settings.DATA_UPKEEP_RETRY_MISSING_BARS else "Manual")
-    config_table.add_row("  └─ Derived Bars", "Auto-compute" if settings.DATA_UPKEEP_AUTO_COMPUTE_DERIVED else "Manual")
-    
-    # Historical Data
-    config_table.add_row("", "")
-    config_table.add_row("[bold]Historical Data[/bold]", "")
-    config_table.add_row("  └─ Enabled", "Yes" if settings.HISTORICAL_BARS_ENABLED else "No")
-    config_table.add_row("  └─ Trailing Days", f"{settings.HISTORICAL_BARS_TRAILING_DAYS}")
-    config_table.add_row("  └─ Auto-load", "Yes" if settings.HISTORICAL_BARS_AUTO_LOAD else "No")
-    
-    # Prefetch
-    config_table.add_row("", "")
-    config_table.add_row("[bold]Prefetch[/bold]", "")
-    config_table.add_row("  └─ Enabled", "Yes" if settings.PREFETCH_ENABLED else "No")
-    config_table.add_row("  └─ Window", f"{settings.PREFETCH_WINDOW_MINUTES} minutes before session")
-    config_table.add_row("  └─ Auto-activate", "Yes" if settings.PREFETCH_AUTO_ACTIVATE else "No")
+    # Note: Session configuration now comes from session JSON files, not environment variables
     
     console.print(config_table)
     console.print()

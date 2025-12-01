@@ -30,48 +30,9 @@ class AccountInfo(Base):
     user = relationship("User", back_populates="account_info")
 
 
-class MarketData(Base):
-    """OHLCV market data for backtesting and analysis"""
-    __tablename__ = "market_data"
-    
-    id = Column(Integer, primary_key=True, index=True)
-    symbol = Column(String(10), index=True, nullable=False)
-    timestamp = Column(DateTime(timezone=True), index=True, nullable=False)
-    interval = Column(String(10), default='1m', nullable=False)  # 1m, 5m, 15m, 1h, 1d
-    open = Column(Float, nullable=False)
-    high = Column(Float, nullable=False)
-    low = Column(Float, nullable=False)
-    close = Column(Float, nullable=False)
-    volume = Column(Float, nullable=False)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    
-    __table_args__ = (
-        # Composite unique constraint for symbol + timestamp + interval
-        # Prevents duplicate bars
-        Index('ix_market_data_symbol_timestamp_interval', 'symbol', 'timestamp', 'interval', unique=True),
-        {"sqlite_autoincrement": True},
-    )
-
-
-class QuoteData(Base):
-    """Bid/ask quote ticks for backtesting and analysis."""
-
-    __tablename__ = "quotes"
-
-    id = Column(Integer, primary_key=True, index=True)
-    symbol = Column(String(10), index=True, nullable=False)
-    timestamp = Column(DateTime(timezone=True), index=True, nullable=False)
-    bid_price = Column(Float, nullable=True)
-    bid_size = Column(Float, nullable=True)
-    ask_price = Column(Float, nullable=True)
-    ask_size = Column(Float, nullable=True)
-    exchange = Column(String(10), nullable=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-
-    __table_args__ = (
-        Index("ix_quotes_symbol_timestamp", "symbol", "timestamp", unique=True),
-        {"sqlite_autoincrement": True},
-    )
+# REMOVED: MarketData and QuoteData tables
+# Market data is stored exclusively in Parquet files, not in SQL database
+# See: app/managers/data_manager/parquet_storage.py
 
 
 class Analysis(Base):

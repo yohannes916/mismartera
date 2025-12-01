@@ -18,7 +18,7 @@ async def lifespan(app: FastAPI):
     # Startup
     logger.info(f"Starting {settings.APP_NAME} v{settings.APP_VERSION}")
     logger.info(f"Debug mode: {settings.DEBUG}")
-    logger.info(f"Paper trading: {settings.PAPER_TRADING}")
+    logger.info(f"Alpaca paper trading: {settings.ALPACA.paper_trading}")
     
     # Initialize database (now sync, run in thread pool)
     import asyncio
@@ -89,12 +89,12 @@ async def health_check():
 if __name__ == "__main__":
     import uvicorn
     
-    logger.info(f"Starting server at {settings.API_HOST}:{settings.API_PORT}")
+    logger.info(f"Starting server at {settings.API.host}:{settings.API.port}")
     
     uvicorn.run(
         "app.main:app",
-        host=settings.API_HOST,
-        port=settings.API_PORT,
+        host=settings.API.host,
+        port=settings.API.port,
         reload=settings.DEBUG,
-        log_level=settings.LOG_LEVEL.lower()
+        log_level=settings.LOGGER.default_level.lower()
     )

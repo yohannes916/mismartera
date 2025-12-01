@@ -33,15 +33,17 @@ Key Design:
 - NO historical indicators (Phase 3: Session Coordinator)
 """
 
-import logging
 import threading
 import queue
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List, Any, Tuple
 from collections import defaultdict
 
+# Logging
+from app.logger import logger
+
 # Phase 1, 2, 3 components
-from app.core.session_data import SessionData
+from app.managers.data_manager.session_data import SessionData, get_session_data
 from app.threads.sync.stream_subscription import StreamSubscription
 from app.monitoring.performance_metrics import PerformanceMetrics
 from app.models.session_config import SessionConfig
@@ -51,8 +53,6 @@ from app.managers.data_manager.derived_bars import (
     compute_derived_bars,
     compute_all_derived_intervals
 )
-
-logger = logging.getLogger(__name__)
 
 
 class OverrunError(Exception):
@@ -129,6 +129,9 @@ class DataProcessor(threading.Thread):
         # Maps symbol -> list of intervals to generate (e.g., {'AAPL': ['5m', '15m']})
         self._derived_intervals: Dict[str, List[str]] = {}
         self._realtime_indicators = []  # TODO: From config when indicator config added
+        
+        # Auto-computation flag (always enabled for now)
+        self._auto_compute_derived = True
         
         # Mode detection
         self.mode = "backtest" if session_config.backtest_config else "live"
@@ -319,19 +322,31 @@ class DataProcessor(threading.Thread):
             return
         
         try:
-            # 1. Read 1m bars from session_data (zero-copy)
-            bars_1m_deque = self.session_data.get_bars(symbol, "1m")
+            # Get intervals for this symbol
+            symbol_intervals = self._derived_intervals.get(symbol, [])
+            if not symbol_intervals:
+                return
             
-            if not bars_1m_deque:
+            # 1. Read 1m bars from session_data (ZERO-COPY: direct reference)
+            bars_1m_ref = self.session_data.get_bars_ref(symbol, 1)
+            
+            if not bars_1m_ref:
                 logger.debug(f"No 1m bars available for {symbol}")
                 return
             
-            # Convert deque to list for processing
-            bars_1m = list(bars_1m_deque)
+            # Convert to list only for processing (small overhead, required for compute_derived_bars)
+            bars_1m = list(bars_1m_ref)
             
             # 2. Progressive computation: Process intervals in ascending order
             # This ensures we compute 5m as soon as 5 bars exist, 15m when 15 exist, etc.
-            sorted_intervals = sorted(self._derived_intervals)
+            # Parse intervals to int for sorting and comparison
+            intervals_parsed = []
+            for interval_str in symbol_intervals:
+                if interval_str.endswith('m'):
+                    interval_int = int(interval_str[:-1])
+                    intervals_parsed.append(interval_int)
+            
+            sorted_intervals = sorted(intervals_parsed)
             
             for interval in sorted_intervals:
                 # Check if we have enough bars for this interval
@@ -348,21 +363,26 @@ class DataProcessor(threading.Thread):
                 if not derived_bars:
                     continue
                 
-                # 4. Get existing derived bars (to avoid duplicates)
-                existing_derived = list(self.session_data.get_bars(symbol, f"{interval}m"))
+                # 4. Get existing derived bars (ZERO-COPY: direct reference)
+                existing_derived_ref = self.session_data.get_bars_ref(symbol, interval)
                 
                 # 5. Add only new bars (skip duplicates)
                 new_bar_count = 0
                 for derived_bar in derived_bars:
-                    # Check if bar already exists
+                    # Check if bar already exists (iterate over reference, no copy)
                     exists = any(
                         bar.timestamp == derived_bar.timestamp
-                        for bar in existing_derived
+                        for bar in existing_derived_ref
                     )
                     
                     if not exists:
-                        self.session_data.add_bar(symbol, f"{interval}m", derived_bar)
-                        new_bar_count += 1
+                        # Add to derived bars container (not bars_base)
+                        symbol_data = self.session_data.get_symbol_data(symbol)
+                        if symbol_data:
+                            if interval not in symbol_data.bars_derived:
+                                symbol_data.bars_derived[interval] = []
+                            symbol_data.bars_derived[interval].append(derived_bar)
+                            new_bar_count += 1
                 
                 if new_bar_count > 0:
                     logger.debug(

@@ -18,10 +18,10 @@ class AlpacaClient:
     """
 
     def __init__(self) -> None:
-        self.base_url = settings.ALPACA_API_BASE_URL.rstrip("/")
-        self.api_key = settings.ALPACA_API_KEY_ID
-        self.api_secret = settings.ALPACA_API_SECRET_KEY
-        self.paper_trading = settings.ALPACA_PAPER_TRADING
+        self.base_url = settings.ALPACA.api_base_url.rstrip("/")
+        self.api_key = settings.ALPACA.api_key_id
+        self.api_secret = settings.ALPACA.api_secret_key
+        self.paper_trading = settings.ALPACA.paper_trading
 
         if not self.api_key or not self.api_secret:
             logger.warning("Alpaca API credentials not configured")

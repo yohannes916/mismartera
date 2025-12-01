@@ -76,7 +76,7 @@ class TimeManager:
     
     @property
     def backtest_start_date(self) -> Optional[date]:
-        """Get backtest start date from SessionConfig (single source of truth).
+        """Get backtest start date from SystemManager (single source of truth).
         
         Returns:
             Start date as date object, or None if not configured
@@ -84,20 +84,11 @@ class TimeManager:
         if not self._system_manager:
             return None
         
-        session_config = self._system_manager.session_config
-        if not session_config or not session_config.backtest_config:
-            return None
-        
-        try:
-            return datetime.strptime(
-                session_config.backtest_config.start_date, "%Y-%m-%d"
-            ).date()
-        except (ValueError, AttributeError):
-            return None
+        return self._system_manager.backtest_start_date
     
     @property
     def backtest_end_date(self) -> Optional[date]:
-        """Get backtest end date from SessionConfig (single source of truth).
+        """Get backtest end date from SystemManager (single source of truth).
         
         Returns:
             End date as date object, or None if not configured
@@ -105,16 +96,7 @@ class TimeManager:
         if not self._system_manager:
             return None
         
-        session_config = self._system_manager.session_config
-        if not session_config or not session_config.backtest_config:
-            return None
-        
-        try:
-            return datetime.strptime(
-                session_config.backtest_config.end_date, "%Y-%m-%d"
-            ).date()
-        except (ValueError, AttributeError):
-            return None
+        return self._system_manager.backtest_end_date
     
     @property
     def default_timezone(self) -> str:
@@ -680,21 +662,24 @@ class TimeManager:
         Returns True ONLY for full market closures (is_closed=True).
         Early close days (is_closed=False) are NOT considered holidays.
         
-        Uses system default if not specified.
+        Accepts either exchange groups (US_EQUITY) or individual exchanges (NYSE).
+        Individual exchanges are auto-mapped to their groups.
         
         Args:
             session: Database session
             date: Date to check
-            exchange: Exchange group identifier (uses system default if None)
+            exchange: Exchange or exchange group (uses system default if None)
             
         Returns:
             (is_holiday, holiday_name) - True only for full closures
         """
-        # Use system default
+        # Default to system exchange group or auto-map
         if exchange is None:
-            exchange = self.default_exchange_group
+            exchange_group = self.default_exchange_group
+        else:
+            exchange_group = self.get_exchange_group(exchange)
         
-        holiday = TradingCalendarRepository.get_holiday(session, date, exchange)
+        holiday = TradingCalendarRepository.get_holiday(session, date, exchange_group)
         if not holiday:
             return False, None
         # Only return True for full market closures
@@ -711,21 +696,24 @@ class TimeManager:
     ) -> Tuple[bool, Optional[time]]:
         """Check if date has early close
         
-        Uses system default if not specified.
+        Accepts either exchange groups (US_EQUITY) or individual exchanges (NYSE).
+        Individual exchanges are auto-mapped to their groups.
         
         Args:
             session: Database session
             date: Date to check
-            exchange: Exchange group identifier (uses system default if None)
+            exchange: Exchange or exchange group (uses system default if None)
             
         Returns:
             (is_early_close, early_close_time)
         """
-        # Use system default
+        # Default to system exchange group or auto-map
         if exchange is None:
-            exchange = self.default_exchange_group
+            exchange_group = self.default_exchange_group
+        else:
+            exchange_group = self.get_exchange_group(exchange)
         
-        holiday = TradingCalendarRepository.get_holiday(session, date, exchange)
+        holiday = TradingCalendarRepository.get_holiday(session, date, exchange_group)
         if not holiday or holiday.is_closed or not holiday.early_close_time:
             return False, None
         return True, holiday.early_close_time
@@ -1066,7 +1054,7 @@ class TimeManager:
         session: Session,
         date: date,
         holiday_name: str,
-        exchange: str = "NYSE",
+        exchange_group: Optional[str] = None,
         country: Optional[str] = None,
         notes: Optional[str] = None,
         early_close_time: Optional[time] = None
@@ -1077,33 +1065,39 @@ class TimeManager:
             session: Database session
             date: Holiday date
             holiday_name: Name of holiday
-            exchange: Exchange identifier
+            exchange_group: Exchange group (uses system default if None)
             country: Country code
             notes: Optional notes
             early_close_time: If set, market closes early (not full closure)
         """
+        if exchange_group is None:
+            exchange_group = self.default_exchange_group
+        
         TradingCalendarRepository.create_holiday(
-            session, date, holiday_name, exchange, country, notes, early_close_time
+            session, date, holiday_name, exchange_group, country, notes, early_close_time
         )
     
     def bulk_import_holidays(
         self,
         session: Session,
         holidays: List[Dict],
-        exchange: str = "NYSE"
+        exchange_group: Optional[str] = None
     ) -> int:
-        """Bulk import holidays for a market
+        """Bulk import holidays for an exchange group
         
         Args:
             session: Database session
             holidays: List of holiday dicts
-            exchange: Exchange identifier
+            exchange_group: Exchange group (uses system default if None)
             
         Returns:
             Number of holidays imported
         """
+        if exchange_group is None:
+            exchange_group = self.default_exchange_group
+        
         return TradingCalendarRepository.bulk_create_holidays(
-            session, holidays, exchange
+            session, holidays, exchange_group
         )
     
     def get_holidays_in_range(
@@ -1111,21 +1105,31 @@ class TimeManager:
         session: Session,
         start_date: date,
         end_date: date,
-        exchange: str = "NYSE"
+        exchange: Optional[str] = None
     ) -> List[Dict]:
-        """Get all holidays in date range
+        """Get all holidays in date range for an exchange group
+        
+        Accepts either exchange groups (US_EQUITY) or individual exchanges (NYSE).
+        Individual exchanges are auto-mapped to their groups.
         
         Args:
             session: Database session
             start_date: Start date
             end_date: End date
-            exchange: Exchange identifier
+            exchange: Exchange or exchange group (uses system default if None)
             
         Returns:
             List of holiday information
         """
+        # Default to system exchange group or auto-map
+        if exchange is None:
+            exchange_group = self.default_exchange_group
+        else:
+            # Auto-map exchange → group (NYSE → US_EQUITY)
+            exchange_group = self.get_exchange_group(exchange)
+        
         holidays = TradingCalendarRepository.get_holidays_in_range(
-            session, start_date, end_date, exchange
+            session, start_date, end_date, exchange_group
         )
         return [
             {

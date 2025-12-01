@@ -46,8 +46,8 @@ def main(
 
 @app.command()
 def server(
-    host: str = typer.Option(settings.API_HOST, "--host", "-h", help="Server host"),
-    port: int = typer.Option(settings.API_PORT, "--port", "-p", help="Server port"),
+    host: str = typer.Option(settings.API.host, "--host", "-h", help="Server host"),
+    port: int = typer.Option(settings.API.port, "--port", "-p", help="Server port"),
     reload: bool = typer.Option(settings.DEBUG, "--reload", "-r", help="Enable auto-reload")
 ):
     """
@@ -66,7 +66,7 @@ def server(
         host=host,
         port=port,
         reload=reload,
-        log_level=settings.LOG_LEVEL.lower()
+        log_level=settings.LOGGER.default_level.lower()
     )
 
 
@@ -105,10 +105,10 @@ def status():
     table.add_row("Application", settings.APP_NAME)
     table.add_row("Version", settings.APP_VERSION)
     table.add_row("Debug Mode", str(settings.DEBUG))
-    table.add_row("Paper Trading", str(settings.PAPER_TRADING))
-    table.add_row("Log Level", settings.LOG_LEVEL)
-    table.add_row("Database", settings.DATABASE_URL.split("///")[-1] if ":///" in settings.DATABASE_URL else settings.DATABASE_URL)
-    table.add_row("API Host", f"{settings.API_HOST}:{settings.API_PORT}")
+    table.add_row("Alpaca Paper Trading", str(settings.ALPACA.paper_trading))
+    table.add_row("Log Level", settings.LOGGER.default_level)
+    table.add_row("Database", settings.DATABASE.url.split("///")[-1] if "///" in settings.DATABASE.url else settings.DATABASE.url)
+    table.add_row("API Host", f"{settings.API.host}:{settings.API.port}")
     
     console.print(table)
     logger.debug("Status command executed")

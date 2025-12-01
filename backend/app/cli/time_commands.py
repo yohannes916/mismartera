@@ -297,13 +297,17 @@ def trading_days_command(start_str: str, end_str: str, exchange: str = "NYSE"):
         logger.error(f"Error in trading_days_command: {e}", exc_info=True)
 
 
-def holidays_command(year: int = None, exchange: str = "NYSE"):
-    """List holidays for a year
+def holidays_command(year: int = None, exchange: str = None):
+    """List holidays for a year and exchange group
+    
+    Accepts either exchange groups (US_EQUITY) or individual exchanges (NYSE).
+    Individual exchanges are auto-mapped to their groups.
     
     Usage:
         time holidays
-        time holidays --year 2024
-        time holidays --year 2025 --exchange NASDAQ
+        time holidays 2025
+        time holidays 2024 --exchange US_EQUITY
+        time holidays 2024 --exchange NYSE  (auto-maps to US_EQUITY)
     """
     system_mgr = get_system_manager()
     time_mgr = system_mgr.get_time_manager()
@@ -313,20 +317,27 @@ def holidays_command(year: int = None, exchange: str = "NYSE"):
         if year is None:
             year = datetime.now().year
         
+        # Default to configured exchange group or auto-map
+        if exchange is None:
+            exchange_group = time_mgr.default_exchange_group
+        else:
+            # Auto-map exchange → group (NYSE → US_EQUITY)
+            exchange_group = time_mgr.get_exchange_group(exchange)
+        
         start_date = date(year, 1, 1)
         end_date = date(year, 12, 31)
         
         with SessionLocal() as session:
             holidays = time_mgr.get_holidays_in_range(
-                session, start_date, end_date, exchange=exchange
+                session, start_date, end_date, exchange=exchange_group
             )
             
             if not holidays:
-                console.print(f"[yellow]No holidays found for {year} ({exchange})[/yellow]")
+                console.print(f"[yellow]No holidays found for {year} ({exchange_group})[/yellow]")
                 return
             
             # Display holidays table
-            table = Table(title=f"Holidays {year} ({exchange})", show_header=True)
+            table = Table(title=f"Holidays {year} ({exchange_group})", show_header=True)
             table.add_column("Date", style="cyan")
             table.add_column("Day", style="yellow")
             table.add_column("Holiday Name", style="green")
@@ -408,10 +419,10 @@ def import_holidays_command(
     try:
         from app.managers.time_manager.holiday_import_service import HolidayImportService
         
-        # Auto-detect exchange group from configured primary exchange
+        # Auto-detect exchange group from configured exchange
         if exchange is None:
             exchange = time_mgr.get_exchange_group()
-            console.print(f"[dim]Using exchange group from configured primary exchange: {time_mgr.primary_exchange} → {exchange}[/dim]\n")
+            console.print(f"[dim]Using exchange group from configuration: {exchange}[/dim]\n")
         
         if dry_run:
             console.print("[yellow]DRY RUN - No changes will be made[/yellow]\n")
@@ -628,14 +639,12 @@ def show_backtest_config_command():
         table.add_column("Value", style="green")
         
         # Exchange configuration
-        table.add_row("Primary Exchange", time_mgr.primary_exchange)
-        table.add_row("Primary Asset Class", time_mgr.primary_asset_class)
-        table.add_row("All Exchanges", ", ".join(sorted(time_mgr.exchanges)))
+        table.add_row("Exchange Group", time_mgr.default_exchange_group)
+        table.add_row("Asset Class", time_mgr.default_asset_class)
         
         table.add_section()
         
         # Window configuration
-        table.add_row("Backtest Days", str(time_mgr.backtest_days))
         table.add_row("Start Date", str(time_mgr.backtest_start_date or "Not set"))
         table.add_row("End Date", str(time_mgr.backtest_end_date or "Not set"))
         
@@ -680,9 +689,8 @@ def set_backtest_exchange_command(
         time_mgr.set_exchange(exchange, asset_class)
         
         console.print(f"[green]✓ Exchange configured[/green]")
-        console.print(f"  Primary Exchange: {time_mgr.primary_exchange}")
-        console.print(f"  Asset Class: {time_mgr.primary_asset_class}")
-        console.print(f"  All Exchanges: {', '.join(sorted(time_mgr.exchanges))}")
+        console.print(f"  Exchange Group: {time_mgr.default_exchange_group}")
+        console.print(f"  Asset Class: {time_mgr.default_asset_class}")
         console.print(f"\n[dim]This configuration applies to all time/calendar operations (live and backtest)[/dim]")
         
     except Exception as e:
@@ -694,13 +702,12 @@ def delete_holidays_command(
     year: int,
     exchange: str = None
 ):
-    """Delete holidays for a specific year and exchange
-    
-    Uses configured primary exchange if not specified.
+    """Delete holidays for a specific year and exchange group
     
     Usage:
         time holidays delete 2024
-        time holidays delete 2025 --exchange NASDAQ
+        time holidays delete 2025 --exchange US_EQUITY
+        time holidays delete 2025 --exchange NYSE  (auto-maps to US_EQUITY)
     """
     from rich.prompt import Confirm
     
@@ -708,13 +715,20 @@ def delete_holidays_command(
     time_mgr = system_mgr.get_time_manager()
     
     try:
-        # Use configured default exchange if not provided
+        # Default to configured exchange group
         if exchange is None:
-            exchange = time_mgr.primary_exchange
-            console.print(f"[dim]Using configured primary exchange: {exchange}[/dim]\n")
+            exchange_group = time_mgr.default_exchange_group
+            console.print(f"[dim]Using configured exchange group: {exchange_group}[/dim]\n")
+        else:
+            # Auto-map exchange → group (NYSE → US_EQUITY)
+            exchange_group = time_mgr.get_exchange_group(exchange)
+            if exchange_group != exchange:
+                console.print(f"[dim]Mapped {exchange} → {exchange_group}[/dim]\n")
+            else:
+                console.print(f"[dim]Using exchange group: {exchange_group}[/dim]\n")
         
         # Confirm deletion
-        if not Confirm.ask(f"[yellow]Delete all holidays for {exchange} year {year}?[/yellow]"):
+        if not Confirm.ask(f"[yellow]Delete all holidays for {exchange_group} year {year}?[/yellow]"):
             console.print("[dim]Cancelled[/dim]")
             return
         
@@ -722,13 +736,13 @@ def delete_holidays_command(
             from app.managers.time_manager.repositories import TradingCalendarRepository
             
             deleted = TradingCalendarRepository.delete_holidays_for_year(
-                session, year, exchange
+                session, year, exchange_group
             )
         
         if deleted > 0:
-            console.print(f"[green]✓ Deleted {deleted} holidays for {exchange} year {year}[/green]")
+            console.print(f"[green]✓ Deleted {deleted} holidays for {exchange_group} year {year}[/green]")
         else:
-            console.print(f"[yellow]No holidays found for {exchange} year {year}[/yellow]")
+            console.print(f"[yellow]No holidays found for {exchange_group} year {year}[/yellow]")
             
     except Exception as e:
         console.print(f"[red]✗ Error deleting holidays: {e}[/red]")

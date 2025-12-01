@@ -32,7 +32,7 @@ class SystemStatusResponse(BaseModel):
     status: str
     uptime_seconds: float
     log_level: str
-    paper_trading: bool
+    alpaca_paper_trading: bool
     database_url: str
     timestamp: datetime
 
@@ -115,8 +115,8 @@ async def get_system_status(admin_user: Dict[str, Any] = Depends(get_admin_user)
         status="running",
         uptime_seconds=uptime,
         log_level=logger_manager.get_level(),
-        paper_trading=settings.PAPER_TRADING,
-        database_url=settings.DATABASE_URL.split("///")[-1] if ":///" in settings.DATABASE_URL else settings.DATABASE_URL,
+        alpaca_paper_trading=settings.ALPACA.paper_trading,
+        database_url=settings.DATABASE.url.split("///")[-1] if "///" in settings.DATABASE.url else settings.DATABASE.url,
         timestamp=datetime.now()
     )
 

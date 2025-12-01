@@ -1,18 +1,101 @@
 """
-Loguru logger configuration with runtime level control
+Loguru logger configuration with runtime level control and deduplication
 """
 from loguru import logger
 import sys
+import time
+import threading
 from pathlib import Path
+from collections import deque
+from typing import Dict, Any
 from app.config import settings
+
+
+class LogDeduplicationFilter:
+    """Filter to suppress duplicate log messages from the same location.
+    
+    Tracks recent logs and suppresses duplicates based on:
+    1. Same file path
+    2. Same line number
+    3. Within time threshold (default 1 second)
+    
+    This prevents log spam from loops or frequently-called functions.
+    
+    Example:
+        2025-11-29 20:39:58.268 | DEBUG | app.foo:bar:24 - Registered AAPL
+        2025-11-29 20:39:58.268 | DEBUG | app.foo:bar:24 - Registered MSFT  <- Suppressed
+        2025-11-29 20:39:58.268 | DEBUG | app.foo:bar:24 - Registered TSLA  <- Suppressed
+        ... (1.5 seconds later)
+        2025-11-29 20:40:00.000 | DEBUG | app.foo:bar:24 - Registered NVDA  <- Allowed
+    """
+    
+    def __init__(self, max_history: int = 5, time_threshold_seconds: float = 1.0):
+        """Initialize deduplication filter.
+        
+        Args:
+            max_history: Number of recent logs to track (default 5)
+            time_threshold_seconds: Suppress duplicates within this time window (default 1.0s)
+        """
+        self.max_history = max_history
+        self.time_threshold = time_threshold_seconds
+        # Use deque for efficient O(1) append/pop operations
+        # Each entry: {"file": str, "line": int, "timestamp": float}
+        self.recent_logs = deque(maxlen=max_history)
+        # Thread safety lock for accessing recent_logs
+        self._lock = threading.Lock()
+    
+    def __call__(self, record: Dict[str, Any]) -> bool:
+        """Filter function called for each log record.
+        
+        Args:
+            record: Loguru log record dict with 'file', 'line', 'time' keys
+            
+        Returns:
+            True to allow log, False to suppress
+        """
+        current_file = record["file"].path
+        current_line = record["line"]
+        current_time = time.time()
+        
+        # Thread-safe access to recent_logs
+        with self._lock:
+            # Check if this log matches any recent log
+            for recent in self.recent_logs:
+                # Match criteria: same file AND same line
+                if recent["line"] == current_line and recent["file"] == current_file:
+                    # Check time threshold
+                    time_diff = current_time - recent["timestamp"]
+                    if time_diff < self.time_threshold:
+                        # Duplicate detected - suppress this log
+                        return False
+            
+            # Not a duplicate - allow this log and track it
+            self.recent_logs.append({
+                "file": current_file,
+                "line": current_line,
+                "timestamp": current_time
+            })
+            return True
 
 
 class LoggerManager:
     """Manages application logging with runtime level control"""
     
     def __init__(self):
-        self.current_level = settings.LOG_LEVEL
-        self.log_file_path = Path(settings.LOG_FILE_PATH)
+        # Use nested LOGGER config
+        self.current_level = settings.LOGGER.default_level
+        self.log_file_path = Path(settings.LOGGER.file_path)
+        self.log_rotation = settings.LOGGER.rotation
+        self.log_retention = settings.LOGGER.retention
+        
+        # Initialize deduplication filter if enabled
+        self.dedup_filter = None
+        if settings.LOGGER.filter_enabled:
+            self.dedup_filter = LogDeduplicationFilter(
+                max_history=settings.LOGGER.filter_max_history,
+                time_threshold_seconds=settings.LOGGER.filter_time_threshold_seconds
+            )
+        
         self.setup_logger()
     
     def setup_logger(self):
@@ -36,7 +119,8 @@ class LoggerManager:
             ),
             colorize=True,
             backtrace=True,
-            diagnose=True
+            diagnose=True,
+            filter=self.dedup_filter  # Apply deduplication filter
         )
         
         # File handler with rotation and retention
@@ -49,15 +133,21 @@ class LoggerManager:
                 "{name}:{function}:{line} - "
                 "{message}"
             ),
-            rotation=settings.LOG_ROTATION,
-            retention=settings.LOG_RETENTION,
+            rotation=self.log_rotation,
+            retention=self.log_retention,
             compression="zip",
             backtrace=True,
             diagnose=True,
-            enqueue=True  # Thread-safe logging
+            enqueue=True,  # Thread-safe logging
+            filter=self.dedup_filter  # Apply deduplication filter
         )
         
         logger.info(f"Logger initialized with level: {self.current_level}")
+        if self.dedup_filter:
+            logger.info(
+                f"Log deduplication enabled: tracking last {self.dedup_filter.max_history} logs, "
+                f"threshold {self.dedup_filter.time_threshold}s"
+            )
     
     def set_level(self, level: str) -> str:
         """

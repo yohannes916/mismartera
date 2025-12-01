@@ -53,7 +53,7 @@ def api_status():
     """
     Check if API server is running
     """
-    url = f"http://{settings.API_HOST}:{settings.API_PORT}/health"
+    url = f"http://{settings.API.host}:{settings.API.port}/health"
     
     try:
         with console.status("[yellow]Checking API server...[/yellow]"):

@@ -3,8 +3,10 @@ Database models and schemas
 """
 from app.models.database import Base, engine, SessionLocal, get_db, init_db, close_db
 from app.models.user import User
-from app.models.schemas import AccountInfo, MarketData, Analysis
+from app.models.schemas import AccountInfo, Analysis
 from app.models.trading_calendar import TradingHoliday
+
+# NOTE: MarketData removed - market data stored exclusively in Parquet files
 
 # New models for architecture refactor
 from app.models.orders import Order as OrderModel, OrderExecution
@@ -21,7 +23,7 @@ __all__ = [
     "close_db",
     "User",
     "AccountInfo",
-    "MarketData",
+    # "MarketData",  # REMOVED - market data in Parquet files only
     "Analysis",
     "TradingHoliday",
     # New models

@@ -11,7 +11,7 @@ PERFORMANCE OPTIMIZATIONS:
 - Designed for high-frequency reads by AnalysisEngine and other modules
 """
 from datetime import datetime, date, time, timedelta
-from typing import Dict, List, Optional, Set, Deque
+from typing import Dict, List, Optional, Set, Deque, Union
 from dataclasses import dataclass, field
 from collections import defaultdict, deque
 import asyncio
@@ -283,6 +283,9 @@ class SessionData:
         # Thread lock for concurrent access
         self._lock = threading.RLock()
         
+        # Historical indicators storage: {indicator_name: value}
+        self._historical_indicators: Dict[str, any] = {}
+        
         logger.info("SessionData initialized")
     
     def apply_config(self, config: 'SessionDataConfig') -> None:
@@ -306,10 +309,6 @@ class SessionData:
         if config.historical_bars:
             self.historical_bars_trailing_days = config.historical_bars.trailing_days
             self.historical_bars_intervals = config.historical_bars.intervals
-            settings.HISTORICAL_BARS_ENABLED = config.historical_bars.enabled
-            settings.HISTORICAL_BARS_TRAILING_DAYS = config.historical_bars.trailing_days
-            settings.HISTORICAL_BARS_INTERVALS = config.historical_bars.intervals
-            settings.HISTORICAL_BARS_AUTO_LOAD = config.historical_bars.auto_load
             logger.info(f"  ✓ Historical bars: {config.historical_bars.trailing_days} days, intervals {config.historical_bars.intervals}")
         
         # Data upkeep configuration
@@ -322,12 +321,8 @@ class SessionData:
             settings.DATA_UPKEEP_AUTO_COMPUTE_DERIVED = config.data_upkeep.auto_compute_derived
             logger.info(f"  ✓ Data upkeep: check every {config.data_upkeep.check_interval_seconds}s, derived intervals {config.data_upkeep.derived_intervals}")
         
-        # Prefetch configuration
+        # Prefetch configuration (logged only, not stored in settings)
         if config.prefetch:
-            settings.PREFETCH_ENABLED = config.prefetch.enabled
-            settings.PREFETCH_WINDOW_MINUTES = config.prefetch.window_minutes
-            settings.PREFETCH_CHECK_INTERVAL_MINUTES = config.prefetch.check_interval_minutes
-            settings.PREFETCH_AUTO_ACTIVATE = config.prefetch.auto_activate
             logger.info(f"  ✓ Prefetch: window {config.prefetch.window_minutes} min before session")
         
         logger.success("Session data configuration applied")
@@ -475,11 +470,17 @@ class SessionData:
             
             # Check if bar belongs to current session or historical data
             if current_session_date is not None and bar_date == current_session_date:
-                # Current session bar - add to base bars and update metrics
-                symbol_data.bars_base.append(bar)
-                symbol_data.update_from_bar(bar)
-                # Signal upkeep thread that new data arrived
-                self._data_arrival_event.set()
+                # DEPRECATED: Do NOT add to bars_base here!
+                # SessionCoordinator (PHASE_5) is responsible for adding current session bars
+                # This method is only for adding historical bars
+                logger.warning(
+                    f"add_bar() called with current session date - this should not happen! "
+                    f"SessionCoordinator should add current session bars directly. "
+                    f"Bar: {symbol} {bar.timestamp}"
+                )
+                # Do NOT add to bars_base to prevent duplicates!
+                # symbol_data.bars_base.append(bar)  # REMOVED
+                # symbol_data.update_from_bar(bar)   # REMOVED
             else:
                 # Historical bar - add to historical_bars storage
                 # Store by interval (string) and date
@@ -701,6 +702,53 @@ class SessionData:
                     result[symbol] = None
         return result
     
+    def get_bars_ref(
+        self,
+        symbol: str,
+        interval: int = 1
+    ) -> Union[Deque[BarData], List[BarData]]:
+        """Get direct reference to bars container (ZERO-COPY, HIGH PERFORMANCE).
+        
+        ⚠️ WARNING: Returns mutable container reference.
+        Caller must NOT modify the returned container.
+        For read-only iteration and access only.
+        
+        Performance:
+        - Zero memory allocation
+        - Zero copying overhead
+        - Direct container access
+        - Ideal for AnalysisEngine hot path
+        
+        Args:
+            symbol: Stock symbol
+            interval: Bar interval in minutes (1, 5, 15, etc.)
+            
+        Returns:
+            Direct reference to bars deque (1m) or list (derived)
+            Empty container if symbol/interval not found
+        
+        Example:
+            # Zero-copy iteration
+            bars_ref = session_data.get_bars_ref("AAPL", 1)
+            for bar in bars_ref:
+                price = bar.close
+            
+            # Zero-copy slice (only sliced portion copied)
+            last_20 = list(bars_ref)[-20:]
+        """
+        symbol = symbol.upper()
+        
+        with self._lock:
+            symbol_data = self._symbols.get(symbol)
+            if symbol_data is None:
+                return deque() if interval == 1 else []
+            
+            # Return direct reference (zero-copy)
+            if interval == 1:
+                return symbol_data.bars_1m
+            else:
+                return symbol_data.bars_derived.get(interval, [])
+    
     def get_bars(
         self,
         symbol: str,
@@ -708,7 +756,17 @@ class SessionData:
         start: Optional[datetime] = None,
         end: Optional[datetime] = None
     ) -> List[BarData]:
-        """Get bars for a symbol.
+        """Get bars for a symbol (CREATES COPY).
+        
+        ⚠️ PERFORMANCE NOTE: This method creates a copy of bars.
+        For high-frequency access without filtering, use get_bars_ref() instead.
+        
+        Use this method when:
+        - You need time-based filtering (start/end)
+        - You need to modify the returned list
+        - You need to store the list long-term
+        
+        For read-only iteration without filtering, prefer get_bars_ref().
         
         Args:
             symbol: Stock symbol
@@ -717,7 +775,7 @@ class SessionData:
             end: Optional end time filter
             
         Returns:
-            List of bars matching criteria
+            List of bars matching criteria (copy created)
         """
         symbol = symbol.upper()
         
@@ -1119,6 +1177,224 @@ class SessionData:
         symbols = self._active_symbols.copy()
         logger.debug(f"get_active_symbols() returning {len(symbols)} symbols: {symbols}")
         return symbols
+    
+    # ==================== SESSION COORDINATOR SUPPORT ====================
+    
+    def set_session_active(self, active: bool) -> None:
+        """Set session active state.
+        
+        Args:
+            active: True to activate session, False to deactivate
+        """
+        if active:
+            self.activate_session()
+        else:
+            self.deactivate_session()
+    
+    def clear_historical_bars(self) -> None:
+        """Clear all historical bars for all symbols."""
+        with self._lock:
+            for symbol_data in self._symbols.values():
+                symbol_data.historical_bars.clear()
+            logger.debug("Cleared all historical bars")
+    
+    def clear_session_bars(self) -> None:
+        """Clear current session bars (not historical)."""
+        with self._lock:
+            symbols_cleared = []
+            for symbol, symbol_data in self._symbols.items():
+                bars_before = len(symbol_data.bars_base)
+                symbol_data.bars_base.clear()
+                symbol_data.bars_derived.clear()
+                symbol_data._latest_bar = None
+                symbols_cleared.append(f"{symbol}({bars_before}→0)")
+            logger.info(f"Cleared current session bars for {len(self._symbols)} symbols: {', '.join(symbols_cleared)}")
+    
+    def append_bar(self, symbol: str, interval: str, bar: BarData) -> None:
+        """Append a bar to historical storage.
+        
+        Args:
+            symbol: Stock symbol
+            interval: Bar interval (e.g., "1m", "5m")
+            bar: Bar data to append
+        """
+        symbol = symbol.upper()
+        
+        with self._lock:
+            symbol_data = self._symbols.get(symbol)
+            if symbol_data is None:
+                symbol_data = self.register_symbol(symbol)
+            
+            # Store in historical bars by date
+            bar_date = bar.timestamp.date()
+            
+            # Normalize interval to integer if it's a string like "1m"
+            if isinstance(interval, str) and interval.endswith('m'):
+                try:
+                    interval_int = int(interval[:-1])
+                except ValueError:
+                    interval_int = interval
+            else:
+                interval_int = interval
+            
+            if interval_int not in symbol_data.historical_bars:
+                symbol_data.historical_bars[interval_int] = {}
+            
+            if bar_date not in symbol_data.historical_bars[interval_int]:
+                symbol_data.historical_bars[interval_int][bar_date] = []
+            
+            symbol_data.historical_bars[interval_int][bar_date].append(bar)
+    
+    def set_quality(self, symbol: str, interval: str, quality: float) -> None:
+        """Set quality score for a symbol/interval.
+        
+        Args:
+            symbol: Stock symbol
+            interval: Bar interval
+            quality: Quality percentage (0-100)
+        """
+        symbol = symbol.upper()
+        
+        with self._lock:
+            symbol_data = self._symbols.get(symbol)
+            if symbol_data is None:
+                symbol_data = self.register_symbol(symbol)
+            
+            symbol_data.bar_quality = quality
+            logger.debug(f"Set quality for {symbol} {interval}: {quality:.1f}%")
+    
+    def get_quality_metric(self, symbol: str, interval: str) -> Optional[float]:
+        """Get quality score for a symbol/interval.
+        
+        Args:
+            symbol: Stock symbol
+            interval: Bar interval
+            
+        Returns:
+            Quality percentage (0-100) or None if not set
+        """
+        symbol = symbol.upper()
+        
+        with self._lock:
+            symbol_data = self._symbols.get(symbol)
+            if symbol_data is None:
+                return None
+            return symbol_data.bar_quality
+    
+    def set_historical_indicator(self, name: str, value: any) -> None:
+        """Store a historical indicator value.
+        
+        Args:
+            name: Indicator name
+            value: Indicator value (can be scalar, list, dict, etc.)
+        """
+        with self._lock:
+            self._historical_indicators[name] = value
+            logger.debug(f"Set historical indicator: {name}")
+    
+    def get_historical_indicator(self, name: str) -> Optional[any]:
+        """Get a historical indicator value.
+        
+        Args:
+            name: Indicator name
+            
+        Returns:
+            Indicator value or None if not found
+        """
+        with self._lock:
+            return self._historical_indicators.get(name)
+    
+    def get_latest_quote(self, symbol: str) -> Optional['Quote']:
+        """Get latest quote for symbol (backtest mode).
+        
+        Generates synthetic quote from most recent bar data.
+        Uses closing price as both bid and ask (no spread).
+        
+        Priority:
+        1. Most recent 1s bar (if base_interval is 1s)
+        2. Most recent 1m bar (if base_interval is 1m or derived from 1s)
+        3. Most recent 1d bar (if no intraday bars)
+        4. None if no bars available
+        
+        Args:
+            symbol: Stock symbol
+        
+        Returns:
+            Quote with bid=ask=close, or None if no data
+        """
+        from app.models.trading import Quote
+        
+        symbol = symbol.upper()
+        
+        with self._lock:
+            symbol_data = self._symbols.get(symbol)
+            if not symbol_data:
+                return None
+            
+            # Try base bars first (1s or 1m depending on base_interval)
+            if symbol_data.bars_base and len(symbol_data.bars_base) > 0:
+                latest_bar = symbol_data.bars_base[-1]
+                return Quote(
+                    symbol=symbol,
+                    timestamp=latest_bar.timestamp,
+                    bid=latest_bar.close,
+                    ask=latest_bar.close,
+                    bid_size=0,
+                    ask_size=0,
+                    source="bar"
+                )
+            
+            # Try derived 1m bars (if base is 1s but have generated 1m)
+            if "1m" in symbol_data.bars_derived and symbol_data.bars_derived["1m"]:
+                latest_bar = symbol_data.bars_derived["1m"][-1]
+                return Quote(
+                    symbol=symbol,
+                    timestamp=latest_bar.timestamp,
+                    bid=latest_bar.close,
+                    ask=latest_bar.close,
+                    bid_size=0,
+                    ask_size=0,
+                    source="bar"
+                )
+            
+            # Try derived 1d bars
+            if "1d" in symbol_data.bars_derived and symbol_data.bars_derived["1d"]:
+                latest_bar = symbol_data.bars_derived["1d"][-1]
+                return Quote(
+                    symbol=symbol,
+                    timestamp=latest_bar.timestamp,
+                    bid=latest_bar.close,
+                    ask=latest_bar.close,
+                    bid_size=0,
+                    ask_size=0,
+                    source="bar"
+                )
+            
+            # No data available
+            return None
+    
+    def get_bars(self, symbol: str, interval: str) -> List[BarData]:
+        """Get all bars (historical + current session) for a symbol/interval.
+        
+        Args:
+            symbol: Stock symbol
+            interval: Bar interval (e.g., "1m", "5m")
+            
+        Returns:
+            List of bars in chronological order
+        """
+        symbol = symbol.upper()
+        
+        # Normalize interval
+        if isinstance(interval, str) and interval.endswith('m'):
+            try:
+                interval_int = int(interval[:-1])
+            except ValueError:
+                interval_int = interval
+        else:
+            interval_int = interval
+        
+        return self.get_all_bars_including_historical(symbol, interval_int)
 
 
 # Global singleton instance

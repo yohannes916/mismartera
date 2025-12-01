@@ -56,7 +56,7 @@ class StreamQuote:
 
 
 async def _connect() -> websockets.WebSocketClientProtocol:
-    if not settings.ALPACA_API_KEY_ID or not settings.ALPACA_API_SECRET_KEY:
+    if not settings.ALPACA.api_key_id or not settings.ALPACA.api_secret_key:
         raise RuntimeError("Alpaca API credentials are missing for streaming")
 
     uri = ALPACA_STREAM_BASE
@@ -65,8 +65,8 @@ async def _connect() -> websockets.WebSocketClientProtocol:
 
     auth_msg = {
         "action": "auth",
-        "key": settings.ALPACA_API_KEY_ID,
-        "secret": settings.ALPACA_API_SECRET_KEY,
+        "key": settings.ALPACA.api_key_id,
+        "secret": settings.ALPACA.api_secret_key,
     }
     await ws.send(json.dumps(auth_msg))
     auth_resp = json.loads(await ws.recv())

@@ -34,7 +34,6 @@ Key Design:
 - Strategy-based: Pluggable strategy framework
 """
 
-import logging
 import threading
 import queue
 import time
@@ -44,13 +43,14 @@ from dataclasses import dataclass, field
 from abc import ABC, abstractmethod
 from enum import Enum
 
+# Logging
+from app.logger import logger
+
 # Phase 1-6 components
-from app.core.session_data import SessionData
+from app.managers.data_manager.session_data import SessionData, get_session_data
 from app.threads.sync.stream_subscription import StreamSubscription
 from app.monitoring.performance_metrics import PerformanceMetrics
 from app.models.session_config import SessionConfig
-
-logger = logging.getLogger(__name__)
 
 
 # =========================================================================
@@ -374,21 +374,21 @@ class AnalysisEngine(threading.Thread):
                 # Start timing
                 start_time = self.metrics.start_timer()
                 
-                # 2. Read data from SessionData (zero-copy)
-                bars = list(self.session_data.get_bars(symbol, interval))
+                # 2. Read data from SessionData (ZERO-COPY: direct reference)
+                bars_ref = self.session_data.get_bars_ref(symbol, interval)
                 quality = self.session_data.get_quality_metric(symbol, interval)
                 
-                if not bars:
+                if not bars_ref:
                     logger.debug(f"No bars for {symbol} {interval}, skipping")
                     continue
                 
                 logger.debug(
-                    f"Processing {symbol} {interval}: {len(bars)} bars, "
+                    f"Processing {symbol} {interval}: {len(bars_ref)} bars, "
                     f"quality={quality:.1f}%"
                 )
                 
-                # 3. Execute strategies and generate signals
-                signals = self._execute_strategies(symbol, interval, bars)
+                # 3. Execute strategies and generate signals (pass zero-copy reference)
+                signals = self._execute_strategies(symbol, interval, bars_ref)
                 
                 # 4. Make trading decisions
                 if signals:

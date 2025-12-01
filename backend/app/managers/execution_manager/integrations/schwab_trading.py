@@ -29,7 +29,7 @@ class SchwabTradingClient(BrokerageInterface):
     """
     
     def __init__(self):
-        self.base_url = settings.SCHWAB_API_BASE_URL.rstrip("/")
+        self.base_url = settings.SCHWAB.api_base_url.rstrip("/")
         self.client = schwab_client  # Use existing OAuth-enabled client
         
         if not self.client.app_key or not self.client.app_secret:

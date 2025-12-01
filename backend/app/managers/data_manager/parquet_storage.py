@@ -93,10 +93,16 @@ class ParquetStorage:
                     start_time = trading_session.pre_market_open or trading_session.regular_open
                     end_time = trading_session.post_market_close or trading_session.regular_close
                     
+                    logger.info(
+                        f"[TIMEZONE] Using trading session hours for {start_date}: "
+                        f"{start_time} - {end_time} (includes pre/post market)"
+                    )
+                    
                     # Ensure we have valid time objects
                     if start_time is None or end_time is None:
                         start_time = time_type(0, 0)
                         end_time = time_type(23, 59, 59)
+                        logger.warning(f"[TIMEZONE] Trading session had null times, using full day")
                 else:
                     # Fallback: full day for non-trading days
                     start_time = time_type(0, 0)
@@ -105,6 +111,15 @@ class ParquetStorage:
             logger.warning(f"Could not get trading session, using full day: {e}")
             start_time = time_type(0, 0)
             end_time = time_type(23, 59, 59)
+        
+        # CRITICAL: Ensure we have date objects, not datetime
+        # session_coordinator might pass datetime objects instead of dates
+        if isinstance(start_date, datetime):
+            logger.warning(f"start_date is datetime, extracting date part: {start_date}")
+            start_date = start_date.date()
+        if isinstance(end_date, datetime):
+            logger.warning(f"end_date is datetime, extracting date part: {end_date}")
+            end_date = end_date.date()
         
         # Combine dates with times in source timezone
         source_tz = ZoneInfo(source_timezone)
@@ -117,6 +132,14 @@ class ParquetStorage:
         # Convert to UTC
         utc_start = start_aware.astimezone(ZoneInfo("UTC"))
         utc_end = end_aware.astimezone(ZoneInfo("UTC"))
+        
+        # Log the conversion
+        logger.info(
+            f"[TIMEZONE] Query range: {start_date} {start_time} - {end_date} {end_time} ({source_timezone})"
+        )
+        logger.info(
+            f"[TIMEZONE] UTC range: {utc_start} - {utc_end}"
+        )
         
         logger.debug(
             f"Date conversion: {start_date} - {end_date} ({source_timezone}) → "
@@ -155,6 +178,10 @@ class ParquetStorage:
         current_date = utc_start.date()
         end_date = utc_end.date()
         
+        # CRITICAL: Track files already read to avoid reading same monthly file multiple times
+        # when UTC range spans multiple days in same month
+        files_read = set()
+        
         while current_date <= end_date:
             # Get partition file for this UTC day
             file_path = self.get_file_path(
@@ -164,16 +191,38 @@ class ParquetStorage:
                 current_date.month if data_type in ['1s', '1m'] else None
             )
             
+            # Skip if we already read this file (monthly files contain multiple days)
+            if file_path and file_path in files_read:
+                logger.debug(f"Skipping already-read file: {file_path.name}")
+                current_date += timedelta(days=1)
+                continue
+            
             if file_path and file_path.exists():
+                files_read.add(file_path)
                 try:
                     df_partition = pd.read_parquet(file_path)
                     
                     if not df_partition.empty:
+                        # CRITICAL: Make timestamps timezone-aware for comparison
+                        # Parquet stores as naive UTC, must convert for proper filtering
+                        if df_partition['timestamp'].dt.tz is None:
+                            df_partition['timestamp'] = pd.to_datetime(df_partition['timestamp'], utc=True)
+                        
+                        bars_before_filter = len(df_partition)
+                        
                         # Filter to requested UTC time range
                         df_partition = df_partition[
                             (df_partition['timestamp'] >= utc_start) &
                             (df_partition['timestamp'] <= utc_end)
                         ]
+                        
+                        bars_after_filter = len(df_partition)
+                        
+                        if bars_before_filter != bars_after_filter:
+                            logger.info(
+                                f"[UTC_FILTER] {file_path.name}: {bars_before_filter} → {bars_after_filter} bars "
+                                f"(filtered {bars_before_filter - bars_after_filter} outside UTC range)"
+                            )
                         
                         if not df_partition.empty:
                             frames.append(df_partition)
@@ -190,7 +239,25 @@ class ParquetStorage:
         df = pd.concat(frames, ignore_index=True)
         df = df.sort_values('timestamp').reset_index(drop=True)
         
-        logger.debug(f"Combined {len(frames)} partitions into {len(df)} bars")
+        # Check for duplicate timestamps (should not happen with file deduplication, but verify)
+        duplicates = df[df.duplicated(subset=['timestamp'], keep=False)]
+        if len(duplicates) > 0:
+            logger.error(
+                f"[UTC_COMBINE] UNEXPECTED: Found {len(duplicates)} bars with duplicate timestamps "
+                f"(unique timestamps: {df['timestamp'].nunique()}, total bars: {len(df)}) - this should not happen!"
+            )
+            
+            # Drop duplicates as safety measure
+            bars_before_dedup = len(df)
+            df = df.drop_duplicates(subset=['timestamp'], keep='first').reset_index(drop=True)
+            bars_dropped = bars_before_dedup - len(df)
+            
+            logger.warning(
+                f"[UTC_COMBINE] Dropped {bars_dropped} duplicate bars as safety measure "
+                f"(kept {len(df)} unique bars)"
+            )
+        
+        logger.info(f"[UTC_COMBINE] Combined {len(frames)} partitions into {len(df)} bars (UTC range: {utc_start.date()} to {utc_end.date()})")
         return df
     
     def _ensure_symbol_directory(self, data_type: str, symbol: str, year: int, month: Optional[int] = None) -> Path:
@@ -541,7 +608,8 @@ class ParquetStorage:
         symbol: str,
         start_date: Optional[date] = None,
         end_date: Optional[date] = None,
-        request_timezone: Optional[str] = None
+        request_timezone: Optional[str] = None,
+        regular_hours_only: bool = False
     ) -> pd.DataFrame:
         """Read bars from Parquet file(s).
         
@@ -558,6 +626,8 @@ class ParquetStorage:
             end_date: Optional end date in system timezone
             request_timezone: Optional override for output timezone
                             If None, uses system_manager.timezone
+            regular_hours_only: If True, filter to regular trading hours only
+                               (09:30-16:00 ET). Default False keeps all hours.
         
         Returns:
             DataFrame with bars in request_timezone (or system timezone)
@@ -626,6 +696,69 @@ class ParquetStorage:
             
             # Convert to request timezone
             result['timestamp'] = result['timestamp'].dt.tz_convert(request_timezone)
+        
+        # Filter to regular trading hours if requested
+        if regular_hours_only and not result.empty and start_date is not None:
+            from app.managers.system_manager import get_system_manager
+            from app.models.database import SessionLocal
+            
+            sys_mgr = get_system_manager()
+            time_mgr = sys_mgr.get_time_manager()
+            
+            # CRITICAL: Ensure we have a date object for trading session query
+            # start_date might be a datetime (from session_coordinator passing datetime objects)
+            query_date = start_date.date() if isinstance(start_date, datetime) else start_date
+            
+            # Get regular trading hours for the start date
+            try:
+                logger.info(f"[FILTER] Querying trading session for date: {query_date} (original: {start_date}, type: {type(start_date)})")
+                
+                with SessionLocal() as session:
+                    trading_session = time_mgr.get_trading_session(session, query_date)
+                    
+                    if trading_session:
+                        logger.info(
+                            f"[FILTER] {start_date}: Trading session: "
+                            f"is_early_close={trading_session.is_early_close}, "
+                            f"regular_close={trading_session.regular_close}"
+                        )
+                    
+                    if trading_session and not trading_session.is_holiday:
+                        # Create timezone-aware market open/close times using the date object
+                        from zoneinfo import ZoneInfo
+                        tz = ZoneInfo(request_timezone)
+                        market_open = datetime.combine(query_date, trading_session.regular_open).replace(tzinfo=tz)
+                        market_close = datetime.combine(query_date, trading_session.regular_close).replace(tzinfo=tz)
+                        
+                        # Log early close detection
+                        if trading_session.is_early_close:
+                            logger.info(
+                                f"[FILTER] Early close day {start_date}: market closes at {trading_session.regular_close} "
+                                f"(holiday: {trading_session.holiday_name})"
+                            )
+                        
+                        # Filter bars
+                        bars_before = len(result)
+                        logger.info(f"[FILTER] {start_date}: Before filtering: {bars_before} bars (range: {market_open.time()}-{market_close.time()})")
+                        
+                        # Apply filter (make a copy to avoid view issues)
+                        result = result[(result['timestamp'] >= market_open) & (result['timestamp'] <= market_close)].copy()
+                        bars_filtered = bars_before - len(result)
+                        
+                        logger.info(
+                            f"[FILTER] {start_date}: Filtered {bars_filtered}/{bars_before} extended hours bars for {symbol} "
+                            f"(kept {len(result)} regular hours: {market_open.time()}-{market_close.time()})"
+                        )
+                        
+                        # Debug: Show first and last bar after filtering
+                        if len(result) > 0:
+                            first_bar_time = result.iloc[0]['timestamp'].time()
+                            last_bar_time = result.iloc[-1]['timestamp'].time()
+                            logger.info(
+                                f"[FILTER] {start_date}: After filtering: First bar={first_bar_time}, Last bar={last_bar_time}"
+                            )
+            except Exception as e:
+                logger.warning(f"Could not filter to regular hours: {e}, returning all bars")
         
         logger.info(
             f"Loaded {len(result)} {data_type} bars for {symbol} "

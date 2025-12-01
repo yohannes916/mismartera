@@ -370,7 +370,7 @@ class InteractiveCLI:
         
         history_status = "[green]✓[/green]" if READLINE_AVAILABLE else "[dim]✗[/dim]"
         self.console.print(
-            f"\n[dim]Version {settings.APP_VERSION} | Paper Trading: {settings.PAPER_TRADING} | "
+            f"\n[dim]Version {settings.APP_VERSION} | Alpaca Paper: {settings.ALPACA.paper_trading} | "
             f"History: {history_status}[/dim]\n"
         )
         
@@ -382,7 +382,7 @@ class InteractiveCLI:
             True if login successful, False otherwise
         """
         # When login requirement is disabled, run as system user without prompts
-        if settings.DISABLE_CLI_LOGIN_REQUIREMENT:
+        if settings.SYSTEM.disable_cli_login:
             self.current_user = {
                 "username": "system",
                 "role": "admin",
@@ -588,8 +588,8 @@ class InteractiveCLI:
         table.add_row("User", self.current_user.get('username', 'unknown') if self.current_user else 'Not logged in')
         table.add_row("Role", self.current_user.get('role', 'N/A') if self.current_user else 'N/A')
         table.add_row("Debug Mode", str(settings.DEBUG))
-        table.add_row("Paper Trading", str(settings.PAPER_TRADING))
-        table.add_row("Log Level", settings.LOG_LEVEL)
+        table.add_row("Alpaca Paper Trading", str(settings.ALPACA.paper_trading))
+        table.add_row("Log Level", settings.LOGGER.default_level)
         table.add_row("Session Active", str(self.session_token is not None))
         
         self.console.print(table)
@@ -796,7 +796,7 @@ class InteractiveCLI:
                     self.console.print("[red]Usage: log-level <LEVEL>[/red]")
             
             elif cmd == 'log-level-get':
-                self.console.print(f"[cyan]Current log level:[/cyan] {settings.LOG_LEVEL}")
+                self.console.print(f"[cyan]Current log level:[/cyan] {settings.LOGGER.default_level}")
             
             elif cmd == 'sessions':
                 if self.current_user and self.current_user.get('role') == 'admin':
@@ -852,8 +852,8 @@ class InteractiveCLI:
                     try:
                         qty = float(args[1])
                         self.console.print(f"[yellow]Placing {cmd.upper()} order: {qty} shares of {symbol}...[/yellow]")
-                        if settings.PAPER_TRADING:
-                            self.console.print(f"[green]✓[/green] Paper trading order placed: {cmd.upper()} {qty} {symbol}")
+                        if settings.ALPACA.paper_trading:
+                            self.console.print(f"[green]✓[/green] Alpaca paper trading order placed: {cmd.upper()} {qty} {symbol}")
                         else:
                             self.console.print("[dim]Trading not available (API not configured)[/dim]")
                     except ValueError:
@@ -881,24 +881,21 @@ class InteractiveCLI:
                             # Aggregate market info for the current date/time
                             info = self.data_manager.get_current_day_market_info(session)
 
-                        # All DataManager times are expressed in canonical
-                        # trading timezone (ET). For display, we optionally
-                        # convert to the local system timezone.
+                        # All DataManager times are expressed in market timezone
+                        # (derived from exchange_group + asset_class in system_manager)
                         from datetime import datetime as _dt
                         from zoneinfo import ZoneInfo as _ZoneInfo
 
-                        trading_tz = _ZoneInfo(settings.TRADING_TIMEZONE)
-                        local_tz = _ZoneInfo(settings.LOCAL_TIMEZONE)
+                        trading_tz = _ZoneInfo(self.data_manager.system_manager.timezone)
 
                         def _to_display(dt_val: _dt) -> tuple[str, str]:
                             """Return (formatted_time, tz_label).
 
-                            dt_val is a naive datetime representing Eastern
-                            Time wall-clock. To get correct DST behavior, we
-                            construct a new aware datetime in the trading
-                            timezone rather than using replace(tzinfo=...).
+                            dt_val is a naive datetime representing market time.
+                            We construct an aware datetime in the trading timezone
+                            for correct DST handling.
                             """
-                            aware_et = _dt(
+                            aware_dt = _dt(
                                 dt_val.year,
                                 dt_val.month,
                                 dt_val.day,
@@ -908,10 +905,7 @@ class InteractiveCLI:
                                 dt_val.microsecond,
                                 tzinfo=trading_tz,
                             )
-                            if settings.DISPLAY_LOCAL_TIMEZONE and local_tz is not None:
-                                local_dt = aware_et.astimezone(local_tz)
-                                return local_dt.strftime("%H:%M:%S"), local_dt.tzname() or "local"
-                            return aware_et.strftime("%H:%M:%S"), "ET"
+                            return aware_dt.strftime("%H:%M:%S"), trading_tz.tzname(aware_dt)
 
                         now = info.now
                         now_str, now_tz = _to_display(now)

@@ -13,7 +13,6 @@ from rich import print as rprint
 from typing import Optional, List, Dict, Any, Tuple, Union, Set
 from enum import Enum
 import asyncio
-import logging
 
 from app.managers.system_manager import get_system_manager, SystemState
 from app.logger import logger

@@ -29,10 +29,10 @@ class SchwabClient:
     """
     
     def __init__(self):
-        self.base_url = settings.SCHWAB_API_BASE_URL
-        self.app_key = settings.SCHWAB_APP_KEY
-        self.app_secret = settings.SCHWAB_APP_SECRET
-        self.callback_url = settings.SCHWAB_CALLBACK_URL
+        self.base_url = settings.SCHWAB.api_base_url
+        self.app_key = settings.SCHWAB.app_key
+        self.app_secret = settings.SCHWAB.app_secret
+        self.callback_url = settings.SCHWAB.callback_url
         self.access_token: Optional[str] = None
         self.refresh_token: Optional[str] = None
         self.token_expires_at: Optional[datetime] = None
@@ -375,13 +375,13 @@ class SchwabClient:
         """
         logger.info(f"Placing order: {side} {quantity} {symbol} ({order_type})")
         
-        if settings.PAPER_TRADING:
-            logger.warning("Paper trading mode - order not sent to broker")
-            return {
-                "orderId": "PAPER_" + str(hash(f"{symbol}{quantity}")),
-                "status": "SIMULATED",
-                "message": "Paper trading order"
-            }
+        # Schwab doesn't have a paper trading mode - use Mismartera instead
+        logger.warning("Schwab orders not implemented - use Mismartera for simulation")
+        return {
+            "orderId": "PAPER_" + str(hash(f"{symbol}{quantity}")),
+            "status": "SIMULATED",
+            "message": "Paper trading order"
+        }
         
         # TODO: Implement order placement API call
         raise NotImplementedError("Order placement API not yet implemented")

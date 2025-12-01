@@ -32,6 +32,27 @@ class BarData(BaseModel):
         }
 
 
+class Quote(BaseModel):
+    """Bid/ask quote data.
+    
+    In backtest mode, quotes are generated synthetically from latest bar data
+    (bid = ask = close price). In live mode, quotes come from the API with
+    real bid/ask spreads.
+    """
+    timestamp: datetime
+    symbol: str
+    bid: float = Field(gt=0)
+    ask: float = Field(gt=0)
+    bid_size: int = Field(ge=0, default=0)
+    ask_size: int = Field(ge=0, default=0)
+    source: str = "api"  # "api" (live) or "bar" (backtest)
+    
+    class Config:
+        json_encoders = {
+            datetime: lambda v: v.isoformat()
+        }
+
+
 class TickData(BaseModel):
     """Single tick quote or trade.
 

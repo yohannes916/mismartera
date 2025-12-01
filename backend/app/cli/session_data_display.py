@@ -184,7 +184,14 @@ def generate_session_display(compact: bool = True) -> Table:
                     # Compact mode: Show symbol data across multiple rows
                     if compact:
                         current_bars = symbol_data.get_bar_count(1)
-                        bars_5m = symbol_data.bars_derived.get(5, [])
+                        actual_bars_base = len(symbol_data.bars_base)
+                        
+                        # Debug: Check if counts match
+                        if current_bars != actual_bars_base:
+                            logger.warning(
+                                f"Bar count mismatch for {symbol}: "
+                                f"get_bar_count={current_bars}, len(bars_base)={actual_bars_base}"
+                            )
                         
                         # Row 1: Symbol name and price range
                         price_info = ""
@@ -219,20 +226,23 @@ def generate_session_display(compact: bool = True) -> Table:
                         
                         main_table.add_row("    1m Bars", bar_info)
                         
-                        # Row 4: 5m bars if available
-                        if len(bars_5m) > 0:
-                            bars_5m_info = f"{len(bars_5m)} bars"
-                            first_bar_5m = bars_5m[0]
-                            last_bar_5m = bars_5m[-1]
-                            time_span_5m = (last_bar_5m.timestamp - first_bar_5m.timestamp).total_seconds() / 60
-                            
-                            # Convert 5m bar timestamps to market timezone
-                            # All timestamps are in system timezone
-                            first_ts_5m = first_bar_5m.timestamp
-                            last_ts_5m = last_bar_5m.timestamp
-                            
-                            bars_5m_info += f" | Start: {first_ts_5m.strftime('%H:%M')} | Last: {last_ts_5m.strftime('%H:%M')} | Span: {int(time_span_5m)}min"
-                            main_table.add_row("    5m Bars", bars_5m_info)
+                        # Derived bars (all intervals in bars_derived)
+                        if hasattr(symbol_data, 'bars_derived') and symbol_data.bars_derived:
+                            for interval_key in sorted(symbol_data.bars_derived.keys(), 
+                                                      key=lambda x: int(x) if isinstance(x, int) else int(x.rstrip('m'))):
+                                bars_list = symbol_data.bars_derived[interval_key]
+                                if not bars_list or len(bars_list) == 0:
+                                    continue
+                                
+                                interval_str = f"{interval_key}m" if isinstance(interval_key, int) else interval_key
+                                bars_info = f"{len(bars_list)} bars"
+                                
+                                first_bar = bars_list[0]
+                                last_bar = bars_list[-1]
+                                time_span = (last_bar.timestamp - first_bar.timestamp).total_seconds() / 60
+                                
+                                bars_info += f" | Start: {first_bar.timestamp.strftime('%H:%M')} | Last: {last_bar.timestamp.strftime('%H:%M')} | Span: {int(time_span)}min"
+                                main_table.add_row(f"    {interval_str} Bars", bars_info)
                     else:
                         # Full mode: Show detailed breakdown
                         main_table.add_row(f"│  [bold]┌─ {symbol}[/bold]", "")
@@ -282,19 +292,38 @@ def generate_session_display(compact: bool = True) -> Table:
                             main_table.add_row(f"│  │  │  └─ Quality", f"[{quality_color}]{symbol_data.bar_quality:.1f}%[/{quality_color}]")
                             main_table.add_row(f"│  │  │", "")
                         
-                        # 5m Bars (if exists in derived)
-                        bars_5m = symbol_data.bars_derived.get(5, [])
-                        if bars_5m and len(bars_5m) > 0:
-                            main_table.add_row(f"│  │  [cyan]└─ 5m Bar[/cyan]", "")
-                            main_table.add_row(f"│  │     ├─ Bars", f"{len(bars_5m)} bars")
-                            first_bar_5m = bars_5m[0]
-                            last_bar_5m = bars_5m[-1]
-                            time_span_5m = (last_bar_5m.timestamp - first_bar_5m.timestamp).total_seconds() / 60
-                            main_table.add_row(f"│  │     ├─ Start Time", first_bar_5m.timestamp.strftime("%H:%M:%S"))
-                            main_table.add_row(f"│  │     ├─ Last Update", last_bar_5m.timestamp.strftime("%H:%M:%S"))
-                            main_table.add_row(f"│  │     ├─ Time Span", f"{int(time_span_5m)} minutes")
-                            main_table.add_row(f"│  │     └─ Quality", "[green]100.0%[/green]")  # Derived bars are complete
-                            main_table.add_row(f"│  │", "")
+                        # Derived Bars (all intervals in bars_derived)
+                        if hasattr(symbol_data, 'bars_derived') and symbol_data.bars_derived:
+                            derived_intervals = sorted(symbol_data.bars_derived.items(), 
+                                                     key=lambda x: int(x[0]) if isinstance(x[0], int) else int(x[0].rstrip('m')))
+                            
+                            for idx, (interval_key, bars_list) in enumerate(derived_intervals):
+                                if not bars_list or len(bars_list) == 0:
+                                    continue
+                                
+                                # Format interval display
+                                interval_str = f"{interval_key}m" if isinstance(interval_key, int) else interval_key
+                                
+                                # Determine tree symbol (last item gets └ others get ├)
+                                is_last = (idx == len(derived_intervals) - 1)
+                                tree_sym = "└" if is_last else "├"
+                                
+                                # Get quality for this derived interval
+                                derived_quality = session_data.get_quality_metric(symbol, interval_str) or 0.0
+                                quality_color = "green" if derived_quality >= 95 else "yellow" if derived_quality >= 80 else "red"
+                                
+                                main_table.add_row(f"│  │  [cyan]{tree_sym}─ {interval_str} Bar[/cyan]", "")
+                                main_table.add_row(f"│  │  {'│' if not is_last else ' '}  ├─ Bars", f"{len(bars_list)} bars")
+                                
+                                first_bar = bars_list[0]
+                                last_bar = bars_list[-1]
+                                time_span = (last_bar.timestamp - first_bar.timestamp).total_seconds() / 60
+                                
+                                main_table.add_row(f"│  │  {'│' if not is_last else ' '}  ├─ Start Time", first_bar.timestamp.strftime("%H:%M:%S"))
+                                main_table.add_row(f"│  │  {'│' if not is_last else ' '}  ├─ Last Update", last_bar.timestamp.strftime("%H:%M:%S"))
+                                main_table.add_row(f"│  │  {'│' if not is_last else ' '}  ├─ Time Span", f"{int(time_span)} minutes")
+                                main_table.add_row(f"│  │  {'│' if not is_last else ' '}  └─ Quality", f"[{quality_color}]{derived_quality:.1f}%[/{quality_color}]")
+                                main_table.add_row(f"│  │  {'│' if not is_last else ' '}", "")
                         
                         main_table.add_row(f"│", "")
             except Exception as e:
@@ -424,9 +453,6 @@ def generate_session_display(compact: bool = True) -> Table:
                 intervals_str = ", ".join([f"{i}m" for i in session_data.historical_bars_intervals])
                 main_table.add_row("│  │  ├─ Intervals", intervals_str)
             
-            auto_load_status = "[green]✓ Enabled[/green]" if settings.HISTORICAL_BARS_AUTO_LOAD else "[dim]Disabled[/dim]"
-            main_table.add_row("│  │  ├─ Auto-load", auto_load_status)
-            
             if total_bars > 0:
                 main_table.add_row("│  │  └─ Total Loaded", f"{total_bars:,} bars ({len(total_days)} unique dates)")
             else:
@@ -434,13 +460,27 @@ def generate_session_display(compact: bool = True) -> Table:
         
         main_table.add_row("│  │", "")
     
-    # Historical per symbol (only in full mode)
-    if active_symbols and not compact:
+    # Historical per symbol
+    # First check if ANY symbol has historical data
+    has_any_hist_data = False
+    if active_symbols:
+        for symbol in active_symbols:
+            symbol_data = session_data.get_symbol_data(symbol)
+            if symbol_data and hasattr(symbol_data, 'historical_bars'):
+                for interval_bars in symbol_data.historical_bars.values():
+                    if interval_bars:
+                        has_any_hist_data = True
+                        break
+                if has_any_hist_data:
+                    break
+    
+    # Show historical data if exists (full mode shows details, compact shows nothing extra)
+    if active_symbols and not compact and has_any_hist_data:
         for symbol in sorted(active_symbols):
             try:
                 symbol_data = session_data.get_symbol_data(symbol)
                 if symbol_data and hasattr(symbol_data, 'historical_bars'):
-                    # Check if there's any historical data
+                    # Check if there's any historical data for this symbol
                     has_hist_data = False
                     for interval_bars in symbol_data.historical_bars.values():
                         if interval_bars:
@@ -469,7 +509,11 @@ def generate_session_display(compact: bool = True) -> Table:
                                 end_dt = all_bars_1m_sorted[-1].timestamp
                                 main_table.add_row(f"│  │  │  ├─ Start", start_dt.strftime("%Y-%m-%d %H:%M:%S"))
                                 main_table.add_row(f"│  │  │  ├─ End", end_dt.strftime("%Y-%m-%d %H:%M:%S"))
-                                main_table.add_row(f"│  │  │  └─ Quality", "[green]99.5%[/green]")  # Placeholder
+                                
+                                # Get actual quality from session_data
+                                hist_quality_1m = session_data.get_quality_metric(symbol, "1m") or 100.0
+                                quality_color = "green" if hist_quality_1m >= 95 else "yellow" if hist_quality_1m >= 80 else "red"
+                                main_table.add_row(f"│  │  │  └─ Quality", f"[{quality_color}]{hist_quality_1m:.1f}%[/{quality_color}]")
                             
                             main_table.add_row(f"│  │  │", "")
                         
@@ -490,12 +534,17 @@ def generate_session_display(compact: bool = True) -> Table:
                                 end_dt_5m = all_bars_5m_sorted[-1].timestamp
                                 main_table.add_row(f"│  │     ├─ Start", start_dt_5m.strftime("%Y-%m-%d %H:%M:%S"))
                                 main_table.add_row(f"│  │     ├─ End", end_dt_5m.strftime("%Y-%m-%d %H:%M:%S"))
-                                main_table.add_row(f"│  │     └─ Quality", "[green]100.0%[/green]")
+                                
+                                # Get actual quality from session_data
+                                hist_quality_5m = session_data.get_quality_metric(symbol, "5m") or 100.0
+                                quality_color_5m = "green" if hist_quality_5m >= 95 else "yellow" if hist_quality_5m >= 80 else "red"
+                                main_table.add_row(f"│  │     └─ Quality", f"[{quality_color_5m}]{hist_quality_5m:.1f}%[/{quality_color_5m}]")
                         
                         main_table.add_row(f"│  │", "")
             except Exception as e:
                 logger.debug(f"Error displaying historical data for {symbol}: {e}")
-    else:
+    elif not has_any_hist_data:
+        # Only show "No historical data" if there actually isn't any
         main_table.add_row("│  [dim]No historical data[/dim]", "")
     
     # === SECTION 5: PREFETCH ===
@@ -508,18 +557,8 @@ def generate_session_display(compact: bool = True) -> Table:
     else:
         main_table.add_row("", "")  # Spacing
         main_table.add_row("[bold blue]┌─ PREFETCH[/bold blue]", "")
-        # Full mode: Detailed breakdown
         main_table.add_row("│", "")
-        
-        # Prefetch Configuration
-        main_table.add_row("│  [bold]┌─ Configuration[/bold]", "")
-        main_table.add_row("│  │  ├─ Window", f"{settings.PREFETCH_WINDOW_MINUTES} min before session")
-        main_table.add_row("│  │  ├─ Check Interval", f"{settings.PREFETCH_CHECK_INTERVAL_MINUTES} min")
-        auto_activate_status = "[green]✓ Enabled[/green]" if settings.PREFETCH_AUTO_ACTIVATE else "[dim]Disabled[/dim]"
-        main_table.add_row("│  │  ├─ Auto-activate", auto_activate_status)
-        main_table.add_row("│  │  └─ Status", "[dim]Not Implemented[/dim]")  # TODO: Get actual status
-        main_table.add_row("│  │", "")
-        main_table.add_row("│  [dim]No prefetch data (feature not yet implemented)[/dim]", "")
+        main_table.add_row("│  [dim]Feature not yet implemented[/dim]", "")
     
     # === SECTION 6: MARKET HOURS ===
     # Market hours are already shown in SESSION section header
@@ -528,9 +567,15 @@ def generate_session_display(compact: bool = True) -> Table:
     
     # === SECTION 7: STREAM COORDINATOR QUEUES ===
     try:
-        from app.managers.data_manager.backtest_stream_coordinator import get_coordinator
-        coordinator = get_coordinator(system_manager=system_mgr)
-        queue_stats = coordinator.get_queue_stats()
+        # Get coordinator from system_manager thread pool
+        coordinator = None
+        if hasattr(system_mgr, '_threads') and system_mgr._threads:
+            coordinator = system_mgr._threads.get('session_coordinator')
+        
+        # Old backtest_stream_coordinator removed - only use SessionCoordinator now
+        # No fallback needed
+        
+        queue_stats = coordinator.get_queue_stats() if coordinator and hasattr(coordinator, 'get_queue_stats') else None
         
         if compact:
             main_table.add_row("", "")  # Spacing
@@ -635,7 +680,7 @@ def extract_session_data_for_csv() -> Dict[str, Any]:
     """
     from app.managers.system_manager import get_system_manager
     from app.managers.data_manager.session_data import get_session_data
-    from app.managers.data_manager.backtest_stream_coordinator import get_coordinator
+    # Old backtest_stream_coordinator removed - SessionCoordinator is used now
     
     system_mgr = get_system_manager()
     time_mgr = system_mgr.get_time_manager()

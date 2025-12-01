@@ -942,20 +942,18 @@ def stream_bars_command(
         bar_count = len(bars)
         console.print(f"[green]✓[/green] Loaded {bar_count:,} bars from Parquet")
         
-        # Register stream and feed pre-fetched data directly (fast!)
-        from app.managers.data_manager.backtest_stream_coordinator import get_coordinator, StreamType
+        # OLD ARCHITECTURE REMOVED:
+        # This command used BacktestStreamCoordinator which is no longer used.
+        # SessionCoordinator handles all streaming now via session config.
+        console.print("[yellow]⚠ This command is deprecated - use session config to stream bars[/yellow]")
+        return
         
-        coordinator = get_coordinator()
-        coordinator.start_worker()  # Start worker thread if not running
-        
-        # Register stream
-        success, input_queue = coordinator.register_stream(symbol.upper(), StreamType.BAR)
-        if not success:
-            console.print(f"[red]✗ Stream already active for {symbol.upper()}[/red]")
-            return
-        
-        # Feed all data directly to queue (no async, instant!)
-        coordinator.feed_data_list(symbol.upper(), StreamType.BAR, bars)
+        # OLD CODE COMMENTED OUT:
+        # from app.managers.data_manager.backtest_stream_coordinator import get_coordinator, StreamType
+        # coordinator = get_coordinator()
+        # coordinator.start_worker()
+        # success, input_queue = coordinator.register_stream(symbol.upper(), StreamType.BAR)
+        # coordinator.feed_data_list(symbol.upper(), StreamType.BAR, bars)
         
         # Get merged stream from coordinator
         stream_iterator = coordinator.get_merged_stream()
@@ -1035,11 +1033,15 @@ def stream_ticks_command(
         tick_count = len(ticks)
         console.print(f"[green]✓[/green] Loaded {tick_count:,} ticks (1s bars) from Parquet")
         
-        # Register stream and feed pre-fetched data directly (fast!)
-        from app.managers.data_manager.backtest_stream_coordinator import get_coordinator, StreamType
+        # OLD ARCHITECTURE REMOVED:
+        # This command used BacktestStreamCoordinator which is no longer used.
+        console.print("[yellow]⚠ This command is deprecated - use session config to stream ticks[/yellow]")
+        return
         
-        coordinator = get_coordinator()
-        coordinator.start_worker()  # Start worker thread if not running
+        # OLD CODE COMMENTED OUT:
+        # from app.managers.data_manager.backtest_stream_coordinator import get_coordinator, StreamType
+        # coordinator = get_coordinator()
+        # coordinator.start_worker()
         
         # Register stream
         success, input_queue = coordinator.register_stream(symbol.upper(), StreamType.TICK)
@@ -1128,11 +1130,15 @@ def stream_quotes_command(
         quote_count = len(quotes)
         console.print(f"[green]✓[/green] Loaded {quote_count:,} quotes from Parquet")
         
-        # Register stream and feed pre-fetched data directly (fast!)
-        from app.managers.data_manager.backtest_stream_coordinator import get_coordinator, StreamType
+        # OLD ARCHITECTURE REMOVED:
+        # This command used BacktestStreamCoordinator which is no longer used.
+        console.print("[yellow]⚠ This command is deprecated - use session config to stream quotes[/yellow]")
+        return
         
-        coordinator = get_coordinator()
-        coordinator.start_worker()  # Start worker thread if not running
+        # OLD CODE COMMENTED OUT:
+        # from app.managers.data_manager.backtest_stream_coordinator import get_coordinator, StreamType
+        # coordinator = get_coordinator()
+        # coordinator.start_worker()
         
         # Register stream
         success, input_queue = coordinator.register_stream(symbol.upper(), StreamType.QUOTE)
@@ -1278,7 +1284,7 @@ def set_backtest_speed_command(speed: str) -> None:
         dm.set_backtest_speed(speed_value)
 
         console.print("[green]✓[/green] Backtest speed updated:")
-        console.print(f"  DATA_MANAGER_BACKTEST_SPEED: {settings.DATA_MANAGER_BACKTEST_SPEED}")
+        console.print(f"  speed_multiplier: {speed_value}")
         if speed_value == 0:
             console.print("  [dim]Mode: Maximum speed (no pacing)[/dim]")
         elif speed_value == 1.0:

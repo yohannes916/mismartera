@@ -14,8 +14,6 @@ class DataManagerConfig:
 
     Attributes:
         data_api: Name of the data provider (e.g. "alpaca", "schwab").
-        backtest_days: Number of trading days to include in backtest window.
     """
 
-    data_api: str = settings.DATA_MANAGER_DATA_API
-    backtest_days: int = settings.DATA_MANAGER_BACKTEST_DAYS
+    data_api: str = settings.DATA_MANAGER.data_api

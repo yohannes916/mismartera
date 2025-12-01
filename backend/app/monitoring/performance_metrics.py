@@ -18,11 +18,11 @@ Reference: SESSION_ARCHITECTURE.md - Section 6: Performance Monitoring
 """
 
 import time
-import logging
 from typing import Optional, Dict, Any
 from dataclasses import dataclass, field
 
-logger = logging.getLogger(__name__)
+# Logging
+from app.logger import logger
 
 
 @dataclass
@@ -207,6 +207,11 @@ class PerformanceMetrics:
         self.iterations = MetricCounter('iterations')
         self.events_handled = MetricCounter('events_handled')
         self.records_streamed = MetricCounter('records_streamed')
+        
+        # Backpressure counters (64-bit for high-frequency operations)
+        # Track when producer is ready but consumer hasn't signaled readiness
+        self.backpressure_coordinator_to_processor = MetricCounter('backpressure_coordinator_to_processor')
+        self.backpressure_processor_to_analysis = MetricCounter('backpressure_processor_to_analysis')
         
         # Initial load (single value, not reset per session)
         self.data_loading_initial: Optional[float] = None
@@ -400,6 +405,58 @@ class PerformanceMetrics:
         return self.records_streamed.get()
     
     # =========================================================================
+    # Backpressure Tracking (Pipeline Bottleneck Detection)
+    # =========================================================================
+    
+    def increment_backpressure_coordinator_to_processor(self, amount: int = 1) -> None:
+        """Increment coordinator→processor backpressure counter.
+        
+        Increments when coordinator is ready to deliver next data but
+        DataProcessor has not indicated readiness yet.
+        
+        In clock-driven mode (backtest/live), data gets delivered anyway
+        but counter still increments to track bottleneck frequency.
+        
+        High values indicate DataProcessor is slower than coordinator.
+        
+        Args:
+            amount: Number of backpressure events to add (default 1)
+        """
+        self.backpressure_coordinator_to_processor.increment(amount)
+    
+    def increment_backpressure_processor_to_analysis(self, amount: int = 1) -> None:
+        """Increment processor→analysis backpressure counter.
+        
+        Increments when data is available in session_data but
+        AnalysisEngine has not indicated readiness yet.
+        
+        In clock-driven mode (backtest/live), notification gets sent anyway
+        but counter still increments to track bottleneck frequency.
+        
+        High values indicate AnalysisEngine is slower than DataProcessor.
+        
+        Args:
+            amount: Number of backpressure events to add (default 1)
+        """
+        self.backpressure_processor_to_analysis.increment(amount)
+    
+    def get_backpressure_coordinator_to_processor(self) -> int:
+        """Get coordinator→processor backpressure count.
+        
+        Returns:
+            Number of times coordinator was ready but processor was not
+        """
+        return self.backpressure_coordinator_to_processor.get()
+    
+    def get_backpressure_processor_to_analysis(self) -> int:
+        """Get processor→analysis backpressure count.
+        
+        Returns:
+            Number of times processor was ready but analysis engine was not
+        """
+        return self.backpressure_processor_to_analysis.get()
+    
+    # =========================================================================
     # Report Formatting
     # =========================================================================
     
@@ -473,6 +530,17 @@ class PerformanceMetrics:
                 f"Min: {dur_stats['min']/3600:.2f} hrs | "
                 f"Max: {dur_stats['max']/3600:.2f} hrs"
             )
+        
+        # Backpressure (Pipeline Bottlenecks)
+        bp_coord = self.get_backpressure_coordinator_to_processor()
+        bp_proc = self.get_backpressure_processor_to_analysis()
+        if bp_coord > 0 or bp_proc > 0:
+            lines.append("")
+            lines.append("Pipeline Backpressure:")
+            if bp_coord > 0:
+                lines.append(f"  - Coordinator→Processor: {bp_coord:,} events")
+            if bp_proc > 0:
+                lines.append(f"  - Processor→Analysis: {bp_proc:,} events")
         
         lines.append("=" * 50)
         return "\n".join(lines)
@@ -554,6 +622,19 @@ class PerformanceMetrics:
             lines.append(f"  - Trading Days: {self.backtest_trading_days}")
             lines.append(f"  - Avg per Day: {avg_per_day:.2f} s")
         
+        # Pipeline Backpressure (Bottleneck Detection)
+        bp_coord = self.get_backpressure_coordinator_to_processor()
+        bp_proc = self.get_backpressure_processor_to_analysis()
+        if bp_coord > 0 or bp_proc > 0:
+            lines.append("")
+            lines.append("Pipeline Backpressure (Bottlenecks):")
+            if bp_coord > 0:
+                lines.append(f"  - Coordinator→Processor: {bp_coord:,} events")
+                lines.append(f"    (DataProcessor slower than Coordinator)")
+            if bp_proc > 0:
+                lines.append(f"  - Processor→Analysis: {bp_proc:,} events")
+                lines.append(f"    (AnalysisEngine slower than DataProcessor)")
+        
         lines.append("=" * 50)
         return "\n".join(lines)
     
@@ -587,6 +668,8 @@ class PerformanceMetrics:
         self.iterations.reset()
         self.events_handled.reset()
         self.records_streamed.reset()
+        self.backpressure_coordinator_to_processor.reset()
+        self.backpressure_processor_to_analysis.reset()
         
         # Reset backtest summary
         self.data_loading_initial = None
@@ -627,6 +710,8 @@ class PerformanceMetrics:
             'iterations': self.iterations.get(),
             'events_handled': self.events_handled.get(),
             'records_streamed': self.records_streamed.get(),
+            'backpressure_coordinator_to_processor': self.backpressure_coordinator_to_processor.get(),
+            'backpressure_processor_to_analysis': self.backpressure_processor_to_analysis.get(),
         }
     
     def __repr__(self) -> str:

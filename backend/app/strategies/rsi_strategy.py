@@ -7,13 +7,13 @@ Mean-reversion strategy using RSI indicator:
 - 30 <= RSI <= 70: No signal (HOLD)
 """
 
-import logging
 from typing import List, Any
 from datetime import datetime
 
-from app.threads.analysis_engine import BaseStrategy, Signal, SignalAction
+# Logging
+from app.logger import logger
 
-logger = logging.getLogger(__name__)
+from app.threads.analysis_engine import BaseStrategy, Signal, SignalAction
 
 
 class RSIStrategy(BaseStrategy):

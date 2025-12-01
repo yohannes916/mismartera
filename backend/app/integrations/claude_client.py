@@ -15,8 +15,8 @@ class ClaudeClient:
     """
     
     def __init__(self):
-        self.api_key = settings.ANTHROPIC_API_KEY
-        self.model = settings.CLAUDE_MODEL
+        self.api_key = settings.CLAUDE.api_key
+        self.model = settings.CLAUDE.model
         
         if not self.api_key:
             logger.warning("Anthropic API key not configured")
