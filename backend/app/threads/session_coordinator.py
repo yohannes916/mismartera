@@ -1184,42 +1184,37 @@ class SessionCoordinator(threading.Thread):
                     f"Time exceeded market close: {current_time} > {market_close}"
                 )
             
-            # Get next data timestamp from queues
-            next_timestamp = self._get_next_queue_timestamp()
+            # CLOCK-DRIVEN: Advance by fixed 1-minute intervals
+            # (Not data-driven: don't jump to next bar timestamp)
+            next_time = current_time + timedelta(minutes=1)
             
-            if next_timestamp is None:
-                # No more data - advance to market close and end
-                logger.info("[SESSION_FLOW] PHASE_5.WARNING: No more data in queues")
-                logger.info("No more data in queues, advancing to market close")
-                self._time_manager.set_backtest_time(market_close)
-                logger.info("[SESSION_FLOW] PHASE_5.END: Exiting streaming (no data)")
-                break
-            
-            # Check if next data is beyond market close
-            if next_timestamp > market_close:
+            # Check if next time exceeds market close
+            if next_time > market_close:
                 # Advance to market close and end
                 logger.info(
-                    f"Next data ({next_timestamp.time()}) beyond market close "
+                    f"Next time ({next_time.time()}) beyond market close "
                     f"({market_close.time()}), advancing to close"
                 )
                 self._time_manager.set_backtest_time(market_close)
                 break
             
-            # Advance time to next data timestamp
+            # Advance time by 1 minute
             logger.debug(
-                f"[{iteration}] Advancing time: {current_time.time()} -> "
-                f"{next_timestamp.time()}"
+                f"[{iteration}] Clock-driven advance: {current_time.time()} -> "
+                f"{next_time.time()}"
             )
-            self._time_manager.set_backtest_time(next_timestamp)
+            self._time_manager.set_backtest_time(next_time)
             
-            # Process data at this timestamp
+            # Process ALL bars with timestamp <= next_time
+            # This handles gaps gracefully (processes multiple bars if they exist,
+            # processes none if data gap)
             bars_processed = self._process_queue_data_at_timestamp(
-                next_timestamp
+                next_time
             )
             total_bars_processed += bars_processed
             
             if bars_processed > 0:
-                logger.debug(f"Processed {bars_processed} bars at {next_timestamp.time()}")
+                logger.debug(f"Processed {bars_processed} bars at {next_time.time()}")
             
             # Clock-driven delay (if speed_multiplier > 0)
             if self.mode == "backtest" and self.session_config.backtest_config:
@@ -2164,13 +2159,13 @@ class SessionCoordinator(threading.Thread):
         return min_timestamp
 
     def _process_queue_data_at_timestamp(self, timestamp: datetime) -> int:
-        """Process all queue data at the given timestamp.
+        """Process all queue data up to and including the given timestamp.
 
-        Consumes bars from queues at this exact timestamp and
-        adds them to session_data.
+        Consumes bars from queues with timestamp <= current time.
+        This supports clock-driven mode where time advances by fixed intervals.
 
         Args:
-            timestamp: Timestamp to process
+            timestamp: Current time - process all bars up to this time
 
         Returns:
             Number of bars processed
@@ -2178,18 +2173,19 @@ class SessionCoordinator(threading.Thread):
         bars_processed = 0
         bars_by_symbol = {}  # Track bars per symbol for logging
 
-        logger.debug(f"[SESSION_FLOW] PHASE_5.3: Processing bars at {timestamp.time()}")
+        logger.debug(f"[SESSION_FLOW] PHASE_5.3: Processing bars up to {timestamp.time()}")
 
         # Track dropped bars (outside regular hours)
         bars_dropped = 0
         bars_dropped_by_symbol = {}
 
-        # Process all queues that have data at this timestamp
+        # Process all queues that have data at or before this timestamp
         for queue_key, queue in self._bar_queues.items():
             symbol, interval = queue_key
 
-            # Consume all bars at this exact timestamp from this queue
-            while queue and queue[0].timestamp == timestamp:
+            # Consume all bars with timestamp <= current time
+            # (Clock-driven: process multiple bars if time advanced past them)
+            while queue and queue[0].timestamp <= timestamp:
                 bar = queue.popleft()
                 
                 # DEBUG: Log each bar being processed from queue

@@ -2321,6 +2321,232 @@ def validate_session_config(config: dict) -> tuple[bool, list[str]]:
      - Backtest doesn't need gap filling (all data pre-loaded)
      - Always event-driven (no periodic mode) for simplicity and performance
 
+## Stream Determination & Interval Requirements
+
+### Overview
+
+**Purpose**: Determine which interval to stream and which to generate based on session requirements.
+
+**Key Principle**: Analyze what the session NEEDS first (from config + implicit requirements), THEN validate database has it. No fallbacks, no magic - just validation.
+
+---
+
+### Requirement Analysis
+
+#### 1. Explicit Requirements
+- **Source**: `session_config.session_data_config.streams`
+- **Examples**: `["1m", "5m", "15m"]`, `["5s", "1m"]`, `["quotes"]`
+- **Rule**: User explicitly requests these intervals
+
+#### 2. Implicit Requirements (Derivation)
+- **Rule 1**: Sub-second intervals (5s, 10s, 15s, 30s) **require 1s base**
+  - Example: Request 5s → adds 1s (only valid source)
+- **Rule 2**: Minute intervals (5m, 15m, 30m, 1h) **require 1m base**
+  - Example: Request 5m → adds 1m (preferred source, not 1s)
+- **Rule 3**: Hour/day intervals (4h, 1d, 5d) **require 1m base**
+  - Example: Request 1d → adds 1m (aggregation from 1m, not direct from 1d table)
+- **Rationale**: System prefers 1m as standard base interval unless sub-second data needed
+
+#### 3. Implicit Requirements (Indicators)
+- **Source**: Indicator definitions requiring specific intervals
+- **Example**: Volume profile indicator needs 1m bars even if user only requests 1d
+- **Rule**: Add indicator requirements to implicit list
+
+#### 4. Base Interval Selection
+- **Rule**: Choose SMALLEST interval that satisfies ALL requirements
+- **Priority**: 1s < 1m < 1d
+- **Examples**:
+  - Request [5s, 5m] → Base: 1s (5s needs 1s, overrides 1m preference)
+  - Request [5m, 15m] → Base: 1m (both satisfied by 1m)
+  - Request [1d] → Base: 1m (1d derived from 1m aggregation)
+  - Request [1d] + Indicator needs 1m → Base: 1m
+
+---
+
+### Database Validation
+
+#### 5. Exact Match Validation
+- **Rule**: Database MUST have the exact required base interval
+- **No Fallbacks**: If 1s required but only 1m available → FAIL
+- **Validation**: Query specific table (BarData_1s, BarData_1m, or BarData_1d)
+- **Date Range**: Use TimeManager.backtest_start_date and backtest_end_date
+- **Multi-Symbol**: ALL symbols must have required interval or session fails
+
+#### 6. Error Handling
+- **Missing Data Error**:
+  ```
+  Cannot start session: Required interval 1s not available for AAPL
+  Session requires 1s to generate: [5s, 1m, 5m]
+  ```
+- **Clear Reasoning**: Error message explains WHY interval is needed
+- **Fail Fast**: Session startup prevented if requirements cannot be met
+
+---
+
+### Streaming Rules
+
+#### 7. Base Interval Streaming
+- **Backtest Mode**: Stream ONLY base interval (1s, 1m, or 1d)
+- **Live Mode**: Stream ONLY base interval (1s, 1m, or 1d)
+- **Rule**: Never stream derived intervals (5m, 15m, etc.)
+- **Enforcement**: System validation prevents streaming non-base intervals
+
+#### 8. Quote Handling
+- **Backtest Mode**:
+  - Never stream quotes (Requirement 22)
+  - Generate synthetic quotes from latest bar close price (Requirement 31-34)
+  - Bid = Ask = close price (zero spread)
+  - Quote timestamp matches bar timestamp
+  - Priority: base bar > any derived bar
+- **Live Mode**:
+  - Stream quotes ONLY if explicitly requested in config (Requirement 21, 35)
+  - Never generate quotes (only stream real ones) (Requirement 36)
+- **Configuration**: `"streams": ["quotes"]` enables quote streaming in live mode
+
+#### 9. Tick Handling
+- **Backtest Mode**: Never stream ticks (Requirement 20)
+- **Live Mode**: Never stream ticks (Requirement 19)
+- **Rationale**: Ticks not supported in current architecture
+
+#### 10. Single Base Per Symbol
+- **Rule**: Only 1 base interval streamed per symbol (Requirement 7)
+- **Multi-Symbol**: All symbols use SAME base interval (system-wide decision) (Requirement 60)
+- **Conflict Resolution**: If symbols have different needs, choose smallest (Requirement 61)
+
+---
+
+### Bar Generation Rules
+
+#### 11. Derived Interval Generation
+- **Mechanism**: Data Upkeep Thread generates all derived intervals
+- **Source**: Base interval bars from session_data
+- **On-the-Fly**: Generated as base bars arrive (progressive computation)
+- **Examples**:
+  - Base 1s → Generate: 5s, 10s, 15s, 30s, 1m, 5m, 15m, 30m, 1h, 4h, 1d
+  - Base 1m → Generate: 5m, 15m, 30m, 1h, 4h, 1d
+  - Base 1d → No derivation (1d is terminal interval)
+
+#### 12. 100% Completeness Requirement
+- **Rule**: Only generate derived bars if source is 100% complete (Requirement 24)
+- **Enforcement**: Data Upkeep Thread checks quality before generation
+- **Incomplete Source**: Skip generation and log warning (Requirement 25)
+- **Quality Tracking**: Track quality percentage for all intervals (Requirement 39)
+- **Quality Calculation**: Uses TimeManager for expected bar counts (Requirement 41)
+- **Market Hours**: Quality respects trading hours, no bars expected outside hours (Requirement 42)
+- **Holidays**: Quality respects early closes and holidays (Requirement 43)
+
+#### 13. Historical Bar Generation
+- **Rule**: Same as streaming - generate derived from base interval (Requirement 47)
+- **Completeness**: Historical bars must be 100% complete (Requirement 37)
+- **Incomplete**: Log warning but continue session (Requirement 38)
+- **No Special Cases**: Historical uses same generation rules as streaming
+
+---
+
+### Gap Filling (Live Mode Only)
+
+#### 14. Gap Filling Rules
+- **Active**: ONLY in live mode (Requirement 48, 52)
+- **Never in Backtest**: Backtest data is static, cannot fill gaps (Requirement 52)
+- **Source Requirement**: Only fill if source interval is 100% complete (Requirement 49)
+- **Direction**: Only fill from smaller to larger (1s→1m, 1m→1h) (Requirement 50)
+- **Retry Logic**: Track failed attempts with exponential backoff (Requirement 51)
+- **Non-Blocking**: Gap filling does not block data pipeline
+
+---
+
+### Mode-Specific Behaviors
+
+#### 15. Backtest Mode
+- **Time Advancement**: Based on data timestamps (Requirement 53)
+- **Speed Multiplier**: Controls pacing delay between bars (Requirement 54)
+- **Data Source**: All data from database (Requirement 55)
+- **No API Calls**: No external data fetching
+- **Quote Generation**: Synthetic quotes from bars (Requirement 32-34)
+
+#### 16. Live Mode
+- **Time**: Real-time from TimeManager (Requirement 56)
+- **No Speed Multiplier**: Always real-time (Requirement 57)
+- **Data Source**: Data from API streams via WebSocket (Requirement 58)
+- **Quote Streaming**: Real quotes if requested (Requirement 21, 35)
+- **Gap Filling**: Active to fill missing bars (Requirement 48)
+
+---
+
+### Configuration Validation
+
+#### 17. Interval Format Validation
+- **Valid Formats**: `1s`, `5s`, `10s`, `15s`, `30s`, `1m`, `5m`, `15m`, `30m`, `1h`, `4h`, `1d`, `5d`, `quotes`
+- **Invalid**: `5x`, `ticks`, or any non-standard format (Requirement 65, 75)
+- **Error**: Clear message explaining invalid format
+
+#### 18. Configuration Rules
+- **No Ticks**: Ticks not supported (Requirement 76)
+- **Quote Validation**: Quotes only allowed based on mode (Requirement 77)
+- **Warning**: If requesting intervals that could be auto-generated (Requirement 78)
+
+---
+
+### Examples
+
+#### Example 1: Sub-Second Trading
+```json
+{
+  "streams": ["5s", "10s", "1m"],
+  "indicator_requirements": []
+}
+```
+**Analysis**:
+- Explicit: 5s, 10s, 1m
+- Implicit: 1s (only source for 5s, 10s)
+- Base: **1s**
+- Derivable: 5s, 10s, 1m
+- Validation: Check DB has 1s data for all symbols
+
+#### Example 2: Standard Day Trading
+```json
+{
+  "streams": ["1m", "5m", "15m"],
+  "indicator_requirements": []
+}
+```
+**Analysis**:
+- Explicit: 1m, 5m, 15m
+- Implicit: 1m (can generate 5m, 15m)
+- Base: **1m**
+- Derivable: 5m, 15m
+- Validation: Check DB has 1m data for all symbols
+
+#### Example 3: Swing Trading with Volume Analysis
+```json
+{
+  "streams": ["1d"],
+  "indicator_requirements": ["1m"]
+}
+```
+**Analysis**:
+- Explicit: 1d
+- Implicit: 1m (indicator needs it)
+- Base: **1m**
+- Derivable: 1d
+- Validation: Check DB has 1m data for all symbols
+
+---
+
+### Implementation Status
+
+- **Phase 1**: Foundation (Requirement Analyzer) - ⏳ IN PROGRESS
+- **Phase 2**: Database Validation - 📋 PLANNED
+- **Phase 3**: Feature Flag - 📋 PLANNED
+- **Phase 4**: SessionCoordinator Integration - 📋 PLANNED
+- **Phase 5**: Strategy Application - 📋 PLANNED
+- **Phase 6**: Completeness Enforcement - 📋 PLANNED
+- **Phase 7**: Logging & Diagnostics - 📋 PLANNED
+- **Phase 8**: Test Re-enablement - 📋 PLANNED
+- **Phase 9**: Production Ready - 📋 PLANNED
+
+---
+
 ## Open Questions
 
 1. **Multi-Exchange Support**: Phase 2 feature
@@ -2338,6 +2564,6 @@ def validate_session_config(config: dict) -> tuple[bool, list[str]]:
 
 ---
 
-**Version**: 1.0  
-**Last Updated**: 2025-11-28  
-**Status**: DRAFT - Architecture Design Phase
+**Version**: 1.1  
+**Last Updated**: 2025-12-01  
+**Status**: DRAFT - Architecture Design Phase (Stream Determination Added)
