@@ -205,17 +205,45 @@ class GapFillerConfig:
 
 
 @dataclass
+class StreamingConfig:
+    """Streaming configuration for session coordinator.
+    
+    Controls automatic session state management based on data lag.
+    
+    Attributes:
+        catchup_threshold_seconds: Lag threshold for session deactivation (default: 60)
+                                   If streaming data is more than this many seconds behind
+                                   current time, session is auto-deactivated to prevent
+                                   notifying analysis engine of old data.
+        catchup_check_interval: Check lag every N bars (default: 10)
+                               Lower = more responsive, higher = less overhead
+    """
+    catchup_threshold_seconds: int = 60
+    catchup_check_interval: int = 10
+    
+    def validate(self) -> None:
+        """Validate streaming configuration."""
+        if self.catchup_threshold_seconds < 1:
+            raise ValueError("catchup_threshold_seconds must be >= 1")
+        
+        if not (1 <= self.catchup_check_interval <= 100):
+            raise ValueError("catchup_check_interval must be between 1 and 100")
+
+
+@dataclass
 class SessionDataConfig:
     """Session data configuration.
     
     Attributes:
         symbols: List of symbols to trade/analyze
         streams: Requested data streams (coordinator determines streamed vs generated)
+        streaming: Streaming behavior configuration
         historical: Historical data and indicators configuration
         gap_filler: Gap filler configuration (DataQualityManager)
     """
     symbols: List[str]
     streams: List[str]
+    streaming: StreamingConfig = field(default_factory=StreamingConfig)
     historical: HistoricalConfig = field(default_factory=HistoricalConfig)
     gap_filler: GapFillerConfig = field(default_factory=GapFillerConfig)
     
@@ -249,6 +277,7 @@ class SessionDataConfig:
                 )
         
         # Validate sub-configs
+        self.streaming.validate()
         self.historical.validate(self.symbols)
         self.gap_filler.validate()
 
@@ -468,6 +497,13 @@ class SessionConfig:
             indicators=indicators
         )
         
+        # Parse streaming config
+        stream_data = sd_data.get("streaming", {})
+        streaming = StreamingConfig(
+            catchup_threshold_seconds=stream_data.get("catchup_threshold_seconds", 60),
+            catchup_check_interval=stream_data.get("catchup_check_interval", 10)
+        )
+        
         # Parse gap_filler config
         gf_data = sd_data.get("gap_filler", {})
         gap_filler = GapFillerConfig(
@@ -479,6 +515,7 @@ class SessionConfig:
         session_data_config = SessionDataConfig(
             symbols=symbols,
             streams=streams,
+            streaming=streaming,
             historical=historical,
             gap_filler=gap_filler
         )
@@ -576,6 +613,10 @@ class SessionConfig:
         result["session_data_config"] = {
             "symbols": self.session_data_config.symbols,
             "streams": self.session_data_config.streams,
+            "streaming": {
+                "catchup_threshold_seconds": self.session_data_config.streaming.catchup_threshold_seconds,
+                "catchup_check_interval": self.session_data_config.streaming.catchup_check_interval
+            },
             "historical": {
                 "enable_quality": self.session_data_config.historical.enable_quality,
                 "data": [
