@@ -581,6 +581,7 @@ data list-dynamic
 **Commits:**
 - `d9628c2` - Add tests and CLI commands for dynamic symbol management
 - `d94dd75` - Fix: Register dynamic symbol commands in CLI help and tab completion
+- `a64744b` - Fix: Wire up dynamic symbol commands in CLI routing
 
 ---
 
@@ -608,9 +609,9 @@ data list-dynamic
 
 | Metric | Value |
 |--------|-------|
-| **Total Lines Added** | ~1,330 lines |
-| **Files Modified** | 4 core + 2 test/CLI files |
-| **Commits** | 13 commits |
+| **Total Lines Added** | ~1,350 lines |
+| **Files Modified** | 5 core + 2 test/CLI files |
+| **Commits** | 17 commits |
 | **Time Taken** | ~3 hours |
 | **Core Flows** | 2 modes (backtest fully functional, live stubs) |
 | **Safety Features** | try/finally, Event objects, trading hours validation |
@@ -648,6 +649,6 @@ data list-dynamic
 
 ---
 
-**Last Updated:** 2025-12-01 17:00 PST  
+**Last Updated:** 2025-12-01 17:10 PST  
 **Status:** ✅ **PRODUCTION READY - BACKTEST MODE COMPLETE**  
-**Ready For:** Production use in backtest mode with full CLI interface, help system, and test coverage
+**Ready For:** Production use in backtest mode with fully wired CLI, help system, and test coverage
