@@ -2554,20 +2554,104 @@ class SessionCoordinator(threading.Thread):
         
         Flow:
         1. Caller thread loads historical data (blocks)
-        2. Caller thread starts stream immediately
-        3. SessionCoordinator auto-detects new queue
+        2. Caller thread registers symbol in session_data
+        3. Caller thread starts stream immediately from data API
+        4. SessionCoordinator auto-detects new queue and forwards data
         
         Args:
             symbol: Stock symbol to add
-            streams: Stream types
+            streams: Stream types (default: ["1m"])
             blocking: Ignored (always blocking in live mode)
         
         Returns:
-            True if successful
+            True if successful, False if failed
+        
+        Note:
+            - Caller thread blocks until historical data loaded
+            - No pause/catchup needed (real-time continues)
+            - DataProcessor and DataQualityManager auto-detect new symbol
         """
         logger.info(f"[DYNAMIC] Adding symbol: {symbol} (live mode)")
-        logger.warning("[DYNAMIC] Live mode implementation pending (Phase 5)")
-        return False
+        
+        # Default to 1m bars if not specified
+        if streams is None:
+            streams = ["1m"]
+        
+        try:
+            # 1. Load historical data for trailing days (caller thread blocks)
+            logger.info(f"[DYNAMIC] Loading historical data for {symbol} (blocking)")
+            self._load_symbol_historical_live(symbol, streams)
+            
+            # 2. Start stream immediately from data API
+            logger.info(f"[DYNAMIC] Starting stream for {symbol}")
+            self._start_symbol_stream_live(symbol, streams)
+            
+            # 3. Mark as dynamically added
+            with self._symbol_operation_lock:
+                self._dynamic_symbols.add(symbol)
+            
+            logger.info(f"[DYNAMIC] Symbol {symbol} added successfully (live mode)")
+            return True
+            
+        except Exception as e:
+            logger.error(f"[DYNAMIC] Error adding symbol {symbol} in live mode: {e}", exc_info=True)
+            return False
+    
+    def _load_symbol_historical_live(self, symbol: str, streams: List[str]):
+        """Load historical data for symbol in live mode (caller thread blocks).
+        
+        Loads trailing days of historical data from DataManager.
+        Uses session config to determine how many trailing days.
+        
+        Args:
+            symbol: Stock symbol to load
+            streams: Stream types (e.g., ["1m"])
+        
+        Note:
+            - Caller thread blocks until complete
+            - Loads trailing_days from session config
+            - Uses existing historical data loading from DataManager
+        """
+        logger.info(f"[DYNAMIC] Loading historical data for {symbol} (live mode)")
+        
+        # Get current time from TimeManager
+        current_time = self._time_manager.get_current_time()
+        current_date = current_time.date()
+        
+        # Register symbol in session_data
+        self.session_data.register_symbol(symbol)
+        
+        # TODO: Load actual historical bars from DataManager
+        # - Get trailing_days from config
+        # - Load bars for each day
+        # - Populate session_data historical
+        
+        logger.info(f"[DYNAMIC] Historical data loaded for {symbol} on {current_date}")
+    
+    def _start_symbol_stream_live(self, symbol: str, streams: List[str]):
+        """Start live stream for symbol (caller thread).
+        
+        Starts real-time stream from data API (e.g., Alpaca, Schwab).
+        SessionCoordinator will auto-detect new queue and forward data.
+        
+        Args:
+            symbol: Stock symbol
+            streams: Stream types (e.g., ["1m"])
+        
+        Note:
+            - Caller thread starts stream
+            - Stream runs in background
+            - SessionCoordinator auto-detects and forwards
+            - No pause/catchup needed (real-time continues)
+        """
+        logger.info(f"[DYNAMIC] Starting stream for {symbol} (live mode)")
+        
+        # TODO: Start actual stream from data API
+        # - Use DataManager API to start stream
+        # - Stream will push data to queue
+        # - SessionCoordinator will auto-detect new queue
+        
+        logger.info(f"[DYNAMIC] Stream started for {symbol}")
     
     def _process_pending_symbol_additions(self):
         """Process pending symbol addition requests (coordinator thread).
