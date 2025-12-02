@@ -1,7 +1,7 @@
 # Unified Symbol Management Implementation Progress
 
 **Date:** 2025-12-02  
-**Status:** Phase 3 Complete ✅ | Phase 4 Next
+**Status:** Phases 1-4 Complete ✅ | Testing Next
 
 ---
 
@@ -148,11 +148,50 @@
 
 ---
 
-## Next Steps
+### ✅ Phase 4: DataProcessor Updates (100% Complete)
 
-### Phase 4: DataProcessor Updates (~15 min)
-- Use `internal=True` for reads
-- Check `session_active` before external notifications
+**Files Modified:**
+- `backend/app/threads/data_processor.py`
+- `backend/app/managers/data_manager/session_data.py`
+
+**Changes:**
+
+1. **Internal Data Access** (data_processor.py)
+   - Line 369: `get_bars_ref(symbol, 1, internal=True)`
+   - Line 406: `get_bars_ref(symbol, interval, internal=True)`
+   - Line 420: `get_symbol_data(symbol, internal=True)`
+   - DataProcessor can read data during catchup/lag
+
+2. **Session-Aware Notifications** (line 316)
+   - Check `session_data._session_active` before notifying
+   - Skip AnalysisEngine notifications when session inactive
+   - Log when notifications are skipped
+
+3. **SessionData Enhancement** (session_data.py line 401)
+   - Added `internal` parameter to `get_symbol_data()`
+   - Consistent with other read methods
+
+**Flow During Lag:**
+```
+Lag > 60s detected
+  ↓
+session_data.deactivate_session()
+  ↓
+DataProcessor reads data (internal=True) ✓
+DataProcessor skips notifications (session inactive) ✓
+  ↓
+Caught up, lag ≤ 60s
+  ↓
+session_data.activate_session()
+  ↓
+DataProcessor resumes notifications ✓
+```
+
+**Commit:** `eb0d3d7` - Phase 4: DataProcessor updates
+
+---
+
+## Next Steps
 
 ### Phase 5: Testing
 - Unit tests for lag detection
