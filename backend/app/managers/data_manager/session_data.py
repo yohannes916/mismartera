@@ -267,7 +267,7 @@ class SessionData:
         self.historical_bars_intervals: List[int] = []
         
         # Session state
-        self._session_active: bool = False  # Managed by upkeep thread
+        self._session_active: bool = False  # Managed by coordinator thread
         
         # Per-symbol data structures
         self._symbols: Dict[str, SymbolSessionData] = {}
@@ -311,15 +311,15 @@ class SessionData:
             self.historical_bars_intervals = config.historical_bars.intervals
             logger.info(f"  ✓ Historical bars: {config.historical_bars.trailing_days} days, intervals {config.historical_bars.intervals}")
         
-        # Data upkeep configuration
-        if config.data_upkeep:
-            settings.DATA_UPKEEP_ENABLED = config.data_upkeep.enabled
-            settings.DATA_UPKEEP_CHECK_INTERVAL_SECONDS = config.data_upkeep.check_interval_seconds
-            settings.DATA_UPKEEP_RETRY_MISSING_BARS = config.data_upkeep.retry_missing_bars
-            settings.DATA_UPKEEP_MAX_RETRIES = config.data_upkeep.max_retries
-            settings.DATA_UPKEEP_DERIVED_INTERVALS = config.data_upkeep.derived_intervals
-            settings.DATA_UPKEEP_AUTO_COMPUTE_DERIVED = config.data_upkeep.auto_compute_derived
-            logger.info(f"  ✓ Data upkeep: check every {config.data_upkeep.check_interval_seconds}s, derived intervals {config.data_upkeep.derived_intervals}")
+        # # Data upkeep configuration
+        # if config.data_upkeep:
+        #     settings.DATA_UPKEEP_ENABLED = config.data_upkeep.enabled
+        #     settings.DATA_UPKEEP_CHECK_INTERVAL_SECONDS = config.data_upkeep.check_interval_seconds
+        #     settings.DATA_UPKEEP_RETRY_MISSING_BARS = config.data_upkeep.retry_missing_bars
+        #     settings.DATA_UPKEEP_MAX_RETRIES = config.data_upkeep.max_retries
+        #     settings.DATA_UPKEEP_DERIVED_INTERVALS = config.data_upkeep.derived_intervals
+        #     settings.DATA_UPKEEP_AUTO_COMPUTE_DERIVED = config.data_upkeep.auto_compute_derived
+        #     logger.info(f"  ✓ Data upkeep: check every {config.data_upkeep.check_interval_seconds}s, derived intervals {config.data_upkeep.derived_intervals}")
         
         # Prefetch configuration (logged only, not stored in settings)
         if config.prefetch:
@@ -611,7 +611,7 @@ class SessionData:
     # ==================== FAST ACCESS METHODS ====================
     # These methods are optimized for AnalysisEngine and other high-frequency readers
     
-    def get_latest_bar(self, symbol: str, interval: int = 1) -> Optional[BarData]:
+    def get_latest_bar(self, symbol: str, interval: int = 1, internal: bool = False) -> Optional[BarData]:
         """Get the most recent bar for a symbol (O(1) operation).
         
         Optimized for high-frequency access by AnalysisEngine.
@@ -619,15 +619,19 @@ class SessionData:
         Args:
             symbol: Stock symbol
             interval: Bar interval in minutes (1, 5, 15, etc.)
+            internal: If True, bypass session_active check.
+                     Use True for internal threads (DataProcessor, DataQualityManager).
+                     Use False (default) for external subscribers (AnalysisEngine).
             
         Returns:
-            Most recent bar or None (None if session deactivated)
+            Most recent bar or None if no data (or session deactivated for external callers)
         """
-        # Block access during catchup (Phase 2: Dynamic symbol management)
-        if not self._check_session_active():
+        # Block external callers during deactivation
+        if not internal and not self._session_active:
             return None
         
         symbol = symbol.upper()
+        
         with self._lock:
             symbol_data = self._symbols.get(symbol)
             if symbol_data is None:
@@ -638,7 +642,8 @@ class SessionData:
         self,
         symbol: str,
         n: int,
-        interval: int = 1
+        interval: int = 1,
+        internal: bool = False
     ) -> List[BarData]:
         """Get the last N bars for a symbol (efficient O(N) operation).
         
@@ -648,15 +653,17 @@ class SessionData:
             symbol: Stock symbol
             n: Number of bars to retrieve
             interval: Bar interval in minutes
+            internal: If True, bypass session_active check.
             
         Returns:
-            List of last N bars (empty list if session deactivated)
+            List of last N bars (may be fewer if not enough data, or None if session deactivated)
         """
-        # Block access during catchup (Phase 2: Dynamic symbol management)
-        if not self._check_session_active():
-            return []
+        # Block external callers during deactivation
+        if not internal and not self._session_active:
+            return None
         
         symbol = symbol.upper()
+        
         with self._lock:
             symbol_data = self._symbols.get(symbol)
             if symbol_data is None:
@@ -667,7 +674,8 @@ class SessionData:
         self,
         symbol: str,
         timestamp: datetime,
-        interval: int = 1
+        interval: int = 1,
+        internal: bool = False
     ) -> List[BarData]:
         """Get all bars since a specific timestamp (efficient backward search).
         
@@ -675,36 +683,40 @@ class SessionData:
             symbol: Stock symbol
             timestamp: Start timestamp
             interval: Bar interval in minutes
+            internal: If True, bypass session_active check.
             
         Returns:
             List of bars after timestamp (empty list if session deactivated)
         """
-        # Block access during catchup (Phase 2: Dynamic symbol management)
-        if not self._check_session_active():
+        # Block external callers during deactivation
+        if not internal and not self._session_active:
             return []
         
         symbol = symbol.upper()
+        
         with self._lock:
             symbol_data = self._symbols.get(symbol)
             if symbol_data is None:
                 return []
             return symbol_data.get_bars_since(timestamp, interval)
     
-    def get_bar_count(self, symbol: str, interval: int = 1) -> int:
+    def get_bar_count(self, symbol: str, interval: int = 1, internal: bool = False) -> int:
         """Get count of available bars (O(1) operation).
         
         Args:
             symbol: Stock symbol
             interval: Bar interval in minutes
+            internal: If True, bypass session_active check.
             
         Returns:
             Number of bars available (0 if session deactivated)
         """
-        # Block access during catchup (Phase 2: Dynamic symbol management)
-        if not self._check_session_active():
+        # Block external callers during deactivation
+        if not internal and not self._session_active:
             return 0
         
         symbol = symbol.upper()
+        
         with self._lock:
             symbol_data = self._symbols.get(symbol)
             if symbol_data is None:
@@ -714,7 +726,8 @@ class SessionData:
     def get_latest_bars_multi(
         self,
         symbols: List[str],
-        interval: int = 1
+        interval: int = 1,
+        internal: bool = False
     ) -> Dict[str, Optional[BarData]]:
         """Get latest bars for multiple symbols in one call (batch operation).
         
@@ -723,6 +736,7 @@ class SessionData:
         Args:
             symbols: List of stock symbols
             interval: Bar interval in minutes
+            internal: If True, bypass session_active check.
             
         Returns:
             Dictionary mapping symbol to latest bar
@@ -741,8 +755,9 @@ class SessionData:
     def get_bars_ref(
         self,
         symbol: str,
-        interval: int = 1
-    ) -> Union[Deque[BarData], List[BarData]]:
+        interval: int = 1,
+        internal: bool = False
+    ) -> Union[Deque[BarData], List[BarData], None]:
         """Get direct reference to bars container (ZERO-COPY, HIGH PERFORMANCE).
         
         ⚠️ WARNING: Returns mutable container reference.
@@ -758,20 +773,16 @@ class SessionData:
         Args:
             symbol: Stock symbol
             interval: Bar interval in minutes (1, 5, 15, etc.)
+            internal: If True, bypass session_active check.
             
         Returns:
             Direct reference to bars deque (1m) or list (derived)
             Empty container if symbol/interval not found
-        
-        Example:
-            # Zero-copy iteration
-            bars_ref = session_data.get_bars_ref("AAPL", 1)
-            for bar in bars_ref:
-                price = bar.close
-            
-            # Zero-copy slice (only sliced portion copied)
-            last_20 = list(bars_ref)[-20:]
         """
+        # Block external callers during deactivation
+        if not internal and not self._session_active:
+            return None
+        
         symbol = symbol.upper()
         
         with self._lock:
@@ -790,7 +801,8 @@ class SessionData:
         symbol: str,
         interval: int = 1,
         start: Optional[datetime] = None,
-        end: Optional[datetime] = None
+        end: Optional[datetime] = None,
+        internal: bool = False
     ) -> List[BarData]:
         """Get bars for a symbol (CREATES COPY).
         
@@ -809,10 +821,15 @@ class SessionData:
             interval: Bar interval in minutes (1, 5, 15, etc.)
             start: Optional start time filter
             end: Optional end time filter
+            internal: If True, bypass session_active check.
             
         Returns:
             List of bars matching criteria (copy created)
         """
+        # Block external callers during deactivation
+        if not internal and not self._session_active:
+            return []
+        
         symbol = symbol.upper()
         
         with self._lock:
@@ -839,15 +856,20 @@ class SessionData:
             
             return bars
     
-    def get_session_metrics(self, symbol: str) -> Dict[str, any]:
+    def get_session_metrics(self, symbol: str, internal: bool = False) -> Dict[str, any]:
         """Get current session metrics for a symbol.
         
         Args:
             symbol: Stock symbol
+            internal: If True, bypass session_active check.
             
         Returns:
             Dictionary with session metrics
         """
+        # Block external callers during deactivation
+        if not internal and not self._session_active:
+            return {}
+        
         symbol = symbol.upper()
         
         with self._lock:
@@ -1022,7 +1044,8 @@ class SessionData:
         self,
         symbol: str,
         days_back: int = 0,
-        interval: int = 1
+        interval: int = 1,
+        internal: bool = False
     ) -> Dict[date, List[BarData]]:
         """Get historical bars for past N days.
         
@@ -1030,10 +1053,15 @@ class SessionData:
             symbol: Stock symbol
             days_back: Number of days to retrieve (0 = all)
             interval: Bar interval
+            internal: If True, bypass session_active check.
             
         Returns:
             Dictionary mapping date to bars for that date
         """
+        # Block external callers during deactivation
+        if not internal and not self._session_active:
+            return {}
+        
         symbol = symbol.upper()
         
         with self._lock:
@@ -1053,7 +1081,8 @@ class SessionData:
     def get_all_bars_including_historical(
         self,
         symbol: str,
-        interval: int = 1
+        interval: int = 1,
+        internal: bool = False
     ) -> List[BarData]:
         """Get all bars including historical and current session.
         
@@ -1062,10 +1091,15 @@ class SessionData:
         Args:
             symbol: Stock symbol
             interval: Bar interval
+            internal: If True, bypass session_active check.
             
         Returns:
             All bars chronologically ordered
         """
+        # Block external callers during deactivation
+        if not internal and not self._session_active:
+            return []
+        
         symbol = symbol.upper()
         
         with self._lock:
@@ -1207,6 +1241,44 @@ class SessionData:
     def clear_all(self) -> None:
         """Clear all session data (alias for clear(), kept for backwards compatibility)."""
         self.clear()
+    
+    def remove_symbol(self, symbol: str) -> bool:
+        """Remove symbol and all its data (thread-safe).
+        
+        Called by SessionCoordinator when a symbol is removed from the session.
+        
+        Args:
+            symbol: Symbol to remove
+        
+        Returns:
+            True if removed, False if not found
+        """
+        symbol = symbol.upper()
+        
+        with self._lock:
+            if symbol not in self._symbols:
+                return False
+            
+            # Remove SymbolSessionData
+            del self._symbols[symbol]
+            
+            # Remove from active symbols
+            self._active_symbols.discard(symbol)
+            
+            # Remove from active streams
+            streams_to_remove = [
+                key for key in self._active_streams.keys() 
+                if key[0] == symbol
+            ]
+            for key in streams_to_remove:
+                del self._active_streams[key]
+            
+            logger.info(
+                f"[SESSION_DATA] Removed {symbol} "
+                f"({len(self._symbols)} symbols remaining)"
+            )
+            
+            return True
     
     def get_active_symbols(self) -> Set[str]:
         """Get set of active symbols (thread-safe read).
@@ -1417,16 +1489,21 @@ class SessionData:
             # No data available
             return None
     
-    def get_bars(self, symbol: str, interval: str) -> List[BarData]:
+    def get_bars(self, symbol: str, interval: str, internal: bool = False) -> Optional[List[BarData]]:
         """Get all bars (historical + current session) for a symbol/interval.
         
         Args:
             symbol: Stock symbol
             interval: Bar interval (e.g., "1m", "5m")
+            internal: If True, bypass session_active check.
             
         Returns:
-            List of bars in chronological order
+            List of bars in chronological order, or None if session deactivated
         """
+        # Block external callers during deactivation
+        if not internal and not self._session_active:
+            return None
+        
         symbol = symbol.upper()
         
         # Normalize interval
