@@ -10,8 +10,12 @@
     "prefetch_days": 3
   },
   "session_data_config": {
-    "symbols": ["RIVN", "AAPL"],
+    "symbols": ["RIVN"],
     "streams": ["1m", "5m", "10m", "quotes"],
+    "streaming": {
+      "catchup_threshold_seconds": 60,
+      "catchup_check_interval": 10
+    },
     "historical": {
       "enable_quality": true,
       "data": [
