@@ -8,6 +8,7 @@
 ## Completed
 
 ### ✅ Phase 1: Configuration Models (100% Complete)
+### ✅ Phase 2: SessionData Updates (100% Complete)
 
 **Files Modified:**
 - `backend/app/models/session_config.py`
@@ -48,13 +49,56 @@
 
 ---
 
+### ✅ Phase 2: SessionData Updates (100% Complete)
+
+**Files Modified:**
+- `backend/app/managers/data_manager/session_data.py`
+
+**Changes:**
+
+1. **Added `internal` Parameter to All Read Methods**
+   - `get_latest_bar(internal: bool = False)`
+   - `get_last_n_bars(internal: bool = False)`
+   - `get_bars_since(internal: bool = False)`
+   - `get_bar_count(internal: bool = False)`
+   - `get_latest_bars_multi(internal: bool = False)`
+   - `get_bars_ref(internal: bool = False)`
+   - `get_bars(internal: bool = False)` - both overloads
+   - `get_session_metrics(internal: bool = False)`
+   - `get_historical_bars(internal: bool = False)`
+   - `get_all_bars_including_historical(internal: bool = False)`
+
+2. **Selective Blocking Logic**
+   ```python
+   # Block external callers during deactivation
+   if not internal and not self._session_active:
+       return None  # or empty container
+   ```
+
+3. **Added `remove_symbol()` Method**
+   ```python
+   def remove_symbol(self, symbol: str) -> bool:
+       # Thread-safe removal
+       # - Remove SymbolSessionData
+       # - Remove from active_symbols
+       # - Remove from active_streams
+   ```
+
+**Behavior:**
+- **internal=False** (default): Blocked when `session_active=False`
+  - Returns `None` or empty containers
+  - Used by external subscribers (AnalysisEngine)
+- **internal=True**: Bypasses session check
+  - Always returns data if available
+  - Used by internal threads (DataProcessor, DataQualityManager)
+
+**Commit:** `adf999d - Phase 2: Add internal parameter to SessionData read methods`
+
+---
+
 ## Next Steps
 
-### Phase 2: SessionData Updates
-- Add `internal` parameter to read methods
-- Add `remove_symbol()` method
-
-### Phase 3: SessionCoordinator Updates (Largest Phase)
+### Phase 3: SessionCoordinator Updates (Largest Phase - IN PROGRESS)
 - Add state variables and locks
 - Parameterize existing methods
 - Implement add/remove symbol methods
