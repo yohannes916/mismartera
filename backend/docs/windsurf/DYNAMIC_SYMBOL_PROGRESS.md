@@ -582,6 +582,7 @@ data list-dynamic
 - `d9628c2` - Add tests and CLI commands for dynamic symbol management
 - `d94dd75` - Fix: Register dynamic symbol commands in CLI help and tab completion
 - `a64744b` - Fix: Wire up dynamic symbol commands in CLI routing
+- `2e26395` - Fix: Use correct attribute name for session coordinator
 
 ---
 
