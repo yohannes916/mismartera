@@ -587,6 +587,7 @@ data list-dynamic
 - `e3e44ac` - Refactor: Reuse existing infrastructure for dynamic symbol loading
 - `5aed0a0` - Implement: Symbol removal functionality
 - `fcf46cd` - Fix: Use TimeManager for trading hours validation in catchup
+- `1f26cc4` - Fix: Handle timezone-aware vs naive datetime comparison in catchup
 
 ---
 
@@ -614,9 +615,9 @@ data list-dynamic
 
 | Metric | Value |
 |--------|-------|
-| **Total Lines Added** | ~1,309 lines |
-| **Files Modified** | 5 core + 2 test/CLI + 1 doc |
-| **Commits** | 27 commits |
+| **Total Lines Added** | ~1,321 lines |
+| **Files Modified** | 5 core + 2 test/CLI + 2 docs |
+| **Commits** | 29 commits |
 | **Time Taken** | ~3 hours |
 | **Core Flows** | 2 modes (backtest fully functional, live stubs) |
 | **Safety Features** | try/finally, Event objects, trading hours validation |
@@ -654,8 +655,8 @@ data list-dynamic
 
 ---
 
-**Last Updated:** 2025-12-01 17:35 PST  
+**Last Updated:** 2025-12-01 17:40 PST  
 **Status:** ✅ **PRODUCTION READY - BACKTEST MODE COMPLETE**  
-**Ready For:** Production use in backtest mode with full catchup functionality (properly validates trading hours)
+**Ready For:** Production use in backtest mode with full catchup (handles timezone-aware/naive correctly)
 
 **Flow Verification:** See `DYNAMIC_SYMBOL_FLOW_VERIFICATION.md` for complete step-by-step flow documentation

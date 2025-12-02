@@ -222,7 +222,12 @@ When testing `data add-symbol AAPL`:
 **Cause:** Using `getattr(self, '_market_open', None)` from stale attributes
 **Fix:** Query TimeManager for correct trading session (commit fcf46cd)
 
+### ❌ Issue 5: Timezone Comparison Error
+**Symptom:** "can't compare offset-naive and offset-aware datetimes"
+**Cause:** Comparing timezone-aware bar.timestamp with naive current_time/market_open
+**Fix:** Strip timezone info from all datetimes before comparison (commit 1f26cc4)
+
 ---
 
 **Status:** ✅ All flow steps verified and implemented correctly
-**Last Updated:** 2025-12-01 17:30 PST
+**Last Updated:** 2025-12-01 17:40 PST
