@@ -1,7 +1,7 @@
 # Unified Symbol Management Implementation Progress
 
 **Date:** 2025-12-02  
-**Status:** Phase 3 In Progress (Part 2 of 3) 🚧
+**Status:** Phase 3 Complete ✅ | Phase 4 Next
 
 ---
 
@@ -96,21 +96,22 @@
 
 ---
 
-### 🚧 Phase 3: SessionCoordinator Updates (60% Complete)
+### ✅ Phase 3: SessionCoordinator Updates (100% Complete)
 
 **Files Modified:**
 - `backend/app/threads/session_coordinator.py`
 
-**Completed (Parts 3.1 & 3.2):**
+**All Parts Complete (3.1, 3.2, 3.3):**
 
-1. **State Variables Updated** (lines 132-143)
+1. **State Variables Updated** (line 144)
    - `_symbol_operation_lock`: Thread-safe lock
    - `_loaded_symbols`: Fully loaded symbols
    - `_pending_symbols`: Symbols waiting to load
    - `_catchup_threshold`: From config (default 60s)
    - `_catchup_check_interval`: From config (default 10 bars)
+   - `_symbol_check_counters`: Per-symbol lag check counters (defaultdict)
 
-2. **Config Initialization** (lines 145-153)
+2. **Config Initialization** (lines 146-154)
    - Loads streaming config from session_data_config
    - Sets threshold and interval from config
 
@@ -122,33 +123,34 @@
 
 4. **Symbol Operations** (lines 259-351)
    - `add_symbol()` - Add symbol to session
-   - `remove_symbol()` - Remove symbol from session
+   - `remove_symbol()` - Remove symbol from session (cleans counter line 340)
 
-5. **Pending Symbol Processing** (lines 1268-1311)
-   - `_process_pending_symbols()` - Skeleton added
-   - Placeholder for parameterized method calls
+5. **Parameterized Existing Methods**
+   - `_validate_and_mark_streams(symbols=None)` - line 1676
+   - `_manage_historical_data(symbols=None)` - line 509
+   - `_load_backtest_queues(symbols=None)` - line 1012
 
-**Remaining (Part 3.3):**
-- Parameterize 3 existing methods (add `symbols` parameter)
-- Complete `_process_pending_symbols()` implementation
-- Add lag detection to `_streaming_phase()`
+6. **Pending Symbol Processing** (lines 1304-1317)
+   - `_process_pending_symbols()` - Complete implementation
+   - Calls parameterized methods
+   - 95% code reuse achieved
+
+7. **Lag Detection in Streaming** (lines 2520-2545)
+   - Per-symbol counter checking
+   - Check before increment (0 triggers immediate check)
+   - Deactivate/reactivate session based on lag
+   - Automatic for new symbols
 
 **Commits:**
 - `eb1ff08` - Phase 3.1: State and accessor methods
 - `48b60f6` - Phase 3.2: _process_pending_symbols skeleton
+- `82ef6d4` - Phase 3.3: Lag detection and parameterization
 
 ---
 
 ## Next Steps
 
-### Phase 3.3: Complete SessionCoordinator (40% Remaining)
-- Add state variables and locks
-- Parameterize existing methods
-- Implement add/remove symbol methods
-- Add accessor methods
-- Implement lag detection in streaming loop
-
-### Phase 4: DataProcessor Updates
+### Phase 4: DataProcessor Updates (~15 min)
 - Use `internal=True` for reads
 - Check `session_active` before external notifications
 
