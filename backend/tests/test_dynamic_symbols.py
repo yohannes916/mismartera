@@ -184,7 +184,7 @@ class TestDataProcessorNotifications:
         processor._notifications_paused = threading.Event()
         processor._notifications_paused.clear()  # Paused
         processor._analysis_engine_queue = queue.Queue()
-        processor._derived_intervals = {"AAPL": ["5m"]}
+        processor._derived_intervals = [5]  # List of integers, not dict
         processor._realtime_indicators = []
         processor._notify_analysis_engine = DataProcessor._notify_analysis_engine.__get__(processor)
         
@@ -199,7 +199,7 @@ class TestDataProcessorNotifications:
         processor._notifications_paused = threading.Event()
         processor._notifications_paused.set()  # Active
         processor._analysis_engine_queue = queue.Queue()
-        processor._derived_intervals = {"AAPL": ["5m"]}
+        processor._derived_intervals = [5]  # List of integers, not dict
         processor._realtime_indicators = []
         processor._notify_analysis_engine = DataProcessor._notify_analysis_engine.__get__(processor)
         
