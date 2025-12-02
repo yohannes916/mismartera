@@ -141,6 +141,7 @@ class SessionCoordinator(threading.Thread):
         # Streaming configuration (lag-based session control)
         self._catchup_threshold = 60  # Will be set from config
         self._catchup_check_interval = 10  # Will be set from config
+        self._symbol_check_counters: Dict[str, int] = defaultdict(int)  # Per-symbol lag check counters
         
         # Load streaming configuration
         if self.session_config.session_data_config.streaming:
@@ -335,6 +336,9 @@ class SessionCoordinator(threading.Thread):
             self._streamed_data.pop(symbol, None)
             self._generated_data.pop(symbol, None)
             
+            # Clean up lag check counter
+            self._symbol_check_counters.pop(symbol, None)
+            
             logger.info(
                 f"[SYMBOL] Removed {symbol} - "
                 f"cleared {len(queues_to_remove)} queues"
@@ -502,13 +506,16 @@ class SessionCoordinator(threading.Thread):
     # Phase 2: Historical Management
     # =========================================================================
     
-    def _manage_historical_data(self):
+    def _manage_historical_data(self, symbols: Optional[List[str]] = None):
         """Manage historical data before session starts.
         
         Tasks:
         - Load historical bars (trailing days)
         - Calculate historical indicators
         - Calculate quality scores
+        
+        Args:
+            symbols: Symbols to process. If None, uses all from config.
         
         Reference: SESSION_ARCHITECTURE.md lines 1650-1655
         """
@@ -533,9 +540,10 @@ class SessionCoordinator(threading.Thread):
         logger.info(f"[SESSION_FLOW] PHASE_2.1: Loading historical data for session {current_date}")
         logger.info(f"Loading historical data for session {current_date}")
         
-        # PRE-REGISTER all symbols from config so clear works properly
-        logger.info("[SESSION_FLOW] PHASE_2.1: Pre-registering symbols from config")
-        for symbol in self.session_config.session_data_config.symbols:
+        # PRE-REGISTER symbols so clear works properly
+        symbols_to_process = symbols or self.session_config.session_data_config.symbols
+        logger.info(f"[SESSION_FLOW] PHASE_2.1: Pre-registering {len(symbols_to_process)} symbols")
+        for symbol in symbols_to_process:
             if symbol not in self.session_data._active_symbols:
                 self.session_data.register_symbol(symbol)
                 logger.debug(f"Pre-registered symbol: {symbol}")
@@ -1001,7 +1009,7 @@ class SessionCoordinator(threading.Thread):
         logger.info(f"Queues loaded ({elapsed:.3f}s)")
         logger.info(f"[SESSION_FLOW] PHASE_3.1: Complete - Queues loaded in {elapsed:.3f}s")
     
-    def _load_backtest_queues(self):
+    def _load_backtest_queues(self, symbols: Optional[List[str]] = None):
         """Load prefetch_days of data into queues for backtest mode.
         
         This method populates queues with bar data from the database
@@ -1009,6 +1017,9 @@ class SessionCoordinator(threading.Thread):
         
         Uses DataManager to fetch bars for each symbol and interval
         that is marked as STREAMED.
+        
+        Args:
+            symbols: Symbols to process. If None, uses all from config.
         
         Reference: SESSION_ARCHITECTURE.md lines 1738-1747
         """
@@ -1026,8 +1037,10 @@ class SessionCoordinator(threading.Thread):
         start_date = current_date
         end_date = current_date  # Only today's bars
         
+        symbols_to_process = symbols or self.session_config.session_data_config.symbols
+        
         logger.info(
-            f"[SESSION_FLOW] PHASE_3.2: Loading queue for current session: {current_date}"
+            f"[SESSION_FLOW] PHASE_3.2: Loading queue for {len(symbols_to_process)} symbols on {current_date}"
         )
         logger.info(
             f"Loading backtest queue: {current_date} (single day)"
@@ -1037,7 +1050,7 @@ class SessionCoordinator(threading.Thread):
         total_streams = 0
         total_bars = 0
         
-        for symbol in self.session_config.session_data_config.symbols:
+        for symbol in symbols_to_process:
             streamed_intervals = self._get_streamed_intervals_for_symbol(symbol)
             
             if not streamed_intervals:
@@ -1289,13 +1302,13 @@ class SessionCoordinator(threading.Thread):
         try:
             # Load symbols using existing methods (95% reuse)
             logger.info("[SYMBOL] Phase 1: Validating streams")
-            # Note: Will implement parameterization in next part
+            self._validate_and_mark_streams(symbols=pending)
             
             logger.info("[SYMBOL] Phase 2: Loading historical data") 
-            # Note: Will implement parameterization in next part
+            self._manage_historical_data(symbols=pending)
             
             logger.info("[SYMBOL] Phase 3: Loading queues")
-            # Note: Will implement parameterization in next part
+            self._load_backtest_queues(symbols=pending)
             
             # Mark as loaded
             with self._symbol_operation_lock:
@@ -1669,7 +1682,7 @@ class SessionCoordinator(threading.Thread):
         self.quality_manager = quality_manager
         logger.info("Quality manager wired to coordinator")
     
-    def _validate_and_mark_streams(self) -> bool:
+    def _validate_and_mark_streams(self, symbols: Optional[List[str]] = None) -> bool:
         """Validate stream requirements and mark streams/generations.
         
         Uses stream requirements coordinator to:
@@ -1677,6 +1690,9 @@ class SessionCoordinator(threading.Thread):
         2. Analyze requirements to determine base interval
         3. Validate Parquet data availability
         4. Mark streamed vs generated intervals
+        
+        Args:
+            symbols: Symbols to process. If None, uses all from config.
         
         Returns:
             True if validation passed and streams marked
@@ -1687,7 +1703,7 @@ class SessionCoordinator(threading.Thread):
         if self.mode != "backtest":
             # Live mode: use simple marking
             logger.info("Live mode: using simple stream marking (no validation)")
-            self._mark_stream_generate()
+            self._mark_stream_generate(symbols=symbols)
             return True
         
         logger.info("=" * 70)
@@ -1728,9 +1744,9 @@ class SessionCoordinator(threading.Thread):
         logger.info("=" * 70)
         
         # Mark streams based on validation results
-        symbols = self.session_config.session_data_config.symbols
+        symbols_to_process = symbols or self.session_config.session_data_config.symbols
         
-        for symbol in symbols:
+        for symbol in symbols_to_process:
             self._streamed_data[symbol] = [result.required_base_interval]
             self._generated_data[symbol] = result.derivable_intervals.copy()
             
@@ -2500,6 +2516,33 @@ class SessionCoordinator(threading.Thread):
             # (Clock-driven: process multiple bars if time advanced past them)
             while queue and queue[0].timestamp <= timestamp:
                 bar = queue.popleft()
+                
+                # ========== Per-Symbol Lag Detection ==========
+                # Check lag BEFORE incrementing (so new symbols check immediately on first bar)
+                if self._symbol_check_counters[symbol] % self._catchup_check_interval == 0:
+                    current_time = self._time_manager.get_current_time()
+                    lag_seconds = (current_time - bar.timestamp).total_seconds()
+                    
+                    if lag_seconds > self._catchup_threshold:
+                        if self.session_data._session_active:
+                            logger.info(
+                                f"[STREAMING] Lag detected for {symbol} "
+                                f"({lag_seconds:.1f}s > {self._catchup_threshold}s) "
+                                f"- deactivating session"
+                            )
+                            self.session_data.deactivate_session()
+                    else:
+                        if not self.session_data._session_active:
+                            logger.info(
+                                f"[STREAMING] Caught up on {symbol} "
+                                f"({lag_seconds:.1f}s ≤ {self._catchup_threshold}s) "
+                                f"- reactivating session"
+                            )
+                            self.session_data.activate_session()
+                
+                # Increment counter for this symbol AFTER check
+                self._symbol_check_counters[symbol] += 1
+                # ===============================================
                 
                 # DEBUG: Log each bar being processed from queue
                 logger.debug(
