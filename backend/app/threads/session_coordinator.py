@@ -2758,8 +2758,35 @@ class SessionCoordinator(threading.Thread):
         # Register the symbol in session_data
         self.session_data.register_symbol(symbol)
         
-        # TODO: Load actual historical bars from DataManager
-        # For now, just register the symbol
+        # Load bars from DataManager for the session date
+        # For each stream type (typically just "1m")
+        for stream in streams:
+            if stream == "1m":
+                try:
+                    # Use DataManager to get bars for this date
+                    # This assumes DataManager has a method to get bars by date
+                    bars = self._data_manager.get_bars(
+                        symbol=symbol,
+                        interval="1m",
+                        start_date=current_date,
+                        end_date=current_date
+                    )
+                    
+                    if bars:
+                        logger.info(
+                            f"[DYNAMIC] Loaded {len(bars)} bars for {symbol} on {current_date}"
+                        )
+                    else:
+                        logger.warning(
+                            f"[DYNAMIC] No bars found for {symbol} on {current_date}"
+                        )
+                        
+                except Exception as e:
+                    logger.error(
+                        f"[DYNAMIC] Error loading bars for {symbol}: {e}",
+                        exc_info=True
+                    )
+                    # Continue anyway - empty queue is acceptable
         
         logger.info(f"[DYNAMIC] Historical data loaded for {symbol} on {current_date}")
     
@@ -2780,8 +2807,15 @@ class SessionCoordinator(threading.Thread):
         """
         logger.info(f"[DYNAMIC] Populating queues for {symbol}")
         
-        # For each stream type, create queue
+        # Get current session date
+        current_time = self._time_manager.get_current_time()
+        current_date = current_time.date()
+        
+        # For each stream type, create and populate queue
         for stream in streams:
+            if stream != "1m":
+                continue  # Only support 1m bars for now
+            
             queue_key = (symbol, stream)
             
             # Create deque if not exists
@@ -2789,8 +2823,36 @@ class SessionCoordinator(threading.Thread):
                 self._bar_queues[queue_key] = deque()
                 logger.info(f"[DYNAMIC] Created queue for {symbol} {stream}")
             
-            # TODO: Load bars from DataManager and populate queue
-            # For now, queue is created but empty
+            # Load bars from DataManager
+            try:
+                bars = self._data_manager.get_bars(
+                    symbol=symbol,
+                    interval="1m",
+                    start_date=current_date,
+                    end_date=current_date
+                )
+                
+                if bars:
+                    # Populate queue with bars
+                    # Bars should already be sorted by timestamp
+                    for bar in bars:
+                        self._bar_queues[queue_key].append(bar)
+                    
+                    logger.info(
+                        f"[DYNAMIC] Populated queue for {symbol} {stream} "
+                        f"with {len(bars)} bars"
+                    )
+                else:
+                    logger.warning(
+                        f"[DYNAMIC] No bars to populate for {symbol} {stream}"
+                    )
+                    
+            except Exception as e:
+                logger.error(
+                    f"[DYNAMIC] Error populating queue for {symbol}: {e}",
+                    exc_info=True
+                )
+                # Continue anyway - empty queue is acceptable
         
         logger.info(f"[DYNAMIC] Queues populated for {symbol}")
     
@@ -2836,6 +2898,11 @@ class SessionCoordinator(threading.Thread):
         bars_processed = 0
         bars_dropped = 0
         
+        # Get market hours for trading hours validation
+        # Use stored market hours from streaming phase if available
+        market_open = getattr(self, '_market_open', None)
+        market_close = getattr(self, '_market_close', None)
+        
         # Process bars chronologically until we reach current time
         while bar_queue:
             # Peek at oldest bar (don't pop yet)
@@ -2849,14 +2916,21 @@ class SessionCoordinator(threading.Thread):
             # Pop the bar
             bar = bar_queue.popleft()
             
-            # TODO: Check if bar is within trading hours using TimeManager
-            # For now, assume all bars are valid
+            # Check if bar is within trading hours (drop if not)
+            if market_open and market_close:
+                if bar.timestamp < market_open or bar.timestamp >= market_close:
+                    # Outside trading hours, drop the bar
+                    bars_dropped += 1
+                    continue
             
             # Forward to session_data (write still works when deactivated)
-            symbol_data = self.session_data.get_symbol_data(symbol)
-            if symbol_data:
-                symbol_data.append_bar(bar, interval=1)
-                bars_processed += 1
+            # Note: get_symbol_data will return None when session deactivated,
+            # but we need to write anyway, so we'll directly access _symbols
+            with self.session_data._lock:
+                symbol_data = self.session_data._symbols.get(symbol)
+                if symbol_data:
+                    symbol_data.append_bar(bar, interval=1)
+                    bars_processed += 1
             
             # DO NOT advance clock
             # DO NOT notify AnalysisEngine (session is deactivated)
