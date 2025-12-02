@@ -2764,13 +2764,19 @@ class SessionCoordinator(threading.Thread):
             if stream == "1m":
                 try:
                     # Use DataManager to get bars for this date
-                    # This assumes DataManager has a method to get bars by date
-                    bars = self._data_manager.get_bars(
-                        symbol=symbol,
-                        interval="1m",
-                        start_date=current_date,
-                        end_date=current_date
-                    )
+                    # Convert date to datetime range (full day)
+                    start_datetime = datetime.combine(current_date, time.min)
+                    end_datetime = datetime.combine(current_date, time.max)
+                    
+                    # Get database session for the call
+                    with SessionLocal() as db_session:
+                        bars = self._data_manager.get_bars(
+                            session=db_session,
+                            symbol=symbol,
+                            start=start_datetime,
+                            end=end_datetime,
+                            interval="1m"
+                        )
                     
                     if bars:
                         logger.info(
@@ -2825,12 +2831,19 @@ class SessionCoordinator(threading.Thread):
             
             # Load bars from DataManager
             try:
-                bars = self._data_manager.get_bars(
-                    symbol=symbol,
-                    interval="1m",
-                    start_date=current_date,
-                    end_date=current_date
-                )
+                # Convert date to datetime range (full day)
+                start_datetime = datetime.combine(current_date, time.min)
+                end_datetime = datetime.combine(current_date, time.max)
+                
+                # Get database session for the call
+                with SessionLocal() as db_session:
+                    bars = self._data_manager.get_bars(
+                        session=db_session,
+                        symbol=symbol,
+                        start=start_datetime,
+                        end=end_datetime,
+                        interval="1m"
+                    )
                 
                 if bars:
                     # Populate queue with bars
