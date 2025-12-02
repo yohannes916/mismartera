@@ -2463,9 +2463,7 @@ class SessionCoordinator(threading.Thread):
         symbol: str,
         immediate: bool = False
     ) -> bool:
-        """Remove a symbol from active session (stub implementation).
-        
-        This is a Phase 1 stub. Full implementation will be added in Phase 6.
+        """Remove a symbol from active session.
         
         Args:
             symbol: Stock symbol to remove
@@ -2475,8 +2473,8 @@ class SessionCoordinator(threading.Thread):
             True if successful, False if not found
         
         Note:
-            - Graceful removal: Mark for removal, drain queues, then clean up
-            - Immediate removal: Stop streams, clear queues, clean up now
+            - Immediate removal: Clear queues and remove from tracking
+            - Graceful removal: Currently same as immediate (TODO: drain queues first)
         """
         symbol = symbol.upper()
         
@@ -2485,11 +2483,21 @@ class SessionCoordinator(threading.Thread):
             if symbol not in self._dynamic_symbols:
                 logger.warning(f"[DYNAMIC] Symbol {symbol} not found in dynamic symbols")
                 return False
+            
+            # Remove from dynamic symbols set
+            self._dynamic_symbols.remove(symbol)
+            logger.info(f"[DYNAMIC] Removed {symbol} from dynamic symbols")
         
-        logger.info(f"[DYNAMIC] remove_symbol({symbol}, immediate={immediate}) - STUB (Phase 1)")
-        logger.warning("[DYNAMIC] Full implementation pending (Phase 6: symbol removal)")
+        # Clear any queues for this symbol
+        keys_to_remove = [key for key in self._bar_queues.keys() if key[0] == symbol]
+        for key in keys_to_remove:
+            del self._bar_queues[key]
+            logger.info(f"[DYNAMIC] Cleared queue for {key}")
         
-        # Phase 1: Just log and return success (no actual removal yet)
+        # TODO: Graceful removal could drain queues first instead of clearing
+        # For now, both immediate and graceful do the same thing
+        
+        logger.info(f"[DYNAMIC] Symbol {symbol} removed successfully")
         return True
     
     # =========================================================================
