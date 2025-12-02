@@ -1532,6 +1532,26 @@ class InteractiveCLI:
                             cmd.append("--db-check")
                         
                         subprocess.run(cmd)
+                    elif subcmd == 'add-symbol' and len(args) >= 2:
+                        # data add-symbol <symbol> [--streams <streams>]
+                        symbol = args[1].upper()
+                        streams = None
+                        if '--streams' in args:
+                            streams_idx = args.index('--streams')
+                            if streams_idx + 1 < len(args):
+                                streams = args[streams_idx + 1]
+                        from app.cli.data_commands import add_symbol_command
+                        asyncio.run(add_symbol_command(symbol, streams))
+                    elif subcmd == 'remove-symbol' and len(args) >= 2:
+                        # data remove-symbol <symbol> [--immediate]
+                        symbol = args[1].upper()
+                        immediate = '--immediate' in args
+                        from app.cli.data_commands import remove_symbol_command
+                        asyncio.run(remove_symbol_command(symbol, immediate))
+                    elif subcmd == 'list-dynamic':
+                        # data list-dynamic
+                        from app.cli.data_commands import list_dynamic_symbols_command
+                        asyncio.run(list_dynamic_symbols_command())
                     else:
                         from app.cli.data_commands import print_data_usage
                         print_data_usage(self.console)
