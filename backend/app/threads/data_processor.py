@@ -311,8 +311,14 @@ class DataProcessor(threading.Thread):
                 # 4. Signal ready to coordinator (mode-aware)
                 self._signal_ready_to_coordinator()
                 
-                # 5. Notify analysis engine
-                self._notify_analysis_engine(symbol, interval)
+                # 5. Notify analysis engine (only if session is active)
+                # Check session_active to prevent notifications during lag/catchup
+                if self.session_data._session_active:
+                    self._notify_analysis_engine(symbol, interval)
+                else:
+                    logger.debug(
+                        f"[PROCESSOR] Skipping notification (session inactive): {symbol} {interval}"
+                    )
                 
                 # 6. Record timing and metrics
                 elapsed = self.metrics.elapsed_time(start_time)
@@ -359,7 +365,8 @@ class DataProcessor(threading.Thread):
                 return
             
             # 1. Read 1m bars from session_data (ZERO-COPY: direct reference)
-            bars_1m_ref = self.session_data.get_bars_ref(symbol, 1)
+            # Use internal=True to bypass session_active check (processor needs data even during catchup)
+            bars_1m_ref = self.session_data.get_bars_ref(symbol, 1, internal=True)
             
             if not bars_1m_ref:
                 logger.debug(f"No 1m bars available for {symbol}")
@@ -395,7 +402,8 @@ class DataProcessor(threading.Thread):
                     continue
                 
                 # 4. Get existing derived bars (ZERO-COPY: direct reference)
-                existing_derived_ref = self.session_data.get_bars_ref(symbol, interval)
+                # Use internal=True to bypass session_active check
+                existing_derived_ref = self.session_data.get_bars_ref(symbol, interval, internal=True)
                 
                 # 5. Add only new bars (skip duplicates)
                 new_bar_count = 0
@@ -408,7 +416,8 @@ class DataProcessor(threading.Thread):
                     
                     if not exists:
                         # Add to derived bars container (not bars_base)
-                        symbol_data = self.session_data.get_symbol_data(symbol)
+                        # Use internal=True to bypass session_active check
+                        symbol_data = self.session_data.get_symbol_data(symbol, internal=True)
                         if symbol_data:
                             if interval not in symbol_data.bars_derived:
                                 symbol_data.bars_derived[interval] = []

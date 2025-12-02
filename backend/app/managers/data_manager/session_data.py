@@ -398,17 +398,18 @@ class SessionData:
             
             return self._symbols[symbol]
     
-    def get_symbol_data(self, symbol: str) -> Optional[SymbolSessionData]:
+    def get_symbol_data(self, symbol: str, internal: bool = False) -> Optional[SymbolSessionData]:
         """Get data for a symbol.
         
         Args:
             symbol: Stock symbol
+            internal: If True, bypass session_active check (for internal threads)
             
         Returns:
-            SymbolSessionData or None if not found (None if session deactivated)
+            SymbolSessionData or None if not found (None if session deactivated and not internal)
         """
-        # Block access during catchup (Phase 2: Dynamic symbol management)
-        if not self._check_session_active():
+        # Block external access when session inactive (internal threads can still read)
+        if not internal and not self._session_active:
             return None
         
         symbol = symbol.upper()
