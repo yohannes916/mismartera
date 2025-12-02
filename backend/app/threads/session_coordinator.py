@@ -2858,10 +2858,27 @@ class SessionCoordinator(threading.Thread):
         bars_processed = 0
         bars_dropped = 0
         
-        # Get market hours for trading hours validation
-        # Use stored market hours from streaming phase if available
-        market_open = getattr(self, '_market_open', None)
-        market_close = getattr(self, '_market_close', None)
+        # Get trading session for validation (use TimeManager)
+        current_date = current_time.date()
+        with SessionLocal() as db_session:
+            trading_session = self._time_manager.get_trading_session(
+                db_session,
+                current_date,
+                self.session_config.exchange_group
+            )
+        
+        if not trading_session or trading_session.is_holiday:
+            logger.warning(f"[DYNAMIC] No trading session for {current_date}, skipping catchup")
+            return
+        
+        # Get market open/close times as datetime objects for comparison
+        from datetime import datetime
+        market_open = datetime.combine(current_date, trading_session.regular_open)
+        market_close = datetime.combine(current_date, trading_session.regular_close)
+        
+        logger.info(
+            f"[DYNAMIC] Trading hours: {market_open.time()} - {market_close.time()}"
+        )
         
         # Process bars chronologically until we reach current time
         while bar_queue:
@@ -2876,12 +2893,11 @@ class SessionCoordinator(threading.Thread):
             # Pop the bar
             bar = bar_queue.popleft()
             
-            # Check if bar is within trading hours (drop if not)
-            if market_open and market_close:
-                if bar.timestamp < market_open or bar.timestamp >= market_close:
-                    # Outside trading hours, drop the bar
-                    bars_dropped += 1
-                    continue
+            # Check if bar is within regular trading hours (drop if not)
+            if bar.timestamp < market_open or bar.timestamp >= market_close:
+                # Outside trading hours, drop the bar
+                bars_dropped += 1
+                continue
             
             # Forward to session_data using proper API
             # Use session_data.append_bar() like the normal flow does
