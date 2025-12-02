@@ -245,6 +245,32 @@ DATA_COMMANDS: List[DataCommandMeta] = [
         examples=["data high-low AAPL 252"],
         suggests_symbols_at=1,
     ),
+    DataCommandMeta(
+        name="add-symbol",
+        usage="data add-symbol <symbol> [--streams <streams>]",
+        description="Add a symbol dynamically to the active session (backtest or live)",
+        examples=[
+            "data add-symbol TSLA",
+            "data add-symbol MSFT --streams 1m,5m"
+        ],
+        suggests_symbols_at=1,
+    ),
+    DataCommandMeta(
+        name="remove-symbol",
+        usage="data remove-symbol <symbol> [--immediate]",
+        description="Remove a symbol from the active session",
+        examples=[
+            "data remove-symbol TSLA",
+            "data remove-symbol MSFT --immediate"
+        ],
+        suggests_symbols_at=1,
+    ),
+    DataCommandMeta(
+        name="list-dynamic",
+        usage="data list-dynamic",
+        description="List all dynamically added symbols in the active session",
+        examples=["data list-dynamic"],
+    ),
 ]
 
 
