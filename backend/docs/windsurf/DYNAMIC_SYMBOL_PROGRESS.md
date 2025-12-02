@@ -583,6 +583,7 @@ data list-dynamic
 - `d94dd75` - Fix: Register dynamic symbol commands in CLI help and tab completion
 - `a64744b` - Fix: Wire up dynamic symbol commands in CLI routing
 - `2e26395` - Fix: Use correct attribute name for session coordinator
+- `19e48d9` - Fix: Correct DataManager.get_bars() API calls in dynamic symbol loading
 
 ---
 
