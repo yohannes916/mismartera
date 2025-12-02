@@ -2876,6 +2876,15 @@ class SessionCoordinator(threading.Thread):
         market_open = datetime.combine(current_date, trading_session.regular_open)
         market_close = datetime.combine(current_date, trading_session.regular_close)
         
+        # Ensure timezone consistency - bars may be tz-aware, make all naive for comparison
+        # TimeManager returns naive datetimes in backtest mode
+        if current_time.tzinfo is not None:
+            current_time = current_time.replace(tzinfo=None)
+        if market_open.tzinfo is not None:
+            market_open = market_open.replace(tzinfo=None)
+        if market_close.tzinfo is not None:
+            market_close = market_close.replace(tzinfo=None)
+        
         logger.info(
             f"[DYNAMIC] Trading hours: {market_open.time()} - {market_close.time()}"
         )
@@ -2885,16 +2894,19 @@ class SessionCoordinator(threading.Thread):
             # Peek at oldest bar (don't pop yet)
             bar = bar_queue[0]
             
+            # Get bar timestamp (strip timezone if present for comparison)
+            bar_ts = bar.timestamp.replace(tzinfo=None) if bar.timestamp.tzinfo else bar.timestamp
+            
             # Check if bar is before current time
-            if bar.timestamp >= current_time:
+            if bar_ts >= current_time:
                 # Reached current time, stop processing
                 break
             
-            # Pop the bar
-            bar = bar_queue.popleft()
+            # Pop the bar (we know it's before current time)
+            bar_queue.popleft()
             
             # Check if bar is within regular trading hours (drop if not)
-            if bar.timestamp < market_open or bar.timestamp >= market_close:
+            if bar_ts < market_open or bar_ts >= market_close:
                 # Outside trading hours, drop the bar
                 bars_dropped += 1
                 continue
