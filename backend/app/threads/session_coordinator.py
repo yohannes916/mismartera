@@ -129,13 +129,28 @@ class SessionCoordinator(threading.Thread):
         # Structure: {(symbol, interval): deque of BarData}
         self._bar_queues: Dict[Tuple[str, str], 'deque'] = {}
         
-        # Dynamic symbol management (Phase 1)
-        self._dynamic_symbols: Set[str] = set()  # Symbols added dynamically during session
-        self._pending_symbol_additions = queue.Queue()  # Thread-safe queue for symbol additions
-        self._pending_symbol_removals: Set[str] = set()  # Symbols marked for removal
-        self._symbol_operation_lock = threading.Lock()  # Thread-safe operations
+        # Symbol management (thread-safe)
+        self._symbol_operation_lock = threading.Lock()
+        self._loaded_symbols: Set[str] = set()  # Symbols fully loaded and streaming
+        self._pending_symbols: Set[str] = set()  # Symbols waiting to be loaded
+        
+        # Stream control
         self._stream_paused = threading.Event()  # Pause control for backtest mode
         self._stream_paused.set()  # Initially not paused
+        
+        # Streaming configuration (lag-based session control)
+        self._catchup_threshold = 60  # Will be set from config
+        self._catchup_check_interval = 10  # Will be set from config
+        
+        # Load streaming configuration
+        if self.session_config.session_data_config.streaming:
+            streaming_config = self.session_config.session_data_config.streaming
+            self._catchup_threshold = streaming_config.catchup_threshold_seconds
+            self._catchup_check_interval = streaming_config.catchup_check_interval
+            logger.info(
+                f"[CONFIG] Streaming: catchup_threshold={self._catchup_threshold}s, "
+                f"check_interval={self._catchup_check_interval} bars"
+            )
         
         logger.info(
             f"SessionCoordinator initialized (mode={mode}, "
@@ -196,6 +211,144 @@ class SessionCoordinator(threading.Thread):
         """Stop the coordinator thread gracefully."""
         logger.info("Stopping SessionCoordinator...")
         self._stop_event.set()
+    
+    # =========================================================================
+    # Public API - Thread-Safe Accessors
+    # =========================================================================
+    
+    def get_loaded_symbols(self) -> Set[str]:
+        """Get currently loaded symbols (thread-safe).
+        
+        Returns:
+            Set of symbols that are fully loaded and streaming
+        """
+        with self._symbol_operation_lock:
+            return self._loaded_symbols.copy()
+    
+    def get_pending_symbols(self) -> Set[str]:
+        """Get symbols waiting to be loaded (thread-safe).
+        
+        Returns:
+            Set of symbols waiting to be processed
+        """
+        with self._symbol_operation_lock:
+            return self._pending_symbols.copy()
+    
+    def get_generated_data(self) -> Dict[str, List[str]]:
+        """Get intervals that need generation per symbol (thread-safe).
+        
+        Returns:
+            Dictionary mapping symbol to list of intervals to generate
+        """
+        with self._symbol_operation_lock:
+            return self._generated_data.copy()
+    
+    def get_streamed_data(self) -> Dict[str, List[str]]:
+        """Get data types being streamed per symbol (thread-safe).
+        
+        Returns:
+            Dictionary mapping symbol to list of streamed data types
+        """
+        with self._symbol_operation_lock:
+            return self._streamed_data.copy()
+    
+    # =========================================================================
+    # Symbol Management - Thread-Safe Operations
+    # =========================================================================
+    
+    def add_symbol(self, symbol: str, streams: Optional[List[str]] = None) -> bool:
+        """Add symbol to session (thread-safe, can be called from any thread).
+        
+        The symbol is added to config and marked as pending. The streaming loop
+        will automatically detect and process it.
+        
+        Args:
+            symbol: Symbol to add
+            streams: Data streams (default: ["1m"] for backtest)
+        
+        Returns:
+            True if added, False if already exists
+        """
+        streams = streams or ["1m"]
+        
+        with self._symbol_operation_lock:
+            # Check if already exists
+            if symbol in self.session_config.session_data_config.symbols:
+                logger.warning(f"[SYMBOL] {symbol} already in session")
+                return False
+            
+            # Add to config (single source of truth)
+            self.session_config.session_data_config.symbols.append(symbol)
+            
+            # Add to streams config
+            if "1m" not in self.session_config.session_data_config.streams:
+                self.session_config.session_data_config.streams.append("1m")
+            
+            # Mark as pending
+            self._pending_symbols.add(symbol)
+            
+            logger.info(
+                f"[SYMBOL] Added {symbol} to config with streams {streams}, "
+                f"marked as pending"
+            )
+            return True
+    
+    def remove_symbol(self, symbol: str) -> bool:
+        """Remove symbol from session (thread-safe, can be called from any thread).
+        
+        Removes symbol from config, clears all queues, removes from session_data.
+        Other threads naturally adapt by polling config.
+        
+        Args:
+            symbol: Symbol to remove
+        
+        Returns:
+            True if removed, False if not found
+        """
+        with self._symbol_operation_lock:
+            # Check if exists
+            if symbol not in self.session_config.session_data_config.symbols:
+                logger.warning(f"[SYMBOL] {symbol} not in session")
+                return False
+            
+            logger.info(f"[SYMBOL] Removing {symbol} from session")
+            
+            # Remove from config (single source of truth)
+            self.session_config.session_data_config.symbols.remove(symbol)
+            
+            # Remove from loaded set
+            self._loaded_symbols.discard(symbol)
+            
+            # Remove from pending (if was pending)
+            self._pending_symbols.discard(symbol)
+            
+            # Clear and remove all queues for symbol
+            queues_to_remove = [
+                key for key in self._bar_queues.keys() 
+                if key[0] == symbol
+            ]
+            for key in queues_to_remove:
+                del self._bar_queues[key]
+                logger.debug(f"[SYMBOL] Removed queue {key}")
+            
+            # Remove from streamed/generated tracking
+            self._streamed_data.pop(symbol, None)
+            self._generated_data.pop(symbol, None)
+            
+            logger.info(
+                f"[SYMBOL] Removed {symbol} - "
+                f"cleared {len(queues_to_remove)} queues"
+            )
+        
+        # Remove from session_data (has its own lock)
+        removed = self.session_data.remove_symbol(symbol)
+        
+        if removed:
+            logger.info(f"[SYMBOL] Successfully removed {symbol} from session")
+        else:
+            logger.warning(f"[SYMBOL] {symbol} not found in session_data")
+        
+        return True
     
     def _coordinator_loop(self):
         """Main coordinator loop - orchestrates session lifecycle.
