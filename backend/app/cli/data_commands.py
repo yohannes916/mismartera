@@ -1803,3 +1803,153 @@ def import_file(
 ) -> None:
     """Import CSV data via DataManager (data import-file)."""
     asyncio.run(import_csv_command(file_path, symbol, start_date, end_date))
+
+
+# ============================================================================
+# Dynamic Symbol Management Commands
+# ============================================================================
+
+async def add_symbol_command(symbol: str, streams: Optional[str]) -> None:
+    """Add a symbol dynamically to the active session."""
+    try:
+        from app.managers.system_manager import get_system_manager
+        system_mgr = get_system_manager()
+        
+        # Check if system is running
+        if not system_mgr.is_running():
+            console.print("[yellow]⚠ System is not running. Start it first with 'system start'[/yellow]")
+            return
+        
+        # Get session coordinator
+        if not hasattr(system_mgr, '_session_coordinator') or not system_mgr._session_coordinator:
+            console.print("[yellow]⚠ No active session. Session coordinator not initialized[/yellow]")
+            return
+        
+        coordinator = system_mgr._session_coordinator
+        
+        # Parse streams
+        stream_list = None
+        if streams:
+            stream_list = [s.strip() for s in streams.split(",")]
+        
+        # Add the symbol
+        console.print(f"[cyan]Adding symbol {symbol.upper()} to active session...[/cyan]")
+        result = coordinator.add_symbol(symbol.upper(), streams=stream_list, blocking=False)
+        
+        if result:
+            console.print(f"[green]✓ Symbol {symbol.upper()} queued for addition[/green]")
+            if coordinator.mode == "backtest":
+                console.print("[dim]  Backtest mode: Streaming will pause, load historical data, and catch up[/dim]")
+            else:
+                console.print("[dim]  Live mode: Historical data loading, stream starting[/dim]")
+        else:
+            console.print(f"[red]✗ Failed to add symbol {symbol.upper()}[/red]")
+            console.print("[dim]  Symbol may already exist or session not running[/dim]")
+            
+    except Exception as e:
+        console.print(f"[red]Error adding symbol: {e}[/red]")
+        logger.error(f"Add symbol command error: {e}", exc_info=True)
+
+
+async def remove_symbol_command(symbol: str, immediate: bool) -> None:
+    """Remove a symbol from the active session."""
+    try:
+        from app.managers.system_manager import get_system_manager
+        system_mgr = get_system_manager()
+        
+        # Check if system is running
+        if not system_mgr.is_running():
+            console.print("[yellow]⚠ System is not running[/yellow]")
+            return
+        
+        # Get session coordinator
+        if not hasattr(system_mgr, '_session_coordinator') or not system_mgr._session_coordinator:
+            console.print("[yellow]⚠ No active session[/yellow]")
+            return
+        
+        coordinator = system_mgr._session_coordinator
+        
+        # Remove the symbol
+        console.print(f"[cyan]Removing symbol {symbol.upper()} from active session...[/cyan]")
+        result = coordinator.remove_symbol(symbol.upper(), immediate=immediate)
+        
+        if result:
+            if immediate:
+                console.print(f"[green]✓ Symbol {symbol.upper()} removed immediately[/green]")
+            else:
+                console.print(f"[green]✓ Symbol {symbol.upper()} marked for removal[/green]")
+                console.print("[dim]  Graceful removal: draining queues...[/dim]")
+        else:
+            console.print(f"[red]✗ Failed to remove symbol {symbol.upper()}[/red]")
+            console.print("[dim]  Symbol may not be dynamically added[/dim]")
+            
+    except Exception as e:
+        console.print(f"[red]Error removing symbol: {e}[/red]")
+        logger.error(f"Remove symbol command error: {e}", exc_info=True)
+
+
+async def list_dynamic_symbols_command() -> None:
+    """List dynamically added symbols in the active session."""
+    try:
+        from app.managers.system_manager import get_system_manager
+        system_mgr = get_system_manager()
+        
+        # Check if system is running
+        if not system_mgr.is_running():
+            console.print("[yellow]⚠ System is not running[/yellow]")
+            return
+        
+        # Get session coordinator
+        if not hasattr(system_mgr, '_session_coordinator') or not system_mgr._session_coordinator:
+            console.print("[yellow]⚠ No active session[/yellow]")
+            return
+        
+        coordinator = system_mgr._session_coordinator
+        
+        # Get dynamic symbols
+        with coordinator._symbol_operation_lock:
+            dynamic_symbols = list(coordinator._dynamic_symbols)
+        
+        if not dynamic_symbols:
+            console.print("[yellow]No dynamically added symbols[/yellow]")
+            console.print("[dim]Add symbols with: data add-symbol <SYMBOL>[/dim]")
+            return
+        
+        # Create table
+        table = Table(title="Dynamically Added Symbols")
+        table.add_column("Symbol", style="cyan")
+        table.add_column("Status", style="green")
+        
+        for symbol in sorted(dynamic_symbols):
+            table.add_row(symbol, "Active")
+        
+        console.print(table)
+        console.print(f"\n[dim]Total: {len(dynamic_symbols)} symbols[/dim]")
+            
+    except Exception as e:
+        console.print(f"[red]Error listing symbols: {e}[/red]")
+        logger.error(f"List dynamic symbols command error: {e}", exc_info=True)
+
+
+@app.command("add-symbol")
+def add_symbol(
+    symbol: str = typer.Argument(..., help="Stock symbol to add"),
+    streams: Optional[str] = typer.Option(None, "--streams", help="Comma-separated stream types (default: 1m)"),
+) -> None:
+    """Add a symbol dynamically to the active session."""
+    asyncio.run(add_symbol_command(symbol, streams))
+
+
+@app.command("remove-symbol")
+def remove_symbol(
+    symbol: str = typer.Argument(..., help="Stock symbol to remove"),
+    immediate: bool = typer.Option(False, "--immediate", help="Remove immediately without draining queues"),
+) -> None:
+    """Remove a symbol from the active session."""
+    asyncio.run(remove_symbol_command(symbol, immediate))
+
+
+@app.command("list-dynamic")
+def list_dynamic() -> None:
+    """List dynamically added symbols in the active session."""
+    asyncio.run(list_dynamic_symbols_command())
