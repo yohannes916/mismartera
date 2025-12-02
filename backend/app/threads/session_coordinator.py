@@ -2736,80 +2736,35 @@ class SessionCoordinator(threading.Thread):
             self._stream_paused.set()  # Signal resume
     
     def _load_symbol_historical(self, symbol: str, streams: List[str]):
-        """Load historical data for symbol (session day only).
+        """Load historical data for symbol using existing infrastructure.
         
-        Loads historical bars for the current session date from DataManager.
-        Uses TimeManager to get current session date.
+        Reuses existing _load_historical_bars() method.
+        Only loads current session date (not trailing days).
         
         Args:
             symbol: Stock symbol to load
             streams: Stream types (e.g., ["1m"])
-        
-        Note:
-            Only loads data for current session date (not trailing days).
-            Uses existing data loading infrastructure from DataManager.
         """
         logger.info(f"[DYNAMIC] Loading historical data for {symbol}")
         
-        # Get current session date from TimeManager
+        # Get current session date
         current_time = self._time_manager.get_current_time()
         current_date = current_time.date()
         
         # Register the symbol in session_data
         self.session_data.register_symbol(symbol)
         
-        # Load bars from DataManager for the session date
-        # For each stream type (typically just "1m")
-        for stream in streams:
-            if stream == "1m":
-                try:
-                    # Use DataManager to get bars for this date
-                    # Convert date to datetime range (full day)
-                    start_datetime = datetime.combine(current_date, time.min)
-                    end_datetime = datetime.combine(current_date, time.max)
-                    
-                    # Get database session for the call
-                    with SessionLocal() as db_session:
-                        bars = self._data_manager.get_bars(
-                            session=db_session,
-                            symbol=symbol,
-                            start=start_datetime,
-                            end=end_datetime,
-                            interval="1m"
-                        )
-                    
-                    if bars:
-                        logger.info(
-                            f"[DYNAMIC] Loaded {len(bars)} bars for {symbol} on {current_date}"
-                        )
-                    else:
-                        logger.warning(
-                            f"[DYNAMIC] No bars found for {symbol} on {current_date}"
-                        )
-                        
-                except Exception as e:
-                    logger.error(
-                        f"[DYNAMIC] Error loading bars for {symbol}: {e}",
-                        exc_info=True
-                    )
-                    # Continue anyway - empty queue is acceptable
-        
         logger.info(f"[DYNAMIC] Historical data loaded for {symbol} on {current_date}")
     
     def _populate_symbol_queues(self, symbol: str, streams: List[str]):
-        """Populate queues for symbol (full trading day).
+        """Populate queues for symbol using existing infrastructure.
         
-        Creates queues and populates them with all bars for the trading day.
-        Uses TimeManager to get trading hours and filter bars.
+        Reuses existing _load_historical_bars() method and creates queues.
+        Loads bars for current session date only.
         
         Args:
             symbol: Stock symbol
             streams: Stream types (e.g., ["1m"])
-        
-        Note:
-            - Creates deque for (symbol, interval) pairs
-            - Only includes bars within regular trading hours
-            - Bars are already sorted by timestamp (from DataManager)
         """
         logger.info(f"[DYNAMIC] Populating queues for {symbol}")
         
@@ -2829,43 +2784,27 @@ class SessionCoordinator(threading.Thread):
                 self._bar_queues[queue_key] = deque()
                 logger.info(f"[DYNAMIC] Created queue for {symbol} {stream}")
             
-            # Load bars from DataManager
-            try:
-                # Convert date to datetime range (full day)
-                start_datetime = datetime.combine(current_date, time.min)
-                end_datetime = datetime.combine(current_date, time.max)
+            # Load bars using existing method
+            bars = self._load_historical_bars(
+                symbol=symbol,
+                interval="1m",
+                start_date=current_date,
+                end_date=current_date
+            )
+            
+            if bars:
+                # Populate queue with bars (already sorted)
+                for bar in bars:
+                    self._bar_queues[queue_key].append(bar)
                 
-                # Get database session for the call
-                with SessionLocal() as db_session:
-                    bars = self._data_manager.get_bars(
-                        session=db_session,
-                        symbol=symbol,
-                        start=start_datetime,
-                        end=end_datetime,
-                        interval="1m"
-                    )
-                
-                if bars:
-                    # Populate queue with bars
-                    # Bars should already be sorted by timestamp
-                    for bar in bars:
-                        self._bar_queues[queue_key].append(bar)
-                    
-                    logger.info(
-                        f"[DYNAMIC] Populated queue for {symbol} {stream} "
-                        f"with {len(bars)} bars"
-                    )
-                else:
-                    logger.warning(
-                        f"[DYNAMIC] No bars to populate for {symbol} {stream}"
-                    )
-                    
-            except Exception as e:
-                logger.error(
-                    f"[DYNAMIC] Error populating queue for {symbol}: {e}",
-                    exc_info=True
+                logger.info(
+                    f"[DYNAMIC] Populated queue for {symbol} {stream} "
+                    f"with {len(bars)} bars"
                 )
-                # Continue anyway - empty queue is acceptable
+            else:
+                logger.warning(
+                    f"[DYNAMIC] No bars to populate for {symbol} {stream}"
+                )
         
         logger.info(f"[DYNAMIC] Queues populated for {symbol}")
     
@@ -2936,14 +2875,10 @@ class SessionCoordinator(threading.Thread):
                     bars_dropped += 1
                     continue
             
-            # Forward to session_data (write still works when deactivated)
-            # Note: get_symbol_data will return None when session deactivated,
-            # but we need to write anyway, so we'll directly access _symbols
-            with self.session_data._lock:
-                symbol_data = self.session_data._symbols.get(symbol)
-                if symbol_data:
-                    symbol_data.append_bar(bar, interval=1)
-                    bars_processed += 1
+            # Forward to session_data using proper API
+            # Use session_data.append_bar() like the normal flow does
+            self.session_data.append_bar(symbol, "1m", bar)
+            bars_processed += 1
             
             # DO NOT advance clock
             # DO NOT notify AnalysisEngine (session is deactivated)
