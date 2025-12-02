@@ -1821,11 +1821,11 @@ async def add_symbol_command(symbol: str, streams: Optional[str]) -> None:
             return
         
         # Get session coordinator
-        if not hasattr(system_mgr, '_session_coordinator') or not system_mgr._session_coordinator:
+        if not hasattr(system_mgr, '_coordinator') or not system_mgr._coordinator:
             console.print("[yellow]⚠ No active session. Session coordinator not initialized[/yellow]")
             return
         
-        coordinator = system_mgr._session_coordinator
+        coordinator = system_mgr._coordinator
         
         # Parse streams
         stream_list = None
@@ -1863,11 +1863,11 @@ async def remove_symbol_command(symbol: str, immediate: bool) -> None:
             return
         
         # Get session coordinator
-        if not hasattr(system_mgr, '_session_coordinator') or not system_mgr._session_coordinator:
+        if not hasattr(system_mgr, '_coordinator') or not system_mgr._coordinator:
             console.print("[yellow]⚠ No active session[/yellow]")
             return
         
-        coordinator = system_mgr._session_coordinator
+        coordinator = system_mgr._coordinator
         
         # Remove the symbol
         console.print(f"[cyan]Removing symbol {symbol.upper()} from active session...[/cyan]")
@@ -1900,11 +1900,11 @@ async def list_dynamic_symbols_command() -> None:
             return
         
         # Get session coordinator
-        if not hasattr(system_mgr, '_session_coordinator') or not system_mgr._session_coordinator:
+        if not hasattr(system_mgr, '_coordinator') or not system_mgr._coordinator:
             console.print("[yellow]⚠ No active session[/yellow]")
             return
         
-        coordinator = system_mgr._session_coordinator
+        coordinator = system_mgr._coordinator
         
         # Get dynamic symbols
         with coordinator._symbol_operation_lock:
