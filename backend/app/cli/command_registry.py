@@ -265,12 +265,6 @@ DATA_COMMANDS: List[DataCommandMeta] = [
         ],
         suggests_symbols_at=1,
     ),
-    DataCommandMeta(
-        name="list-dynamic",
-        usage="data list-dynamic",
-        description="List all dynamically added symbols in the active session",
-        examples=["data list-dynamic"],
-    ),
 ]
 
 

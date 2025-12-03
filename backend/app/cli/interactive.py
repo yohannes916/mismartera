@@ -1548,10 +1548,6 @@ class InteractiveCLI:
                         immediate = '--immediate' in args
                         from app.cli.data_commands import remove_symbol_command
                         asyncio.run(remove_symbol_command(symbol, immediate))
-                    elif subcmd == 'list-dynamic':
-                        # data list-dynamic
-                        from app.cli.data_commands import list_dynamic_symbols_command
-                        asyncio.run(list_dynamic_symbols_command())
                     else:
                         from app.cli.data_commands import print_data_usage
                         print_data_usage(self.console)

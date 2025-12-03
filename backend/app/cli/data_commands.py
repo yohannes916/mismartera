@@ -1888,49 +1888,6 @@ async def remove_symbol_command(symbol: str, immediate: bool) -> None:
         logger.error(f"Remove symbol command error: {e}", exc_info=True)
 
 
-async def list_dynamic_symbols_command() -> None:
-    """List dynamically added symbols in the active session."""
-    try:
-        from app.managers.system_manager import get_system_manager
-        system_mgr = get_system_manager()
-        
-        # Check if system is running
-        if not system_mgr.is_running():
-            console.print("[yellow]⚠ System is not running[/yellow]")
-            return
-        
-        # Get session coordinator
-        if not hasattr(system_mgr, '_coordinator') or not system_mgr._coordinator:
-            console.print("[yellow]⚠ No active session[/yellow]")
-            return
-        
-        coordinator = system_mgr._coordinator
-        
-        # Get dynamic symbols
-        with coordinator._symbol_operation_lock:
-            dynamic_symbols = list(coordinator._dynamic_symbols)
-        
-        if not dynamic_symbols:
-            console.print("[yellow]No dynamically added symbols[/yellow]")
-            console.print("[dim]Add symbols with: data add-symbol <SYMBOL>[/dim]")
-            return
-        
-        # Create table
-        table = Table(title="Dynamically Added Symbols")
-        table.add_column("Symbol", style="cyan")
-        table.add_column("Status", style="green")
-        
-        for symbol in sorted(dynamic_symbols):
-            table.add_row(symbol, "Active")
-        
-        console.print(table)
-        console.print(f"\n[dim]Total: {len(dynamic_symbols)} symbols[/dim]")
-            
-    except Exception as e:
-        console.print(f"[red]Error listing symbols: {e}[/red]")
-        logger.error(f"List dynamic symbols command error: {e}", exc_info=True)
-
-
 @app.command("add-symbol")
 def add_symbol(
     symbol: str = typer.Argument(..., help="Stock symbol to add"),
@@ -1947,9 +1904,3 @@ def remove_symbol(
 ) -> None:
     """Remove a symbol from the active session."""
     asyncio.run(remove_symbol_command(symbol, immediate))
-
-
-@app.command("list-dynamic")
-def list_dynamic() -> None:
-    """List dynamically added symbols in the active session."""
-    asyncio.run(list_dynamic_symbols_command())
