@@ -80,13 +80,21 @@ class StreamRequirementsCoordinator:
             session_config: Session configuration object
             time_manager: TimeManager instance (for date ranges)
         """
-        self.session_config = session_config
+        self._session_config = session_config
         self.time_manager = time_manager
         
-        # Extract config values
+        # Extract config values (immutable)
         self.symbols = session_config.session_data_config.symbols
         self.streams = session_config.session_data_config.streams
-        self.mode = session_config.mode  # "backtest" or "live"
+    
+    @property
+    def mode(self) -> str:
+        """Get operation mode from session config.
+        
+        Returns:
+            'live' or 'backtest'
+        """
+        return self._session_config.mode
     
     def validate_requirements(
         self,

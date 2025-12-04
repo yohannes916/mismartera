@@ -27,11 +27,14 @@ def show_comprehensive_status() -> None:
     session_data = get_session_data()
     
     # Auto-initialize backtest if in backtest mode and not initialized
-    if data_mgr and system_mgr.mode.value == "backtest" and data_mgr.backtest_start_date is None:
+    # CRITICAL: backtest_start_date is ONLY in TimeManager (single source of truth)
+    if system_mgr.mode.value == "backtest":
         try:
-            with SessionLocal() as session:
-                data_mgr.init_backtest(session)
-                logger.info("Auto-initialized backtest for system status display")
+            time_mgr = system_mgr.get_time_manager()
+            if time_mgr.backtest_start_date is None:
+                with SessionLocal() as session:
+                    time_mgr.init_backtest(session)
+                    logger.info("Auto-initialized backtest for system status display")
         except Exception as e:
             logger.warning(f"Could not auto-initialize backtest: {e}")
     
@@ -59,20 +62,25 @@ def show_comprehensive_status() -> None:
     mode_color = "cyan" if system_mgr.mode.value == "backtest" else "green"
     sys_table.add_row("Mode", f"[{mode_color}]{system_mgr.mode.value.upper()}[/{mode_color}]")
     
-    # Initialized
-    init_status = "Yes" if system_mgr.is_initialized else "No"
-    init_color = "green" if system_mgr.is_initialized else "yellow"
+    # Initialized (check if core managers are created)
+    is_initialized = (
+        system_mgr._time_manager is not None and 
+        system_mgr._data_manager is not None
+    )
+    init_status = "Yes" if is_initialized else "No"
+    init_color = "green" if is_initialized else "yellow"
     sys_table.add_row("Initialized", f"[{init_color}]{init_status}[/{init_color}]")
     
-    # Current time (TimeProvider is always available as single source of truth)
-    if data_mgr:
-        current_time = data_mgr.get_current_time()
+    # Current time (get from TimeManager - single source of truth)
+    try:
+        time_mgr = system_mgr.get_time_manager()
+        current_time = time_mgr.get_current_time()
         time_str = current_time.strftime("%Y-%m-%d %H:%M:%S ET")
         if system_mgr.mode.value == "backtest":
             time_str += " [dim](simulated)[/dim]"
         sys_table.add_row("System Time", time_str)
-    else:
-        sys_table.add_row("System Time", "[yellow]DataManager not initialized[/yellow]")
+    except Exception as e:
+        sys_table.add_row("System Time", "[yellow]TimeManager not available[/yellow]")
     
     console.print(sys_table)
     console.print()
@@ -129,8 +137,7 @@ def show_comprehensive_status() -> None:
         _show_data_manager_details(data_mgr, system_mgr)
     
     # ==================== MARKET STATUS ====================
-    if data_mgr is not None:
-        _show_market_status(data_mgr)
+    _show_market_status(system_mgr)
     
     # ==================== SESSION DATA ====================
     _show_session_data(session_data)
@@ -177,12 +184,16 @@ def _show_data_manager_details(data_mgr, system_mgr):
     dm_table.add_row("Provider Connected", provider_status)
     dm_table.add_row("Operation Mode", system_mgr.mode.value.upper())
     
-    # Current time (TimeProvider is always available)
-    current_time = data_mgr.get_current_time()
-    time_str = current_time.strftime("%Y-%m-%d %H:%M:%S ET")
-    if system_mgr.mode.value == "backtest":
-        time_str += " [dim](simulated)[/dim]"
-    dm_table.add_row("Current Time", time_str)
+    # Current time (get from TimeManager - single source of truth)
+    try:
+        time_mgr = system_mgr.get_time_manager()
+        current_time = time_mgr.get_current_time()
+        time_str = current_time.strftime("%Y-%m-%d %H:%M:%S ET")
+        if system_mgr.mode.value == "backtest":
+            time_str += " [dim](simulated)[/dim]"
+        dm_table.add_row("Current Time", time_str)
+    except Exception as e:
+        dm_table.add_row("Current Time", "[yellow]TimeManager not available[/yellow]")
     
     # Backtest configuration
     if system_mgr.mode.value == "backtest":
@@ -218,11 +229,16 @@ def _show_data_manager_details(data_mgr, system_mgr):
     console.print()
 
 
-def _show_market_status(data_mgr):
+def _show_market_status(system_mgr):
     """Display market status."""
     try:
+        time_mgr = system_mgr.get_time_manager()
+        current_time = time_mgr.get_current_time()
+        current_date = current_time.date()
+        
         with SessionLocal() as session:
-            market_info = data_mgr.get_current_day_market_info(session)
+            trading_session = time_mgr.get_trading_session(session, current_date)
+            is_holiday = time_mgr.is_holiday(session, current_date)
         
         market_table = Table(title="Market Status", show_header=True, header_style="bold green", box=box.ROUNDED)
         market_table.add_column("Property", style="green", width=25)
@@ -237,25 +253,30 @@ def _show_market_status(data_mgr):
             else:
                 return dt_val.strftime("%H:%M:%S")
         
-        market_table.add_row("Current Time", f"{format_time(market_info.now)} ET")
-        market_table.add_row("Date", f"{market_info.date.strftime('%Y-%m-%d')} ({market_info.date.strftime('%a')})")
+        market_table.add_row("Current Time", f"{current_time.strftime('%H:%M:%S')} ET")
+        market_table.add_row("Date", f"{current_date.strftime('%Y-%m-%d')} ({current_date.strftime('%a')})")
         
         # Market day type
-        if market_info.is_weekend:
+        is_weekend = current_date.weekday() >= 5
+        if is_weekend:
             market_table.add_row("Today", "Weekend")
-        elif market_info.is_holiday:
-            market_table.add_row("Today", f"Holiday: {market_info.holiday_name or 'Market Closed'}")
+        elif is_holiday:
+            holiday_name = trading_session.holiday_name if trading_session else None
+            market_table.add_row("Today", f"Holiday: {holiday_name or 'Market Closed'}")
         else:
             market_table.add_row("Today", "Regular trading day")
         
         # Market hours
-        if market_info.trading_hours:
-            open_time = format_time(market_info.trading_hours.open_time)
-            close_time = format_time(market_info.trading_hours.close_time)
+        if trading_session and not trading_session.is_holiday:
+            open_time = format_time(trading_session.regular_open)
+            close_time = format_time(trading_session.regular_close)
             market_table.add_row("Market Hours", f"{open_time} - {close_time} ET")
         
         # Market status
-        if market_info.is_market_open:
+        with SessionLocal() as session:
+            is_market_open = time_mgr.is_market_open(session, current_time)
+        
+        if is_market_open:
             market_table.add_row("Market Status", "[green]✓ OPEN[/green]")
         else:
             market_table.add_row("Market Status", "[red]✗ CLOSED[/red]")
@@ -337,8 +358,11 @@ def _show_session_data(session_data):
                     if symbol_data.session_low:
                         session_table.add_row(f"  │  └─ Session Low", f"{symbol_data.session_low:.2f}")
                     
-                    quality_color = "green" if symbol_data.bar_quality >= 95 else "yellow" if symbol_data.bar_quality >= 80 else "red"
-                    session_table.add_row(f"  │  └─ Bar Quality", f"[{quality_color}]{symbol_data.bar_quality:.1f}%[/{quality_color}]")
+                    # Display quality for base interval (bar_quality is now Dict[str, float])
+                    if symbol_data.bar_quality and symbol_data.base_interval in symbol_data.bar_quality:
+                        quality_value = symbol_data.bar_quality[symbol_data.base_interval]
+                        quality_color = "green" if quality_value >= 95 else "yellow" if quality_value >= 80 else "red"
+                        session_table.add_row(f"  │  └─ Bar Quality ({symbol_data.base_interval})", f"[{quality_color}]{quality_value:.1f}%[/{quality_color}]")
                     
                     if symbol_data.last_update:
                         session_table.add_row(f"  │  └─ Last Update", symbol_data.last_update.strftime("%H:%M:%S"))
@@ -379,7 +403,11 @@ def _show_session_data(session_data):
 def _show_coordinator_status(system_mgr):
     """Display backtest stream coordinator status."""
     try:
-        coordinator = get_coordinator(system_mgr)
+        # Get SessionCoordinator from system manager
+        coordinator = system_mgr._session_coordinator if hasattr(system_mgr, '_session_coordinator') else None
+        
+        if not coordinator:
+            return
         
         coord_table = Table(title="Backtest Stream Coordinator", show_header=True, header_style="bold purple", box=box.ROUNDED)
         coord_table.add_column("Property", style="purple", width=25)
@@ -452,8 +480,12 @@ def _show_health_indicators(system_mgr, data_mgr, session_data):
     else:
         health_table.add_row("[yellow]⚠ System is stopped[/yellow]")
     
-    # Check initialization
-    if system_mgr.is_initialized:
+    # Check initialization (check if core managers are created)
+    is_initialized = (
+        system_mgr._time_manager is not None and 
+        system_mgr._data_manager is not None
+    )
+    if is_initialized:
         health_table.add_row("[green]✓ All managers initialized[/green]")
     else:
         health_table.add_row("[yellow]⚠ Managers not fully initialized[/yellow]")

@@ -1834,7 +1834,7 @@ async def add_symbol_command(symbol: str, streams: Optional[str]) -> None:
         
         # Add the symbol
         console.print(f"[cyan]Adding symbol {symbol.upper()} to active session...[/cyan]")
-        result = coordinator.add_symbol(symbol.upper(), streams=stream_list, blocking=False)
+        result = coordinator.add_symbol(symbol.upper(), streams=stream_list)
         
         if result:
             console.print(f"[green]✓ Symbol {symbol.upper()} queued for addition[/green]")
@@ -1851,7 +1851,7 @@ async def add_symbol_command(symbol: str, streams: Optional[str]) -> None:
         logger.error(f"Add symbol command error: {e}", exc_info=True)
 
 
-async def remove_symbol_command(symbol: str, immediate: bool) -> None:
+async def remove_symbol_command(symbol: str) -> None:
     """Remove a symbol from the active session."""
     try:
         from app.managers.system_manager import get_system_manager
@@ -1871,14 +1871,10 @@ async def remove_symbol_command(symbol: str, immediate: bool) -> None:
         
         # Remove the symbol
         console.print(f"[cyan]Removing symbol {symbol.upper()} from active session...[/cyan]")
-        result = coordinator.remove_symbol(symbol.upper(), immediate=immediate)
+        result = coordinator.remove_symbol(symbol.upper())
         
         if result:
-            if immediate:
-                console.print(f"[green]✓ Symbol {symbol.upper()} removed immediately[/green]")
-            else:
-                console.print(f"[green]✓ Symbol {symbol.upper()} marked for removal[/green]")
-                console.print("[dim]  Graceful removal: draining queues...[/dim]")
+            console.print(f"[green]✓ Symbol {symbol.upper()} removed from session[/green]")
         else:
             console.print(f"[red]✗ Failed to remove symbol {symbol.upper()}[/red]")
             console.print("[dim]  Symbol may not be dynamically added[/dim]")
@@ -1900,7 +1896,6 @@ def add_symbol(
 @app.command("remove-symbol")
 def remove_symbol(
     symbol: str = typer.Argument(..., help="Stock symbol to remove"),
-    immediate: bool = typer.Option(False, "--immediate", help="Remove immediately without draining queues"),
 ) -> None:
     """Remove a symbol from the active session."""
-    asyncio.run(remove_symbol_command(symbol, immediate))
+    asyncio.run(remove_symbol_command(symbol))

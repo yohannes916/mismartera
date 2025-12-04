@@ -1,0 +1,292 @@
+{
+  "system_manager": {
+    "_state": "RUNNING",
+    "_mode": "BACKTEST",
+    "_start_time": "2024-11-15T09:25:00.000000",
+    "timezone": "America/New_York",
+    "exchange_group": "US_EQUITY",
+    "asset_class": "EQUITY",
+    "backtest_window": {
+      "start_date": "2024-11-01",
+      "end_date": "2024-11-30"
+    }
+  },
+  "performance_metrics": {
+    "analysis_engine": {
+      "min": 0.0028,
+      "max": 0.0052,
+      "avg": 0.0038,
+      "count": 89
+    },
+    "data_processor": {
+      "min": 0.0018,
+      "max": 0.0035,
+      "avg": 0.0024,
+      "count": 1234
+    },
+    "counters": {
+      "bars_processed": 245000,
+      "iterations": 45678,
+      "events_handled": 12500,
+      "records_streamed": 1234,
+      "backpressure_coordinator_to_processor": 0,
+      "backpressure_processor_to_analysis": 0
+    },
+    "backtest_summary": {
+      "total_time": 125.5,
+      "trading_days": 21,
+      "avg_per_day": 5.98,
+      "initial_load": 2.34
+    }
+  },
+  "time_manager": {
+    "current_session": {
+      "date": "2024-11-15",
+      "exchange": "NYSE",
+      "asset_class": "EQUITY",
+      "timezone": "America/New_York",
+      "regular_open": "09:30:00",
+      "regular_close": "16:00:00",
+      "pre_market_open": "04:00:00",
+      "pre_market_close": "09:30:00",
+      "post_market_open": "16:00:00",
+      "post_market_close": "20:00:00",
+      "is_trading_day": true,
+      "is_holiday": false,
+      "is_early_close": false,
+      "holiday_name": null
+    }
+  },
+  "threads": {
+    "session_coordinator": {
+      "thread_info": {
+        "name": "SessionCoordinator",
+        "is_alive": true,
+        "daemon": true
+      },
+      "_running": true,
+      "_session_active": true
+    },
+    "data_processor": {
+      "thread_info": {
+        "name": "DataProcessor",
+        "is_alive": true,
+        "daemon": true
+      },
+      "_running": true,
+      "_derived_intervals": {
+        "AAPL": ["5m", "15m"],
+        "RIVN": ["5m", "15m"]
+      }
+    },
+    "data_quality_manager": {
+      "thread_info": {
+        "name": "DataQualityManager",
+        "is_alive": true,
+        "daemon": true
+      },
+      "_running": true
+    },
+    "analysis_engine": {
+      "thread_info": {
+        "name": "AnalysisEngine",
+        "is_alive": true,
+        "daemon": true
+      },
+      "_running": true
+    }
+  },
+  "session_data": {
+    "_session_active": true,
+    "_active_symbols": ["AAPL", "RIVN"],
+    "symbols": {
+      "AAPL": {
+        "session": {
+          "volume": 125000,
+          "high": 185.50,
+          "low": 183.25,
+          "quality": 100.0,
+          "data": {
+            "ticks": {
+              "count": 45678,
+              "latest": {
+                "timestamp": "2024-11-15T14:35:22",
+                "price": 184.36,
+                "size": 100,
+                "exchange": "NYSE"
+              }
+            },
+            "quotes": {
+              "count": 12345,
+              "latest": {
+                "timestamp": "2024-11-15T14:35:21",
+                "bid": 184.35,
+                "ask": 184.37,
+                "bid_size": 200,
+                "ask_size": 150
+              }
+            },
+            "1m": {
+              "count": 305,
+              "generated": false,
+              "columns": ["timestamp", "open", "high", "low", "close", "volume"],
+              "data": [
+                ["09:30:00", 183.50, 183.75, 183.25, 183.60, 25000],
+                ["09:31:00", 183.60, 183.80, 183.55, 183.70, 18000],
+                ["09:32:00", 183.70, 183.90, 183.65, 183.85, 22000]
+              ]
+            },
+            "5m": {
+              "count": 61,
+              "generated": true,
+              "columns": ["timestamp", "open", "high", "low", "close", "volume"],
+              "data": [
+                ["09:30:00", 183.50, 184.00, 183.25, 183.85, 120000],
+                ["09:35:00", 183.85, 184.20, 183.75, 184.10, 115000]
+              ]
+            },
+            "15m": {
+              "count": 20,
+              "generated": true,
+              "columns": ["timestamp", "open", "high", "low", "close", "volume"],
+              "data": [
+                ["09:30:00", 183.50, 184.50, 183.25, 184.35, 360000]
+              ]
+            }
+          }
+        },
+        "historical": {
+          "loaded": true,
+          "data": {
+            "1m": {
+              "count": 7800,
+              "dates": ["2024-11-14", "2024-11-13", "2024-11-12"],
+              "columns": ["timestamp", "open", "high", "low", "close", "volume"],
+              "data": [
+                ["2024-11-14T09:30:00", 182.50, 182.75, 182.40, 182.60, 25000],
+                ["2024-11-14T09:31:00", 182.60, 182.80, 182.55, 182.70, 18000],
+                ["2024-11-14T09:32:00", 182.70, 182.90, 182.65, 182.85, 22000]
+              ]
+            },
+            "5m": {
+              "count": 1560,
+              "dates": ["2024-11-14", "2024-11-13", "2024-11-12"],
+              "columns": ["timestamp", "open", "high", "low", "close", "volume"],
+              "data": [
+                ["2024-11-14T09:30:00", 182.50, 183.00, 182.40, 182.85, 120000],
+                ["2024-11-14T09:35:00", 182.85, 183.20, 182.75, 183.10, 115000]
+              ]
+            },
+            "15m": {
+              "count": 520,
+              "dates": ["2024-11-14", "2024-11-13", "2024-11-12"],
+              "columns": ["timestamp", "open", "high", "low", "close", "volume"],
+              "data": [
+                ["2024-11-14T09:30:00", 182.50, 183.50, 182.40, 183.35, 360000]
+              ]
+            },
+            "1d": {
+              "count": 20,
+              "columns": ["date", "open", "high", "low", "close", "volume"],
+              "data": [
+                ["2024-11-14", 182.50, 186.20, 182.10, 185.30, 48500000],
+                ["2024-11-13", 181.00, 183.50, 180.50, 182.80, 52300000],
+                ["2024-11-12", 180.50, 181.75, 179.90, 181.20, 45600000]
+              ]
+            }
+          }
+        }
+      },
+      "RIVN": {
+        "session": {
+          "volume": 89000,
+          "high": 15.85,
+          "low": 15.22,
+          "quality": 98.5,
+          "data": {
+            "ticks": {
+              "count": 32145,
+              "latest": {
+                "timestamp": "2024-11-15T14:35:18",
+                "price": 15.54,
+                "size": 200,
+                "exchange": "NASDAQ"
+              }
+            },
+            "quotes": {
+              "count": 8765,
+              "latest": {
+                "timestamp": "2024-11-15T14:35:19",
+                "bid": 15.53,
+                "ask": 15.55,
+                "bid_size": 500,
+                "ask_size": 400
+              }
+            },
+            "1m": {
+              "count": 305,
+              "generated": false,
+              "columns": ["timestamp", "open", "high", "low", "close", "volume"],
+              "data": [
+                ["09:30:00", 15.25, 15.30, 15.22, 15.28, 12000],
+                ["09:31:00", 15.28, 15.35, 15.25, 15.32, 9500]
+              ]
+            },
+            "5m": {
+              "count": 61,
+              "generated": true,
+              "columns": ["timestamp", "open", "high", "low", "close", "volume"],
+              "data": [
+                ["09:30:00", 15.25, 15.45, 15.22, 15.40, 55000]
+              ]
+            }
+          }
+        },
+        "historical": {
+          "loaded": true,
+          "data": {
+            "1m": {
+              "count": 7800,
+              "dates": ["2024-11-14", "2024-11-13"],
+              "columns": ["timestamp", "open", "high", "low", "close", "volume"],
+              "data": [
+                ["2024-11-14T09:30:00", 15.25, 15.30, 15.22, 15.28, 12000],
+                ["2024-11-14T09:31:00", 15.28, 15.35, 15.25, 15.32, 9500]
+              ]
+            },
+            "5m": {
+              "count": 1560,
+              "dates": ["2024-11-14", "2024-11-13"],
+              "columns": ["timestamp", "open", "high", "low", "close", "volume"],
+              "data": [
+                ["2024-11-14T09:30:00", 15.25, 15.45, 15.22, 15.40, 55000]
+              ]
+            },
+            "1d": {
+              "count": 20,
+              "columns": ["date", "open", "high", "low", "close", "volume"],
+              "data": [
+                ["2024-11-14", 15.10, 15.90, 15.05, 15.65, 12800000],
+                ["2024-11-13", 14.95, 15.25, 14.85, 15.15, 15200000]
+              ]
+            }
+          }
+        }
+      }
+    }
+  },
+  "_metadata": {
+    "generated_at": "2024-11-15T14:35:22.123456",
+    "version": "2.0",
+    "complete": false,
+    "diff_mode": true,
+    "changed_paths": [
+      "session_data.symbols.AAPL.session.volume",
+      "session_data.symbols.AAPL.session.high",
+      "session_data.symbols.AAPL.session.data.1m.count",
+      "performance_metrics.counters.iterations",
+      "performance_metrics.counters.bars_processed",
+      "threads.data_processor._running"
+    ]
+  }
+}

@@ -1547,6 +1547,86 @@ class TimeManager:
         }
 
 
+    def to_json(self) -> dict:
+        """Export TimeManager state to JSON format.
+        
+        Returns:
+            Dictionary with current session information including:
+            - Session date and current time
+            - Market hours (regular, pre-market, post-market)
+            - Trading day status (holiday, early close)
+            
+        Note: Duplicate data (mode, backtest_window, timezone) is in system_manager section.
+        """
+        from app.models.database import SessionLocal
+        
+        try:
+            current_time = self.get_current_time()
+            current_time_only = current_time.strftime("%H:%M:%S")
+        except Exception as e:
+            logger.warning(f"Could not get current time: {e}")
+            current_time_only = None
+        
+        # Get current session date from session_data
+        current_session_date = None
+        try:
+            from app.managers.data_manager.session_data import get_session_data
+            session_data = get_session_data()
+            if session_data:
+                session_date = session_data.get_current_session_date()
+                if session_date:
+                    current_session_date = session_date
+        except Exception as e:
+            logger.debug(f"Could not get current session date: {e}")
+        
+        # Get trading session info for current date
+        current_session_info = {
+            "date": current_session_date.isoformat() if current_session_date else None,
+            "time": current_time_only,
+            "regular_open": None,
+            "regular_close": None,
+            "pre_market_open": None,
+            "pre_market_close": None,
+            "post_market_open": None,
+            "post_market_close": None,
+            "is_trading_day": None,
+            "is_holiday": None,
+            "is_early_close": None,
+            "holiday_name": None
+        }
+        
+        if current_session_date:
+            try:
+                with SessionLocal() as db_session:
+                    # Get trading session info
+                    trading_session = self.get_trading_session(
+                        db_session,
+                        current_session_date,
+                        self.default_exchange_group
+                    )
+                    
+                    if trading_session:
+                        current_session_info.update({
+                            "regular_open": trading_session.regular_open.strftime("%H:%M:%S") if trading_session.regular_open else None,
+                            "regular_close": trading_session.regular_close.strftime("%H:%M:%S") if trading_session.regular_close else None,
+                            "pre_market_open": trading_session.pre_market_open.strftime("%H:%M:%S") if trading_session.pre_market_open else None,
+                            "pre_market_close": trading_session.pre_market_close.strftime("%H:%M:%S") if trading_session.pre_market_close else None,
+                            "post_market_open": trading_session.post_market_open.strftime("%H:%M:%S") if trading_session.post_market_open else None,
+                            "post_market_close": trading_session.post_market_close.strftime("%H:%M:%S") if trading_session.post_market_close else None,
+                            "is_trading_day": not trading_session.is_holiday,
+                            "is_holiday": trading_session.is_holiday,
+                            "is_early_close": trading_session.is_early_close,
+                            "holiday_name": trading_session.holiday_name
+                        })
+            except Exception as e:
+                logger.debug(f"Could not get trading session info: {e}")
+        
+        # Return only current_session (other data is in system_manager section)
+        return {
+            "current_session": current_session_info
+        }
+
+
 def get_time_manager(system_manager=None) -> TimeManager:
     """Get or create the global TimeManager singleton instance
     

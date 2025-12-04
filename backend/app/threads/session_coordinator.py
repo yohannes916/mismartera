@@ -8,7 +8,7 @@ Key Responsibilities:
 1. Historical data loading and updating (EVERY SESSION)
 2. Historical indicator calculation (EVERY SESSION)
 3. Quality calculation for historical bars (EVERY SESSION)
-4. Queue loading (backtest: prefetch_days; live: API streams)
+4. Queue loading (backtest: current day data; live: API streams)
 5. Session activation signaling
 6. Streaming phase with time advancement
 7. End-of-session logic and next day advancement
@@ -80,17 +80,13 @@ class SessionCoordinator(threading.Thread):
     def __init__(
         self,
         system_manager,
-        data_manager,
-        session_config: SessionConfig,
-        mode: str = "backtest"
+        data_manager
     ):
         """Initialize Session Coordinator.
         
         Args:
-            system_manager: Reference to SystemManager
+            system_manager: Reference to SystemManager (single source of truth)
             data_manager: Reference to DataManager
-            session_config: Session configuration (Phase 2.1)
-            mode: Operation mode ("backtest" or "live")
         """
         super().__init__(name="SessionCoordinator", daemon=True)
         
@@ -98,13 +94,21 @@ class SessionCoordinator(threading.Thread):
         self._system_manager = system_manager
         self._data_manager = data_manager
         self._time_manager = system_manager.get_time_manager()
-        self.session_config = session_config
-        self.mode = mode
         
         # Phase 1 & 2 components (NEW architecture)
         self.session_data = get_session_data()  # Use singleton
         self.metrics = PerformanceMetrics()
         self.subscriptions: Dict[str, StreamSubscription] = {}
+        
+        # Extract immutable config values during init (performance optimization)
+        session_config = self._system_manager.session_config
+        self._symbols = session_config.session_data_config.symbols
+        self._streams = session_config.session_data_config.streams
+        
+        # Derived intervals are determined from the streams config
+        # The coordinator will mark which intervals are STREAMED vs GENERATED
+        # This is computed later in _determine_stream_sources()
+        self._derived_intervals = []  # Will be populated during stream determination
         
         # Phase 4 & 5: DataProcessor and DataQualityManager (wired by SystemManager)
         self.data_processor: Optional[object] = None  # DataProcessor instance
@@ -154,7 +158,7 @@ class SessionCoordinator(threading.Thread):
             )
         
         logger.info(
-            f"SessionCoordinator initialized (mode={mode}, "
+            f"SessionCoordinator initialized (mode={session_config.mode}, "
             f"symbols={len(session_config.session_data_config.symbols)})"
         )
     
@@ -212,6 +216,30 @@ class SessionCoordinator(threading.Thread):
         """Stop the coordinator thread gracefully."""
         logger.info("Stopping SessionCoordinator...")
         self._stop_event.set()
+    
+    # =========================================================================
+    # Properties - Single Source of Truth via SystemManager
+    # =========================================================================
+    
+    @property
+    def mode(self) -> str:
+        """Get operation mode from SystemManager (single source of truth).
+        
+        Fast O(1) access - SystemManager stores mode as attribute.
+        
+        Returns:
+            'live' or 'backtest'
+        """
+        return self._system_manager.mode.value
+    
+    @property
+    def session_config(self) -> SessionConfig:
+        """Get session config from SystemManager (single source of truth).
+        
+        Returns:
+            SessionConfig instance
+        """
+        return self._system_manager.session_config
     
     # =========================================================================
     # Public API - Thread-Safe Accessors
@@ -492,6 +520,10 @@ class SessionCoordinator(threading.Thread):
         current_date = current_time.date()
         logger.info(f"[SESSION_FLOW] PHASE_1.3: Current session date: {current_date}, time: {current_time.time()}")
         
+        # Increment trading days counter for performance metrics
+        self.metrics.increment_trading_days()
+        logger.debug(f"[SESSION_FLOW] PHASE_1.3: Incremented trading days counter (now: {self.metrics.backtest_trading_days})")
+        
         # Log session info
         logger.info(f"Initializing session for {current_date}")
         logger.info(
@@ -544,9 +576,11 @@ class SessionCoordinator(threading.Thread):
         symbols_to_process = symbols or self.session_config.session_data_config.symbols
         logger.info(f"[SESSION_FLOW] PHASE_2.1: Pre-registering {len(symbols_to_process)} symbols")
         for symbol in symbols_to_process:
-            if symbol not in self.session_data._active_symbols:
+            if symbol not in self.session_data._symbols:  # FIX: Check _symbols, not _active_symbols
                 self.session_data.register_symbol(symbol)
                 logger.debug(f"Pre-registered symbol: {symbol}")
+            else:
+                logger.debug(f"Symbol {symbol} already registered")
         
         # Clear ALL data (current + historical) BEFORE loading
         # Now symbols are registered, so clear will work
@@ -579,6 +613,35 @@ class SessionCoordinator(threading.Thread):
             f"[SESSION_FLOW] PHASE_2.1: Complete - {total_bars} bars loaded in {elapsed:.3f}s"
         )
     
+    def _generate_indicator_key(self, base_name: str, config: Dict[str, Any]) -> str:
+        """Generate descriptive storage key for an indicator.
+        
+        Format: {base_name}_{period}
+        Examples:
+        - "avg_volume" + period "2d" → "avg_volume_2d"
+        - "avg_volume" + period "10d" → "avg_volume_10d"
+        - "max_price" + period "5d" → "max_price_5d"
+        - "avg_volume" + period "390m" → "avg_volume_390m" (intraday)
+        
+        This allows multiple indicators with same base name but different periods.
+        
+        Args:
+            base_name: Base indicator name from config
+            config: Indicator configuration dict
+        
+        Returns:
+            Descriptive storage key
+        """
+        period = config.get('period', '')
+        
+        if period:
+            # Parse period to normalize format
+            period_str = period.replace('d', 'd').replace('m', 'm')  # Keep as-is
+            return f"{base_name}_{period_str}"
+        else:
+            # No period specified, use base name only
+            return base_name
+    
     def _calculate_historical_indicators(self):
         """Calculate all historical indicators before EVERY session.
         
@@ -586,6 +649,7 @@ class SessionCoordinator(threading.Thread):
         - For each indicator in config:
           - Calculate based on type (trailing_average, trailing_max, trailing_min)
           - Store in session_data with indexed access
+        - Auto-generates descriptive keys (e.g., "avg_volume_2d")
         
         Reference: SESSION_ARCHITECTURE.md lines 380-440
         """
@@ -595,46 +659,65 @@ class SessionCoordinator(threading.Thread):
             logger.info("No historical indicators configured, skipping")
             return
         
-        start_time = self.metrics.start_timer()
-        logger.info(f"Calculating {len(indicators)} historical indicators")
+        # Debug: Check what symbols are registered
+        logger.debug(f"Registered symbols in session_data: {list(self.session_data._symbols.keys())}")
         
-        for indicator_name, indicator_config in indicators.items():
-            try:
-                indicator_type = indicator_config['type']
-                
-                if indicator_type == 'trailing_average':
-                    result = self._calculate_trailing_average(
-                        indicator_name,
-                        indicator_config
+        start_time = self.metrics.start_timer()
+        symbols = self.session_config.session_data_config.symbols
+        logger.info(f"Calculating {len(indicators)} historical indicators for {len(symbols)} symbols")
+        
+        # Calculate indicators per symbol
+        for symbol in symbols:
+            for indicator_name, indicator_config in indicators.items():
+                try:
+                    indicator_type = indicator_config['type']
+                    period = indicator_config.get('period', '')
+                    
+                    # Generate descriptive storage key: base_name + period
+                    # Examples: "avg_volume_2d", "max_price_10d", "avg_volume_390m"
+                    storage_key = self._generate_indicator_key(indicator_name, indicator_config)
+                    
+                    if indicator_type == 'trailing_average':
+                        result = self._calculate_trailing_average(
+                            symbol,
+                            indicator_name,
+                            indicator_config
+                        )
+                    elif indicator_type == 'trailing_max':
+                        result = self._calculate_trailing_max(
+                            symbol,
+                            indicator_name,
+                            indicator_config
+                        )
+                    elif indicator_type == 'trailing_min':
+                        result = self._calculate_trailing_min(
+                            symbol,
+                            indicator_name,
+                            indicator_config
+                        )
+                    else:
+                        logger.error(
+                            f"Unknown indicator type '{indicator_type}' for {indicator_name}"
+                        )
+                        continue
+                    
+                    # Store in session_data with symbol and descriptive key
+                    self.session_data.set_historical_indicator(symbol, storage_key, result)
+                    
+                    logger.info(
+                        f"✓ Calculated indicator for {symbol}: '{storage_key}' = {result:.2f} "
+                        f"(config_name={indicator_name}, type={indicator_type}, period={period})"
                     )
-                elif indicator_type == 'trailing_max':
-                    result = self._calculate_trailing_max(
-                        indicator_name,
-                        indicator_config
-                    )
-                elif indicator_type == 'trailing_min':
-                    result = self._calculate_trailing_min(
-                        indicator_name,
-                        indicator_config
-                    )
-                else:
+                    
+                    # Verify it was stored
+                    stored_value = self.session_data.get_historical_indicator(symbol, storage_key)
+                    logger.debug(f"Verified stored value for {symbol}.{storage_key}: {stored_value}")
+                    
+                except Exception as e:
                     logger.error(
-                        f"Unknown indicator type '{indicator_type}' for {indicator_name}"
+                        f"Error calculating indicator '{indicator_name}' for {symbol}: {e}",
+                        exc_info=True
                     )
-                    continue
-                
-                # Store in session_data with indexed access
-                self.session_data.set_historical_indicator(indicator_name, result)
-                
-                logger.debug(
-                    f"Calculated indicator '{indicator_name}' (type={indicator_type})"
-                )
-                
-            except Exception as e:
-                logger.error(
-                    f"Error calculating indicator '{indicator_name}': {e}",
-                    exc_info=True
-                )
         
         elapsed = self.metrics.elapsed_time(start_time)
         logger.info(f"Historical indicators calculated ({elapsed:.3f}s)")
@@ -694,9 +777,12 @@ class SessionCoordinator(threading.Thread):
             logger.info("[SESSION_FLOW] PHASE_2.3: No historical bars found for quality calculation")
         
         # PHASE 2.4: Generate derived historical bars from base historical bars
-        logger.info("[SESSION_FLOW] PHASE_2.4: Generating derived historical bars")
-        self._generate_derived_historical_bars()
-        logger.info("[SESSION_FLOW] PHASE_2.4: Complete - Derived historical bars generated")
+        # DISABLED: Historical should only contain intervals specified in historical config
+        # Derived intervals (5m, 10m, etc.) are for streaming/session data, not historical
+        # logger.info("[SESSION_FLOW] PHASE_2.4: Generating derived historical bars")
+        # self._generate_derived_historical_bars()
+        # logger.info("[SESSION_FLOW] PHASE_2.4: Complete - Derived historical bars generated")
+        logger.info("[SESSION_FLOW] PHASE_2.4: Skipping derived historical bars (only load configured intervals)")
     
     def _assign_perfect_quality(self):
         """Assign 100% quality to all historical bars (when quality disabled)."""
@@ -737,8 +823,8 @@ class SessionCoordinator(threading.Thread):
         """
         logger.debug(f"[SESSION_FLOW] PHASE_2.3: Calculating quality for {symbol} {interval}")
         
-        # Get historical bars
-        symbol_data = self.session_data.get_symbol_data(symbol)
+        # Get historical bars (internal=True since session not active yet)
+        symbol_data = self.session_data.get_symbol_data(symbol, internal=True)
         if not symbol_data:
             logger.debug(f"No symbol data for {symbol}, quality = None")
             return None
@@ -840,7 +926,8 @@ class SessionCoordinator(threading.Thread):
             if not intervals_to_generate:
                 continue
             
-            symbol_data = self.session_data.get_symbol_data(symbol)
+            # internal=True since session not active yet (Phase 2)
+            symbol_data = self.session_data.get_symbol_data(symbol, internal=True)
             if not symbol_data:
                 continue
             
@@ -889,7 +976,8 @@ class SessionCoordinator(threading.Thread):
             base_interval: Base interval (e.g., "1m")
             base_quality: Quality percentage from base interval
         """
-        symbol_data = self.session_data.get_symbol_data(symbol)
+        # internal=True since session not active yet (Phase 2)
+        symbol_data = self.session_data.get_symbol_data(symbol, internal=True)
         if not symbol_data:
             return
         
@@ -987,7 +1075,7 @@ class SessionCoordinator(threading.Thread):
     def _load_queues(self):
         """Load queues with data for streaming phase.
         
-        Backtest: Load prefetch_days of data into queues
+        Backtest: Load current session day data into queues
         Live: Start API streams
         
         Uses stream/generate marking from _mark_stream_generate() to know
@@ -1010,10 +1098,10 @@ class SessionCoordinator(threading.Thread):
         logger.info(f"[SESSION_FLOW] PHASE_3.1: Complete - Queues loaded in {elapsed:.3f}s")
     
     def _load_backtest_queues(self, symbols: Optional[List[str]] = None):
-        """Load prefetch_days of data into queues for backtest mode.
+        """Load current session day data into queues for backtest mode.
         
         This method populates queues with bar data from the database
-        for the upcoming trading days.
+        for the current trading day.
         
         Uses DataManager to fetch bars for each symbol and interval
         that is marked as STREAMED.
@@ -1928,13 +2016,19 @@ class SessionCoordinator(threading.Thread):
                     end_date
                 )
                 
+                if not bars:
+                    logger.warning(
+                        f"[SESSION_FLOW] PHASE_2.1: No {interval} bars found for {symbol} "
+                        f"in range {start_date} to {end_date} - check if data exists in parquet storage"
+                    )
+                
                 # Store in session_data
                 for bar in bars:
                     self.session_data.append_bar(symbol, interval, bar)
                 
-                logger.debug(
-                    f"Loaded {len(bars)} {interval} bars for {symbol} "
-                    f"({start_date} to {end_date})"
+                logger.info(
+                    f"[SESSION_FLOW] PHASE_2.1: Stored {len(bars)} {interval} bars for {symbol} "
+                    f"in historical storage ({start_date} to {end_date})"
                 )
     
     def _resolve_symbols(self, apply_to) -> List[str]:
@@ -1990,7 +2084,7 @@ class SessionCoordinator(threading.Thread):
             start_date = self._time_manager.get_previous_trading_date(
                 session,
                 end_date,
-                n=trailing_days,
+                n=days_to_go_back,  # FIXED: was trailing_days, should be days_to_go_back
                 exchange=self.session_config.exchange_group
             )
         
@@ -2019,7 +2113,7 @@ class SessionCoordinator(threading.Thread):
         
         Args:
             symbol: Stock symbol
-            interval: Bar interval (e.g., "1m")
+            interval: Bar interval (e.g., "1m", "1d")
             start_date: Start date
             end_date: End date
             
@@ -2032,12 +2126,17 @@ class SessionCoordinator(threading.Thread):
         try:
             logger.info(
                 f"[SESSION_FLOW] PHASE_2.1: Loading {symbol} {interval} bars "
-                f"from {start_date} to {end_date}"
+                f"from {start_date} to {end_date} (interval type: {type(interval).__name__})"
             )
             
             # Convert dates to datetimes (start of day to end of day)
             start_dt = datetime.combine(start_date, time(0, 0))
             end_dt = datetime.combine(end_date, time(23, 59, 59))
+            
+            logger.debug(
+                f"[SESSION_FLOW] PHASE_2.1: Calling data_manager.get_bars with: "
+                f"symbol={symbol}, interval={interval}, start={start_dt}, end={end_dt}"
+            )
             
             # Query via DataManager using existing API
             with SessionLocal() as db_session:
@@ -2050,8 +2149,18 @@ class SessionCoordinator(threading.Thread):
                 )
             
             logger.info(
-                f"[SESSION_FLOW] PHASE_2.1: Loaded {len(bars)} bars for {symbol} {interval}"
+                f"[SESSION_FLOW] PHASE_2.1: Loaded {len(bars)} {interval} bars for {symbol}"
             )
+            
+            if bars and interval == "1d":
+                logger.info(
+                    f"[SESSION_FLOW] PHASE_2.1: First 1d bar: {bars[0].timestamp.date()} "
+                    f"close=${bars[0].close}, vol={bars[0].volume}"
+                )
+                logger.info(
+                    f"[SESSION_FLOW] PHASE_2.1: Last 1d bar: {bars[-1].timestamp.date()} "
+                    f"close=${bars[-1].close}, vol={bars[-1].volume}"
+                )
             
             return bars
             
@@ -2071,9 +2180,10 @@ class SessionCoordinator(threading.Thread):
     
     def _calculate_trailing_average(
         self,
+        symbol: str,
         indicator_name: str,
         config: Dict[str, Any]
-    ) -> Any:
+    ) -> float:
         """Calculate trailing average indicator.
         
         Supports two granularities:
@@ -2101,9 +2211,12 @@ class SessionCoordinator(threading.Thread):
         )
         
         if granularity == 'daily':
-            # Daily: one value per day, return average
-            result = self._calculate_daily_average(
-                field, period_days, skip_early_close
+            # Single value: average over all N days for this symbol
+            return self._calculate_daily_average(
+                symbol,
+                field,
+                period_days,
+                skip_early_close=False
             )
         elif granularity == 'minute':
             # Minute: average for each minute of trading day
@@ -2117,6 +2230,7 @@ class SessionCoordinator(threading.Thread):
     
     def _calculate_trailing_max(
         self,
+        symbol: str,
         indicator_name: str,
         config: Dict[str, Any]
     ) -> float:
@@ -2145,6 +2259,7 @@ class SessionCoordinator(threading.Thread):
     
     def _calculate_trailing_min(
         self,
+        symbol: str,
         indicator_name: str,
         config: Dict[str, Any]
     ) -> float:
@@ -2205,6 +2320,7 @@ class SessionCoordinator(threading.Thread):
     
     def _calculate_daily_average(
         self,
+        symbol: str,
         field: str,
         period_days: int,
         skip_early_close: bool = False
@@ -2219,21 +2335,78 @@ class SessionCoordinator(threading.Thread):
         Returns:
             Average value
         """
-        # TODO: Query historical bars and calculate average
-        # For now, return placeholder
         logger.debug(
-            f"Calculating daily average for {field} over {period_days} days "
-            f"(skip_early_close={skip_early_close}) - TODO"
+            f"Calculating daily average for {symbol} {field} over {period_days} days "
+            f"(skip_early_close={skip_early_close})"
         )
         
-        # Placeholder: return 0.0
-        # Real implementation would:
-        # 1. Get all daily bars for period
-        # 2. Extract field values
-        # 3. Filter out early close days if requested
-        # 4. Calculate average
+        # Collect field values from this symbol's 1d bars
+        field_values = []
         
-        return 0.0
+        # Use internal=True since session not active yet (Phase 2)
+        symbol_data = self.session_data.get_symbol_data(symbol, internal=True)
+        if symbol_data is None:
+            logger.warning(f"No symbol_data for {symbol}")
+            return 0.0
+        
+        # Debug: Log all intervals in historical_bars
+        logger.debug(
+            f"Historical bars intervals for {symbol}: "
+            f"{list(symbol_data.historical_bars.keys())}"
+        )
+        
+        # Get 1d historical bars for this symbol
+        historical_1d = symbol_data.historical_bars.get("1d", {})
+        
+        if not historical_1d:
+            logger.warning(
+                f"No 1d historical bars for {symbol}. "
+                f"Available intervals: {list(symbol_data.historical_bars.keys())}"
+            )
+            return 0.0
+        
+        # Get all dates, sorted
+        dates = sorted(historical_1d.keys())
+        logger.debug(f"Found {len(dates)} dates with 1d bars for {symbol}: {dates}")
+        
+        # Take last N days (should match period_days if data loaded correctly)
+        dates_to_use = dates[-period_days:] if len(dates) > period_days else dates
+        logger.debug(f"Using {len(dates_to_use)} dates for {period_days}-day period: {dates_to_use}")
+        
+        for date in dates_to_use:
+            bars = historical_1d[date]
+            logger.debug(f"Processing {len(bars)} bars for date {date}")
+            for bar in bars:
+                # Extract field value
+                if field == 'volume':
+                    value = bar.volume
+                elif field == 'close':
+                    value = bar.close
+                elif field == 'open':
+                    value = bar.open
+                elif field == 'high':
+                    value = bar.high
+                elif field == 'low':
+                    value = bar.low
+                else:
+                    logger.warning(f"Unknown field: {field}")
+                    continue
+                
+                field_values.append(value)
+        
+        if not field_values:
+            logger.warning(f"No data to calculate {field} average for {symbol}")
+            return 0.0
+        
+        # Calculate average
+        avg = sum(field_values) / len(field_values)
+        
+        logger.info(
+            f"✓ Calculated daily {field} average for {symbol}: {avg:.2f} "
+            f"(from {len(field_values)} values over {len(dates_to_use)} days, values={field_values})"
+        )
+        
+        return avg
     
     def _calculate_intraday_average(
         self,
@@ -2650,3 +2823,23 @@ class SessionCoordinator(threading.Thread):
         if delay_seconds > 0.001:  # Only sleep if > 1ms
             import time
             time.sleep(delay_seconds)
+    
+    def to_json(self, complete: bool = True) -> dict:
+        """Export SessionCoordinator state to JSON format.
+        
+        Args:
+            complete: If True, return full data. If False, return delta from last export.
+                     (Note: Delta mode not yet implemented, returns full data)
+        
+        Returns:
+            Dictionary with thread info and state
+        """
+        return {
+            "thread_info": {
+                "name": self.name,
+                "is_alive": self.is_alive(),
+                "daemon": self.daemon
+            },
+            "_running": self._running,
+            "_session_active": self._session_active
+        }

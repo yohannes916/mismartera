@@ -168,3 +168,151 @@ def status_command() -> None:
     
     # Delegate to the comprehensive implementation
     show_comprehensive_status()
+
+
+def export_status_command(complete: bool = True, filename: Optional[str] = None, format: str = "expanded") -> None:
+    """Export system status to JSON file.
+    
+    Exports complete system state including session data, threads, performance metrics,
+    and configuration to a JSON file. Supports delta mode for efficient updates.
+    
+    Args:
+        complete: If True, export full data. If False, export delta from last export.
+                 Default: True
+        filename: Output file path. If not provided, auto-generates to data/status/:
+                 data/status/system_status_<session_config_name>_<complete|delta>_<date>_<time>.json
+        format: Array formatting - "expanded" (multi-line, default) or "compact" (single-line for inspection)
+    
+    Examples:
+        system export-status
+        system export-status complete=false
+        system export-status format=compact  # Single-line arrays for easier inspection
+        system export-status complete=true status/my_status.json
+        system export-status my_status.json
+    """
+    import json
+    import re
+    from pathlib import Path
+    
+    system_mgr = get_system_manager()
+    
+    try:
+        import time
+        
+        # Track timing for metadata
+        start_time = time.time()
+        
+        # Get system state (complete or delta)
+        system_state = system_mgr.system_info(complete=complete)
+        
+        # Auto-generate filename if not provided
+        if filename is None:
+            from datetime import datetime
+            
+            # Get current time (prefer TimeManager, fallback to system time)
+            try:
+                time_mgr = system_mgr.get_time_manager()
+                current_time = time_mgr.get_current_time()
+            except Exception:
+                current_time = datetime.now()
+            
+            config_name = "default"
+            if system_mgr.session_config:
+                config_name = system_mgr.session_config.session_name.replace(" ", "_")
+            
+            mode_suffix = "complete" if complete else "delta"
+            timestamp = current_time.strftime("%Y%m%d_%H%M%S")
+            filename = f"data/status/system_status_{config_name}_{mode_suffix}_{timestamp}.json"
+        
+        # Ensure directory exists
+        filepath = Path(filename)
+        filepath.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Track JSON serialization time
+        json_start = time.time()
+        json_str = json.dumps(system_state, indent=2, default=str)
+        json_time_ms = (time.time() - json_start) * 1000
+        
+        # Track compact formatting time (if applied)
+        compact_time_ms = 0
+        if format == "compact":
+            compact_start = time.time()
+            
+            # Compact bar data arrays - any array containing only primitives (no nested objects/arrays)
+            # This makes bar data like ["09:34:00", 13.48, 13.48, 13.48, 13.48, 1072.0] single-line
+            def compact_simple_array(match):
+                """Compact a multi-line array containing only primitives into a single line."""
+                array_content = match.group(1)  # Content between [ and ]
+                # Extract all values (strings, numbers, booleans, nulls)
+                values = re.findall(r'"[^"]*"|-?\d+\.?\d*(?:[eE][+-]?\d+)?|true|false|null', array_content)
+                if values:  # Only compact if we found values
+                    return f"[{', '.join(values)}]"
+                return match.group(0)  # Return original if no match
+            
+            # Match arrays that:
+            # 1. Start with [ and end with ]
+            # 2. Contain newlines (multi-line)
+            # 3. Don't contain nested { } or [ ] (only primitives)
+            # This pattern works for bar data arrays but preserves structure of complex nested arrays
+            pattern = r'\[([^\[\]{}]*\n[^\[\]{}]*)\]'
+            json_str = re.sub(pattern, compact_simple_array, json_str)
+            
+            compact_time_ms = (time.time() - compact_start) * 1000
+        
+        # Calculate total time up to this point (before metadata update)
+        total_time_ms = (time.time() - start_time) * 1000
+        
+        # Update metadata with timing information
+        # Parse back to dict to update metadata
+        system_state_updated = json.loads(json_str)
+        if "_metadata" in system_state_updated:
+            system_state_updated["_metadata"]["export_timing"] = {
+                "_info": "Time taken to prepare JSON export (ms)",
+                "total_ms": round(total_time_ms, 2),
+                "json_serialization_ms": round(json_time_ms, 2),
+                "compact_formatting_ms": round(compact_time_ms, 2) if format == "compact" else None,
+                "format_applied": format
+            }
+        
+        # Re-serialize with updated metadata
+        json_str = json.dumps(system_state_updated, indent=2, default=str)
+        
+        # Re-apply compact formatting if it was requested (metadata update breaks it)
+        if format == "compact":
+            def compact_simple_array(match):
+                array_content = match.group(1)
+                values = re.findall(r'"[^"]*"|-?\d+\.?\d*(?:[eE][+-]?\d+)?|true|false|null', array_content)
+                if values:
+                    return f"[{', '.join(values)}]"
+                return match.group(0)
+            
+            pattern = r'\[([^\[\]{}]*\n[^\[\]{}]*)\]'
+            json_str = re.sub(pattern, compact_simple_array, json_str)
+        
+        with open(filepath, 'w') as f:
+            f.write(json_str)
+        
+        file_size = filepath.stat().st_size
+        export_mode = "complete" if complete else "delta"
+        console.print(f"[green]✓[/green] System status exported to: {filepath}")
+        console.print(f"[dim]Mode: {export_mode} | Format: {format} | File size: {file_size:,} bytes ({file_size / 1024:.1f} KB)[/dim]")
+        
+        # Show timing information
+        timing_parts = [f"Total: {total_time_ms:.0f}ms", f"Serialization: {json_time_ms:.0f}ms"]
+        if format == "compact":
+            timing_parts.append(f"Compact: {compact_time_ms:.0f}ms")
+        console.print(f"[dim]Export timing: {' | '.join(timing_parts)}[/dim]")
+        
+        # Show summary
+        if "session_data" in system_state and "symbols" in system_state["session_data"]:
+            symbol_count = len(system_state["session_data"]["symbols"])
+            console.print(f"[dim]Symbols: {symbol_count}[/dim]")
+        
+        if "threads" in system_state:
+            thread_count = len(system_state["threads"])
+            console.print(f"[dim]Threads: {thread_count}[/dim]")
+    
+    except Exception as e:
+        console.print(f"[red]✗[/red] Failed to export system status")
+        console.print(f"[dim]{str(e)}[/dim]")
+        logger.error(f"Export status command error: {e}", exc_info=True)

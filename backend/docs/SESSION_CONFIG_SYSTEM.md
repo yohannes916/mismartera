@@ -167,7 +167,133 @@ This ensures data is flowing before any trading logic activates.
 | `trade_api` | string | Yes | "alpaca", "schwab" |
 | `account_id` | string | No | Any string |
 
-### 5. Metadata (Optional)
+### 5. Backtest Configuration (Backtest Mode Only)
+```json
+"backtest_config": {
+  "start_date": "2025-07-02",
+  "end_date": "2025-07-03",
+  "speed_multiplier": 60.0
+}
+```
+
+**Required**: Yes (only in backtest mode)
+
+**Fields:**
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `start_date` | string | Yes | Start date (YYYY-MM-DD) |
+| `end_date` | string | Yes | End date (YYYY-MM-DD) |
+| `speed_multiplier` | float | No (default: 0.0) | Speed multiplier (0=max, >0=realtime multiplier) |
+
+**Speed Multiplier:**
+- `0.0` - Maximum speed (no delay)
+- `1.0` - Real-time speed (1 second = 1 second)
+- `60.0` - 60x speed (1 second = 1 minute)
+- `360.0` - 360x speed (1 second = 6 minutes)
+
+### 6. Historical Configuration
+```json
+"session_data_config": {
+  "historical": {
+    "enable_quality": true,
+    "data": [
+      {
+        "trailing_days": 3,
+        "intervals": ["1m"],
+        "apply_to": "all"
+      },
+      {
+        "trailing_days": 10,
+        "intervals": ["1d"],
+        "apply_to": "all"
+      }
+    ],
+    "indicators": {
+      "avg_volume": {
+        "type": "trailing_average",
+        "period": "10d",
+        "granularity": "daily",
+        "field": "volume"
+      },
+      "max_price": {
+        "type": "trailing_max",
+        "period": "5d",
+        "field": "close"
+      }
+    }
+  }
+}
+```
+
+**Required**: No
+
+**Historical Data:**
+- Loads historical bars before each session starts
+- Different `trailing_days` per interval type (1m, 1d, etc.)
+- `apply_to`: "all" or list of specific symbols
+
+**Historical Indicators:**
+
+Indicators are calculated once before each session and stored with auto-generated names that include the period.
+
+**Indicator Types:**
+
+| Type | Description | Returns |
+|------|-------------|---------|
+| `trailing_average` | Average over period | Single value (daily) or 390 values (minute) |
+| `trailing_max` | Maximum over period | Single value |
+| `trailing_min` | Minimum over period | Single value |
+
+**Supported Fields:** `volume`, `close`, `open`, `high`, `low`
+
+**Storage Keys:**
+Indicators are stored with descriptive keys that include the period:
+- Config name: `avg_volume`, Period: `10d` → Storage key: **`avg_volume_10d`**
+- Config name: `max_price`, Period: `5d` → Storage key: **`max_price_5d`**
+
+**Access in Analysis Engine:**
+```python
+from app.managers.data_manager.session_data import get_session_data
+
+session_data = get_session_data()
+
+# Get specific indicator
+avg_vol_10d = session_data.get_historical_indicator("avg_volume_10d")
+max_price_5d = session_data.get_historical_indicator("max_price_5d")
+
+# Get all indicators
+all_indicators = session_data.get_all_historical_indicators()
+# {'avg_volume_10d': 12345678.9, 'max_price_5d': 150.25}
+```
+
+**Multiple Periods Example:**
+```json
+{
+  "indicators": {
+    "avg_volume_short": {
+      "type": "trailing_average",
+      "period": "2d",
+      "granularity": "daily",
+      "field": "volume"
+    },
+    "avg_volume_long": {
+      "type": "trailing_average",
+      "period": "10d",
+      "granularity": "daily",
+      "field": "volume"
+    }
+  }
+}
+```
+Storage keys: `avg_volume_short_2d`, `avg_volume_long_10d`
+
+**Granularity Options:**
+- `daily`: Single value (average across all days)
+- `minute`: Array of 390 values (one per minute of trading day)
+
+See `/docs/HISTORICAL_INDICATORS_API.md` for complete documentation.
+
+### 7. Metadata (Optional)
 ```json
 "metadata": {
   "created_by": "user_name",

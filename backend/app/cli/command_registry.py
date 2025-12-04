@@ -331,6 +331,18 @@ SYSTEM_COMMANDS: List[SystemCommandMeta] = [
         description="Show current system status",
         examples=["system status"],
     ),
+    SystemCommandMeta(
+        name="export-status",
+        usage="system export-status [complete=true|false] [format=expanded|compact] [filename]",
+        description="Export system status to JSON file (default: data/status/)",
+        examples=[
+            "system export-status",
+            "system export-status format=compact  # Single-line arrays for easier inspection",
+            "system export-status complete=false",
+            "system export-status complete=true format=compact status/my_status.json",
+            "system export-status output/system_state.json"
+        ],
+    ),
 ]
 
 

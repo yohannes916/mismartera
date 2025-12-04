@@ -203,15 +203,13 @@ class AnalysisEngine(threading.Thread):
         self,
         session_data: SessionData,
         system_manager,
-        session_config: SessionConfig,
         metrics: PerformanceMetrics
     ):
         """Initialize Analysis Engine.
         
         Args:
             session_data: Reference to SessionData (ONLY data source)
-            system_manager: Reference to SystemManager
-            session_config: Session configuration
+            system_manager: Reference to SystemManager (single source of truth)
             metrics: Performance metrics tracker
         """
         super().__init__(name="AnalysisEngine", daemon=True)
@@ -220,7 +218,6 @@ class AnalysisEngine(threading.Thread):
         self.session_data = session_data
         self._system_manager = system_manager
         self._time_manager = system_manager.get_time_manager()
-        self.session_config = session_config
         self.metrics = metrics
         
         # Thread control
@@ -232,12 +229,6 @@ class AnalysisEngine(threading.Thread):
         
         # StreamSubscription for signaling ready to processor
         self._processor_subscription: Optional[StreamSubscription] = None
-        
-        # Mode detection
-        self.mode = "backtest" if session_config.backtest_config else "live"
-        self.speed = 0  # Will be set from config
-        if self.mode == "backtest" and session_config.backtest_config:
-            self.speed = session_config.backtest_config.speed_multiplier
         
         # Loaded strategies
         self._strategies: List[BaseStrategy] = []
@@ -258,6 +249,42 @@ class AnalysisEngine(threading.Thread):
             f"AnalysisEngine initialized: mode={self.mode}, "
             f"speed={self.speed}, quality_threshold={self._min_quality_threshold}"
         )
+    
+    # =========================================================================
+    # Properties - Single Source of Truth via SystemManager
+    # =========================================================================
+    
+    @property
+    def mode(self) -> str:
+        """Get operation mode from SystemManager (single source of truth).
+        
+        Fast O(1) access - SystemManager stores mode as attribute.
+        
+        Returns:
+            'live' or 'backtest'
+        """
+        return self._system_manager.mode.value
+    
+    @property
+    def session_config(self) -> SessionConfig:
+        """Get session config from SystemManager (single source of truth).
+        
+        Returns:
+            SessionConfig instance
+        """
+        return self._system_manager.session_config
+    
+    @property
+    def speed(self) -> int:
+        """Get backtest speed multiplier (computed from session_config).
+        
+        Returns:
+            Speed multiplier (0 = data-driven, >0 = clock-driven)
+        """
+        if self.mode == "backtest":
+            config = self.session_config.backtest_config
+            return config.speed_multiplier if config else 0
+        return 0
     
     # =========================================================================
     # Configuration & Setup
@@ -594,4 +621,23 @@ class AnalysisEngine(threading.Thread):
             ),
             "avg_processing_time": avg_processing_time,
             "min_quality_threshold": self._min_quality_threshold
+        }
+    
+    def to_json(self, complete: bool = True) -> dict:
+        """Export AnalysisEngine state to JSON format.
+        
+        Args:
+            complete: If True, return full data. If False, return delta from last export.
+                     (Note: Delta mode not yet implemented, returns full data)
+        
+        Returns:
+            Dictionary with thread info and state
+        """
+        return {
+            "thread_info": {
+                "name": self.name,
+                "is_alive": self.is_alive(),
+                "daemon": self.daemon
+            },
+            "_running": self._running
         }

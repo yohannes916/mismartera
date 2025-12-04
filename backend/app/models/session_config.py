@@ -28,50 +28,48 @@ from app.logger import logger
 
 @dataclass
 class BacktestConfig:
-    """Backtest configuration for historical simulation.
+    """Backtest configuration.
     
     Attributes:
         start_date: Start date for backtest window (YYYY-MM-DD)
         end_date: End date for backtest window (YYYY-MM-DD)
         speed_multiplier: Speed multiplier (0=max, >0=realtime multiplier)
-        prefetch_days: Days of data to prefetch into queues at session start
     """
     start_date: str
     end_date: str
     speed_multiplier: float = 0.0
-    prefetch_days: int = 1
     
     def validate(self) -> None:
         """Validate backtest configuration."""
-        # Validate date formats
+        from datetime import datetime
+        
+        if not self.start_date:
+            raise ValueError("start_date is required")
+        
+        if not self.end_date:
+            raise ValueError("end_date is required")
+        
+        # Validate date format
         try:
-            start = datetime.strptime(self.start_date, "%Y-%m-%d")
-        except ValueError as e:
-            raise ValueError(
-                f"Invalid start_date format: {self.start_date}. Use YYYY-MM-DD"
-            ) from e
+            datetime.strptime(self.start_date, "%Y-%m-%d")
+        except ValueError:
+            raise ValueError(f"Invalid start_date format: {self.start_date}. Expected YYYY-MM-DD")
         
         try:
-            end = datetime.strptime(self.end_date, "%Y-%m-%d")
-        except ValueError as e:
-            raise ValueError(
-                f"Invalid end_date format: {self.end_date}. Use YYYY-MM-DD"
-            ) from e
+            datetime.strptime(self.end_date, "%Y-%m-%d")
+        except ValueError:
+            raise ValueError(f"Invalid end_date format: {self.end_date}. Expected YYYY-MM-DD")
         
         # Validate date range
-        if start > end:
-            raise ValueError(
-                f"start_date ({self.start_date}) must be before or equal to "
-                f"end_date ({self.end_date})"
-            )
+        start = datetime.strptime(self.start_date, "%Y-%m-%d").date()
+        end = datetime.strptime(self.end_date, "%Y-%m-%d").date()
         
-        # Validate speed multiplier
+        if start > end:
+            raise ValueError(f"start_date ({self.start_date}) must be <= end_date ({self.end_date})")
+        
+        # Validate speed_multiplier
         if self.speed_multiplier < 0:
             raise ValueError("speed_multiplier must be >= 0 (0 = max speed)")
-        
-        # Validate prefetch_days
-        if self.prefetch_days < 1:
-            raise ValueError("prefetch_days must be >= 1")
 
 
 # =============================================================================
@@ -451,8 +449,7 @@ class SessionConfig:
             backtest_config = BacktestConfig(
                 start_date=backtest_data.get("start_date"),
                 end_date=backtest_data.get("end_date"),
-                speed_multiplier=backtest_data.get("speed_multiplier", 0.0),
-                prefetch_days=backtest_data.get("prefetch_days", 1)
+                speed_multiplier=backtest_data.get("speed_multiplier", 0.0)
             )
         
         # Parse session_data_config (required)
@@ -606,8 +603,7 @@ class SessionConfig:
             result["backtest_config"] = {
                 "start_date": self.backtest_config.start_date,
                 "end_date": self.backtest_config.end_date,
-                "speed_multiplier": self.backtest_config.speed_multiplier,
-                "prefetch_days": self.backtest_config.prefetch_days
+                "speed_multiplier": self.backtest_config.speed_multiplier
             }
         
         result["session_data_config"] = {

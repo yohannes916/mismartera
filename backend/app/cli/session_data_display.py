@@ -97,8 +97,11 @@ def generate_session_display(compact: bool = True) -> Table:
             for symbol in active_symbols:
                 symbol_data = session_data.get_symbol_data(symbol)
                 if symbol_data and len(symbol_data.bars_1m) > 0:
-                    total_quality += symbol_data.bar_quality
-                    total_weight += 1.0
+                    # bar_quality is now Dict[str, float], get quality for base interval
+                    base_quality = symbol_data.bar_quality.get(symbol_data.base_interval)
+                    if base_quality is not None:
+                        total_quality += base_quality
+                        total_weight += 1.0
             if total_weight > 0:
                 overall_quality = total_quality / total_weight
         
@@ -157,8 +160,11 @@ def generate_session_display(compact: bool = True) -> Table:
                 symbol_data = session_data.get_symbol_data(symbol)
                 if symbol_data and len(symbol_data.bars_1m) > 0:
                     # Simple average across all symbols with data
-                    total_quality += symbol_data.bar_quality
-                    total_weight += 1.0
+                    # bar_quality is now Dict[str, float], get quality for base interval
+                    base_quality = symbol_data.bar_quality.get(symbol_data.base_interval)
+                    if base_quality is not None:
+                        total_quality += base_quality
+                        total_weight += 1.0
             
             if total_weight > 0:
                 overall_quality = total_quality / total_weight
@@ -204,8 +210,10 @@ def generate_session_display(compact: bool = True) -> Table:
                         main_table.add_row("    Volume", f"{symbol_data.session_volume:,.0f}")
                         
                         # Row 3: 1m bars with quality (quality is for consumed 1m bars only, not derived)
-                        quality_color = "green" if symbol_data.bar_quality >= 95 else "yellow" if symbol_data.bar_quality >= 80 else "red"
-                        bar_info = f"{current_bars} bars | Quality: [{quality_color}]{symbol_data.bar_quality:.1f}%[/{quality_color}]"
+                        # bar_quality is now Dict[str, float], get quality for base interval
+                        base_quality = symbol_data.bar_quality.get(symbol_data.base_interval, 0.0)
+                        quality_color = "green" if base_quality >= 95 else "yellow" if base_quality >= 80 else "red"
+                        bar_info = f"{current_bars} bars | Quality: [{quality_color}]{base_quality:.1f}%[/{quality_color}]"
                         
                         # Add timing info if available
                         if len(symbol_data.bars_1m) > 0:
@@ -288,8 +296,10 @@ def generate_session_display(compact: bool = True) -> Table:
                                 main_table.add_row(f"│  │  │  ├─ Last Update", last_ts.strftime("%H:%M:%S"))
                                 main_table.add_row(f"│  │  │  ├─ Time Span", f"{int(time_span)} minutes")
                             
-                            quality_color = "green" if symbol_data.bar_quality >= 95 else "yellow" if symbol_data.bar_quality >= 80 else "red"
-                            main_table.add_row(f"│  │  │  └─ Quality", f"[{quality_color}]{symbol_data.bar_quality:.1f}%[/{quality_color}]")
+                            # bar_quality is now Dict[str, float], get quality for base interval
+                            base_quality = symbol_data.bar_quality.get(symbol_data.base_interval, 0.0)
+                            quality_color = "green" if base_quality >= 95 else "yellow" if base_quality >= 80 else "red"
+                            main_table.add_row(f"│  │  │  └─ Quality", f"[{quality_color}]{base_quality:.1f}%[/{quality_color}]")
                             main_table.add_row(f"│  │  │", "")
                         
                         # Derived Bars (all intervals in bars_derived)
@@ -721,8 +731,11 @@ def extract_session_data_for_csv() -> Dict[str, Any]:
             for symbol in active_symbols:
                 symbol_data = session_data.get_symbol_data(symbol)
                 if symbol_data and len(symbol_data.bars_1m) > 0:
-                    total_quality += symbol_data.bar_quality
-                    total_weight += 1.0
+                    # bar_quality is now Dict[str, float], get quality for base interval
+                    base_quality = symbol_data.bar_quality.get(symbol_data.base_interval)
+                    if base_quality is not None:
+                        total_quality += base_quality
+                        total_weight += 1.0
             if total_weight > 0:
                 row["overall_quality"] = round(total_quality / total_weight, 1)
             else:
@@ -761,7 +774,8 @@ def extract_session_data_for_csv() -> Dict[str, Any]:
                 row[f"{prefix}low"] = symbol_data.session_low
                 row[f"{prefix}1m_bars"] = len(symbol_data.bars_1m)
                 row[f"{prefix}5m_bars"] = len(symbol_data.bars_derived.get(5, []))
-                row[f"{prefix}bar_quality"] = symbol_data.bar_quality
+                # bar_quality is now Dict[str, float], get quality for base interval
+                row[f"{prefix}bar_quality"] = symbol_data.bar_quality.get(symbol_data.base_interval, 0.0)
                 
                 # INTERNAL STATE: bars_updated flag (triggers derived bar computation)
                 row[f"{prefix}bars_updated"] = symbol_data.bars_updated

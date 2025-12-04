@@ -205,8 +205,6 @@ class PerformanceMetrics:
         # Generic counters (reusable by all components)
         self.bars_processed = MetricCounter('bars_processed')
         self.iterations = MetricCounter('iterations')
-        self.events_handled = MetricCounter('events_handled')
-        self.records_streamed = MetricCounter('records_streamed')
         
         # Backpressure counters (64-bit for high-frequency operations)
         # Track when producer is ready but consumer hasn't signaled readiness
@@ -368,26 +366,6 @@ class PerformanceMetrics:
         """
         self.iterations.increment(amount)
     
-    def increment_events_handled(self, amount: int = 1) -> None:
-        """Increment events handled counter.
-        
-        Generic counter for tracking events, notifications, messages, etc.
-        
-        Args:
-            amount: Number of events to add (default 1)
-        """
-        self.events_handled.increment(amount)
-    
-    def increment_records_streamed(self, amount: int = 1) -> None:
-        """Increment records streamed counter.
-        
-        Generic counter for tracking streamed records (bars, ticks, quotes).
-        
-        Args:
-            amount: Number of records to add (default 1)
-        """
-        self.records_streamed.increment(amount)
-    
     def get_bars_processed(self) -> int:
         """Get total bars processed."""
         return self.bars_processed.get()
@@ -395,14 +373,6 @@ class PerformanceMetrics:
     def get_iterations(self) -> int:
         """Get total iterations."""
         return self.iterations.get()
-    
-    def get_events_handled(self) -> int:
-        """Get total events handled."""
-        return self.events_handled.get()
-    
-    def get_records_streamed(self) -> int:
-        """Get total records streamed."""
-        return self.records_streamed.get()
     
     # =========================================================================
     # Backpressure Tracking (Pipeline Bottleneck Detection)
@@ -663,11 +633,9 @@ class PerformanceMetrics:
         self.session_duration.reset()
         self.data_loading_subsequent.reset()
         
-        # Reset counters
-        self.bars_processed.reset()
-        self.iterations.reset()
-        self.events_handled.reset()
-        self.records_streamed.reset()
+        # Counters (Phase 3.4 additions)
+        self.bars_processed: Counter = Counter()
+        self.iterations: Counter = Counter()
         self.backpressure_coordinator_to_processor.reset()
         self.backpressure_processor_to_analysis.reset()
         
@@ -708,8 +676,6 @@ class PerformanceMetrics:
             'session_duration': self.session_duration.get_stats(),
             'bars_processed': self.bars_processed.get(),
             'iterations': self.iterations.get(),
-            'events_handled': self.events_handled.get(),
-            'records_streamed': self.records_streamed.get(),
             'backpressure_coordinator_to_processor': self.backpressure_coordinator_to_processor.get(),
             'backpressure_processor_to_analysis': self.backpressure_processor_to_analysis.get(),
         }

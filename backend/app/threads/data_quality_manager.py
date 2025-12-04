@@ -93,7 +93,6 @@ class DataQualityManager(threading.Thread):
         self,
         session_data: SessionData,
         system_manager,
-        session_config: SessionConfig,
         metrics: PerformanceMetrics,
         data_manager=None
     ):
@@ -101,8 +100,7 @@ class DataQualityManager(threading.Thread):
         
         Args:
             session_data: Reference to SessionData for zero-copy access
-            system_manager: Reference to SystemManager for time/config
-            session_config: Session configuration
+            system_manager: Reference to SystemManager (single source of truth)
             metrics: Performance metrics tracker
             data_manager: Data manager for gap filling (Parquet fetching)
         """
@@ -110,7 +108,6 @@ class DataQualityManager(threading.Thread):
         
         self.session_data = session_data
         self._system_manager = system_manager
-        self.session_config = session_config
         self.metrics = metrics
         self._data_manager = data_manager
         
@@ -124,17 +121,11 @@ class DataQualityManager(threading.Thread):
         # Notification queue FROM coordinator (tuples: symbol, interval, timestamp)
         self._notification_queue: queue.Queue[Tuple[str, str, datetime]] = queue.Queue()
         
-        # Configuration
-        gap_filler_config = session_config.session_data_config.gap_filler
+        # Configuration (extract from system_manager.session_config)
+        gap_filler_config = system_manager.session_config.session_data_config.gap_filler
         self._enable_quality = gap_filler_config.enable_session_quality
         self._max_retries = gap_filler_config.max_retries
         self._retry_interval_seconds = gap_filler_config.retry_interval_seconds
-        
-        # Mode detection
-        self.mode = "backtest" if session_config.backtest_config else "live"
-        self._gap_filling_enabled = (
-            self.mode == "live" and self._enable_quality
-        )
         
         # Track failed gaps for retry
         self._failed_gaps: Dict[str, List[GapInfo]] = defaultdict(list)
@@ -145,9 +136,48 @@ class DataQualityManager(threading.Thread):
         logger.info(
             f"DataQualityManager initialized: mode={self.mode}, "
             f"quality_enabled={self._enable_quality}, "
-            f"gap_filling_enabled={self._gap_filling_enabled}, "
+            f"gap_filling_enabled={self.gap_filling_enabled}, "
             f"max_retries={self._max_retries}"
         )
+    
+    # =========================================================================
+    # Properties - Single Source of Truth via SystemManager
+    # =========================================================================
+    
+    @property
+    def mode(self) -> str:
+        """Get operation mode from SystemManager (single source of truth).
+        
+        Fast O(1) access - SystemManager stores mode as attribute.
+        
+        Returns:
+            'live' or 'backtest'
+        """
+        return self._system_manager.mode.value
+    
+    @property
+    def session_config(self) -> SessionConfig:
+        """Get session config from SystemManager (single source of truth).
+        
+        Returns:
+            SessionConfig instance
+        """
+        return self._system_manager.session_config
+    
+    @property
+    def gap_filling_enabled(self) -> bool:
+        """Determine if gap filling is enabled (computed from mode + config).
+        
+        Gap filling is only enabled in live mode with quality enabled.
+        
+        Returns:
+            True if gap filling should run
+        """
+        return self.mode == "live" and self._enable_quality
+    
+    # =========================================================================
+    # Public API
+    # =========================================================================
     
     def notify_data_available(self, symbol: str, interval: str, timestamp: datetime):
         """Receive notification that new data is available.
@@ -227,7 +257,7 @@ class DataQualityManager(threading.Thread):
                     notification = self._notification_queue.get(timeout=1.0)
                 except queue.Empty:
                     # Timeout - check for retry opportunities
-                    if self._gap_filling_enabled:
+                    if self.gap_filling_enabled:
                         current_time = self._time_manager.get_current_time()
                         elapsed = (current_time - last_retry_check).total_seconds()
                         
@@ -251,7 +281,7 @@ class DataQualityManager(threading.Thread):
                 self._calculate_quality(symbol, interval)
                 
                 # 3. Fill gaps (live mode only)
-                if self._gap_filling_enabled:
+                if self.gap_filling_enabled:
                     self._check_and_fill_gaps(symbol, interval)
                 
                 # 4. Propagate quality to derived bars
@@ -396,7 +426,7 @@ class DataQualityManager(threading.Thread):
             symbol: Symbol to check
             interval: Interval to check
         """
-        if not self._gap_filling_enabled:
+        if not self.gap_filling_enabled:
             return
         
         try:
@@ -685,10 +715,29 @@ class DataQualityManager(threading.Thread):
         
         return {
             "enabled": self._enable_quality,
-            "gap_filling_enabled": self._gap_filling_enabled,
+            "gap_filling_enabled": self.gap_filling_enabled,
             "mode": self.mode,
             "total_failed_gaps": total_failed_gaps,
             "max_retries": self._max_retries,
             "retry_interval_seconds": self._retry_interval_seconds,
             "symbols": symbol_stats
+        }
+    
+    def to_json(self, complete: bool = True) -> dict:
+        """Export DataQualityManager state to JSON format.
+        
+        Args:
+            complete: If True, return full data. If False, return delta from last export.
+                     (Note: Delta mode not yet implemented, returns full data)
+        
+        Returns:
+            Dictionary with thread info and state
+        """
+        return {
+            "thread_info": {
+                "name": self.name,
+                "is_alive": self.is_alive(),
+                "daemon": self.daemon
+            },
+            "_running": self._running
         }

@@ -1146,6 +1146,25 @@ class InteractiveCLI:
                     elif subcmd == 'status':
                         from app.cli.system_commands import status_command
                         status_command()
+                    elif subcmd == 'export-status':
+                        # Parse arguments: complete=true/false, format=expanded/compact, and optional filename
+                        complete = True
+                        format = "expanded"
+                        filename = None
+                        
+                        for arg in args[1:]:
+                            if arg.startswith('complete='):
+                                complete = arg.split('=')[1].lower() in ('true', '1', 'yes')
+                            elif arg.startswith('format='):
+                                format = arg.split('=')[1].lower()
+                                if format not in ('expanded', 'compact'):
+                                    self.console.print(f"[yellow]Warning: Invalid format '{format}', using 'expanded'[/yellow]")
+                                    format = "expanded"
+                            else:
+                                filename = arg
+                        
+                        from app.cli.system_commands import export_status_command
+                        export_status_command(complete=complete, filename=filename, format=format)
                     else:
                         # Show usage from registry (single source of truth)
                         self.console.print("[red]Unknown system command. Available commands:[/red]\n")
@@ -1543,11 +1562,10 @@ class InteractiveCLI:
                         from app.cli.data_commands import add_symbol_command
                         asyncio.run(add_symbol_command(symbol, streams))
                     elif subcmd == 'remove-symbol' and len(args) >= 2:
-                        # data remove-symbol <symbol> [--immediate]
+                        # data remove-symbol <symbol>
                         symbol = args[1].upper()
-                        immediate = '--immediate' in args
                         from app.cli.data_commands import remove_symbol_command
-                        asyncio.run(remove_symbol_command(symbol, immediate))
+                        asyncio.run(remove_symbol_command(symbol))
                     else:
                         from app.cli.data_commands import print_data_usage
                         print_data_usage(self.console)

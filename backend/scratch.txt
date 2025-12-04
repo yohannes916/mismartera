@@ -5,7 +5,47 @@ https://firstratedata.com/cb/4/complete-stocks-etf  Complete Intraday Bundle - S
 https://www.youtube.com/watch?v=FUmO-jREy4s how to setup rtx 3090 on ubuntu
 https://www.sabrepc.com/CBL-PWEX-0582-Supermicro-S128429?srsltid=AfmBOop3-CGfVrvINzzgRzl4OKpjUCGAh_W_nmi7mlXHQmRN6EvfSkER
 
-
+  "market_scanner_config": {
+    "start_time": "9:30",
+    "end_time": "15:00",
+    "symbols": ["AAPL", "MSFT", "AMZN", "TSLA", "NVDA"],
+    "symbols_group": ["SP500", "NASDAQ100"],
+    "exclude_symbols": ["AAPL", "MSFT"],
+    "average_volume": {
+      "min": 1000000,
+      "max": 10000000,
+      "days": 10
+    },
+    "average_price": {
+      "min": 100,
+      "max": 1000,
+      "days": 10
+    },
+    "standard_deviation": {
+      "min": 1,
+      "max": 10,
+      "days": 10
+    },
+    "beta": {
+      "min": 1,
+      "max": 10,
+      "days": 10
+    },
+    "correlation": {
+      "min": 1,
+      "max": 10,
+      "days": 10
+    },
+    "current_price_change_percentage": {
+      "min": 1,
+      "max": 10
+    },
+    "today_price_range_percentage": {
+      "min": 1,
+      "max": 10
+    }
+  },
+  
 backend/PROGRESS.md
 backend/PHASE7_TASKS.md
 backend/SESSION_ARCHITECTURE.md

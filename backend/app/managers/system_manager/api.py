@@ -84,6 +84,7 @@ class SystemManager:
         
         # System state
         self._state = SystemState.STOPPED
+        self._mode: OperationMode = OperationMode.BACKTEST  # Default, set from config
         self._session_config: Optional[SessionConfig] = None
         
         # Exchange configuration (derived from session config)
@@ -183,15 +184,17 @@ class SystemManager:
         return self._session_config
     
     @property
-    def mode(self) -> str:
-        """Get current system mode (live or backtest).
+    def mode(self) -> OperationMode:
+        """Get current operation mode (fast direct access).
+        
+        This is the SINGLE SOURCE OF TRUTH for system mode.
+        Stored as attribute for O(1) access (not computed).
+        Synchronized with session_config.mode during load.
         
         Returns:
-            'live' or 'backtest'
+            OperationMode enum (BACKTEST or LIVE)
         """
-        if self._session_config:
-            return self._session_config.mode
-        return "backtest"  # Default
+        return self._mode
     
     # =========================================================================
     # Manager Access (Singleton Pattern)
@@ -278,6 +281,10 @@ class SystemManager:
         self.exchange_group = config.exchange_group
         self.asset_class = config.asset_class
         self._update_timezone()
+        
+        # Synchronize mode (CRITICAL: Keep SystemManager._mode in sync with config)
+        self._mode = OperationMode(config.mode)
+        logger.debug(f"Mode synchronized: {self._mode.value}")
         
         logger.success(
             f"Session config loaded: {config.session_name} "
@@ -486,9 +493,7 @@ class SystemManager:
         logger.debug("Creating SessionCoordinator...")
         self._coordinator = SessionCoordinator(
             system_manager=self,
-            data_manager=data_manager,
-            session_config=self._session_config,
-            mode=self._session_config.mode
+            data_manager=data_manager
         )
         
         # 2. Create DataProcessor (derived bars + indicators)
@@ -496,7 +501,6 @@ class SystemManager:
         self._data_processor = DataProcessor(
             session_data=session_data,
             system_manager=self,
-            session_config=self._session_config,
             metrics=self._performance_metrics
         )
         
@@ -505,7 +509,6 @@ class SystemManager:
         self._quality_manager = DataQualityManager(
             session_data=session_data,
             system_manager=self,
-            session_config=self._session_config,
             metrics=self._performance_metrics,
             data_manager=data_manager
         )
@@ -515,7 +518,6 @@ class SystemManager:
         self._analysis_engine = AnalysisEngine(
             session_data=session_data,
             system_manager=self,
-            session_config=self._session_config,
             metrics=self._performance_metrics
         )
         
@@ -606,7 +608,6 @@ class SystemManager:
             logger.info(f"End Date:       {time_mgr.backtest_end_date}")
             if config.backtest_config:
                 logger.info(f"Speed:          {config.backtest_config.speed_multiplier}x")
-                logger.info(f"Prefetch:       {config.backtest_config.prefetch_days} days")
         
         logger.info("")
         logger.info("Thread Pool:    4 threads")
@@ -746,6 +747,115 @@ class SystemManager:
                 self._time_manager.reset_backtest_clock(db_session)
     
     # =========================================================================
+    # System Information Export
+    # =========================================================================
+    
+    def system_info(self, complete: bool = True) -> dict:
+        """Export system state to JSON format.
+        
+        Args:
+            complete: If True, return full data including historical.
+                     If False, return delta (only new session data, excludes historical).
+        
+        Returns:
+            Dictionary matching SYSTEM_JSON_EXAMPLE.json format
+            
+        Delta Mode Strategy:
+            - **Always sent**: System metadata, threads, performance metrics (small, frequently changing)
+            - **Filtered**: Session data (bars, ticks, quotes) - only new data since last export
+            - **Excluded**: Historical data (massive, never changes after load)
+            
+        Metadata:
+            - delta: true/false flag indicating if this is a delta export
+            - last_update: ISO timestamp of previous export (delta mode only)
+            
+        Performance:
+            - Complete mode: ~17K lines (includes all historical data)
+            - Delta mode: ~10-50 lines (only new session data since last export)
+        """
+        from datetime import datetime
+        from app.managers.data_manager.session_data import get_session_data
+        
+        # Get current time from TimeManager (if available)
+        if self._time_manager:
+            current_time = self._time_manager.get_current_time()
+        else:
+            # Fallback to system time if TimeManager not initialized
+            current_time = datetime.now()
+        
+        # Build backtest_window if TimeManager is available
+        backtest_window = None
+        if self._time_manager and hasattr(self._time_manager, 'backtest_start_date'):
+            backtest_window = {
+                "start_date": self._time_manager.backtest_start_date.isoformat() if self._time_manager.backtest_start_date else None,
+                "end_date": self._time_manager.backtest_end_date.isoformat() if self._time_manager.backtest_end_date else None
+            }
+        
+        result = {
+            "system_manager": {
+                "_state": self._state.value if self._state else "STOPPED",
+                "_mode": self._mode.value if self._mode else "BACKTEST",
+                "_start_time": self._start_time.isoformat() if hasattr(self, '_start_time') and self._start_time else None,
+                "timezone": self.timezone,
+                "exchange_group": self.exchange_group,
+                "asset_class": self.asset_class,
+                "backtest_window": backtest_window
+            },
+            "performance_metrics": self._performance_metrics.get_backtest_summary() if self._performance_metrics else {},
+            "time_manager": self._time_manager.to_json() if self._time_manager else {},
+            "threads": {},
+            "session_data": {},  # Will populate below
+            "_metadata": {
+                "generated_at": current_time.isoformat(),
+                "version": "2.0",
+                "mode": "complete" if complete else "delta",  # Explicit mode indicator
+                "delta": not complete,  # True if delta mode, False if complete
+                "complete": complete,
+                "diff_mode": not complete,
+                "last_update": None,  # Will be populated for delta mode
+                "changed_paths": []  # Delta tracking not yet implemented
+            }
+        }
+        
+        # Get session_data from singleton (not a SystemManager attribute)
+        last_update_time = None
+        try:
+            session_data = get_session_data()
+            session_data_dict, last_export_time = session_data.to_json(complete=complete)
+            result["session_data"] = session_data_dict
+            last_update_time = last_export_time
+        except Exception as e:
+            logger.warning(f"Could not export session_data: {e}")
+            result["session_data"] = {}
+        
+        # Add session_config (only in complete mode)
+        if complete and self._session_config:
+            try:
+                result["session_config"] = self._session_config.to_dict()
+            except Exception as e:
+                logger.warning(f"Could not export session_config: {e}")
+                result["session_config"] = None
+        
+        # Add thread information
+        if hasattr(self, '_session_coordinator') and self._session_coordinator:
+            result["threads"]["session_coordinator"] = self._session_coordinator.to_json(complete=complete)
+        
+        if hasattr(self, '_data_processor') and self._data_processor:
+            result["threads"]["data_processor"] = self._data_processor.to_json(complete=complete)
+        
+        if hasattr(self, '_quality_manager') and self._quality_manager:
+            result["threads"]["data_quality_manager"] = self._quality_manager.to_json(complete=complete)
+        
+        if hasattr(self, '_analysis_engine') and self._analysis_engine:
+            result["threads"]["analysis_engine"] = self._analysis_engine.to_json(complete=complete)
+        
+        # Update metadata with last_update time (for delta mode)
+        if last_update_time:
+            result["_metadata"]["last_update"] = last_update_time.isoformat()
+        
+        return result
+    
+    # =========================================================================
     # Properties
     # =========================================================================
     
@@ -758,13 +868,6 @@ class SystemManager:
     def state(self) -> SystemState:
         """Get current system state."""
         return self._state
-    
-    @property
-    def mode(self) -> OperationMode:
-        """Get current operation mode from session config."""
-        if self._session_config is None:
-            raise RuntimeError("Session config not loaded")
-        return OperationMode(self._session_config.mode)
     
     @property
     def performance_metrics(self) -> PerformanceMetrics:

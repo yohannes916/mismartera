@@ -88,22 +88,19 @@ class DataProcessor(threading.Thread):
         self,
         session_data: SessionData,
         system_manager,
-        session_config: SessionConfig,
         metrics: PerformanceMetrics
     ):
         """Initialize data processor.
         
         Args:
             session_data: Reference to SessionData for zero-copy access
-            system_manager: Reference to SystemManager for time/config
-            session_config: Session configuration
+            system_manager: Reference to SystemManager (single source of truth)
             metrics: Performance metrics tracker
         """
         super().__init__(name="DataProcessor", daemon=True)
         
         self.session_data = session_data
         self._system_manager = system_manager
-        self.session_config = session_config
         self.metrics = metrics
         
         # Get TimeManager reference
@@ -133,9 +130,6 @@ class DataProcessor(threading.Thread):
         # Auto-computation flag (always enabled for now)
         self._auto_compute_derived = True
         
-        # Mode detection
-        self.mode = "backtest" if session_config.backtest_config else "live"
-        
         # Performance tracking
         self._processing_times = []
         
@@ -144,6 +138,34 @@ class DataProcessor(threading.Thread):
         self._notifications_paused.set()  # Initially NOT paused (active)
         
         logger.info(f"DataProcessor initialized: mode={self.mode}")
+    
+    # =========================================================================
+    # Properties - Single Source of Truth via SystemManager
+    # =========================================================================
+    
+    @property
+    def mode(self) -> str:
+        """Get operation mode from SystemManager (single source of truth).
+        
+        Fast O(1) access - SystemManager stores mode as attribute.
+        
+        Returns:
+            'live' or 'backtest'
+        """
+        return self._system_manager.mode.value
+    
+    @property
+    def session_config(self) -> SessionConfig:
+        """Get session config from SystemManager (single source of truth).
+        
+        Returns:
+            SessionConfig instance
+        """
+        return self._system_manager.session_config
+    
+    # =========================================================================
+    # Public API
+    # =========================================================================
     
     def set_coordinator_subscription(self, subscription: StreamSubscription):
         """Set subscription for signaling ready to coordinator.
@@ -594,4 +616,24 @@ class DataProcessor(threading.Thread):
             "max": max(self._processing_times),
             "avg": sum(self._processing_times) / len(self._processing_times),
             "count": len(self._processing_times)
+        }
+    
+    def to_json(self, complete: bool = True) -> dict:
+        """Export DataProcessor state to JSON format.
+        
+        Args:
+            complete: If True, return full data. If False, return delta from last export.
+                     (Note: Delta mode not yet implemented, returns full data)
+        
+        Returns:
+            Dictionary with thread info and state
+        """
+        return {
+            "thread_info": {
+                "name": self.name,
+                "is_alive": self.is_alive(),
+                "daemon": self.daemon
+            },
+            "_running": self._running,
+            "_derived_intervals": dict(self._derived_intervals)
         }

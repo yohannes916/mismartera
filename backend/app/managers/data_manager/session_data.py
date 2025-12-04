@@ -11,7 +11,7 @@ PERFORMANCE OPTIMIZATIONS:
 - Designed for high-frequency reads by AnalysisEngine and other modules
 """
 from datetime import datetime, date, time, timedelta
-from typing import Dict, List, Optional, Set, Deque, Union
+from typing import Dict, List, Optional, Set, Deque, Union, Tuple, Any
 from dataclasses import dataclass, field
 from collections import defaultdict, deque
 import asyncio
@@ -19,6 +19,78 @@ import threading
 
 from app.models.trading import BarData, TickData
 from app.logger import logger
+
+
+# Import GapInfo for gap storage
+try:
+    from app.threads.quality.gap_detection import GapInfo
+except ImportError:
+    # Fallback if not yet available
+    GapInfo = Any
+
+
+@dataclass
+class BarIntervalData:
+    """Self-describing bar interval with all metadata.
+    
+    Each interval knows if it's derived, what it's derived from,
+    its quality, and gap details. No separate tracking needed.
+    
+    This is the refined structure that eliminates duplicate tracking:
+    - No need for separate derived_intervals list
+    - No need for separate bar_quality dict
+    - No need for separate bar_gaps dict
+    - Everything about an interval is in one place!
+    """
+    derived: bool               # Is this computed from another interval?
+    base: Optional[str]         # Source interval (None if streamed)
+    data: Union[Deque[BarData], List[BarData]]  # Actual bars (Deque for base, List for derived)
+    quality: float = 0.0        # Quality percentage (0-100)
+    gaps: List[Any] = field(default_factory=list)  # GapInfo objects
+    updated: bool = False       # New data since last check
+
+
+@dataclass
+class SessionMetrics:
+    """Basic session metrics (OHLCV aggregations).
+    
+    Always present, computed from session data.
+    Distinct from indicators (optional computed analytics).
+    """
+    volume: int = 0
+    high: Optional[float] = None
+    low: Optional[float] = None
+    last_update: Optional[datetime] = None
+
+
+@dataclass
+class DateRange:
+    """Date range for historical data."""
+    start: date
+    end: date
+
+
+@dataclass
+class HistoricalBarIntervalData:
+    """Historical bars for one interval across multiple dates.
+    
+    Stores bars organized by date with quality metrics.
+    """
+    data_by_date: Dict[date, List[BarData]] = field(default_factory=dict)
+    quality: float = 0.0
+    gaps: List[Any] = field(default_factory=list)  # GapInfo objects
+    date_range: Optional[DateRange] = None
+
+
+@dataclass
+class HistoricalData:
+    """Historical data for trailing days.
+    
+    Structure mirrors session data for consistency.
+    Groups bars and indicators together.
+    """
+    bars: Dict[str, HistoricalBarIntervalData] = field(default_factory=dict)
+    indicators: Dict[str, Any] = field(default_factory=dict)  # Historical aggregations
 
 
 @dataclass
@@ -37,6 +109,24 @@ class SymbolSessionData:
     # Base interval for this symbol ("1s" or "1m")
     base_interval: str = "1m"
     
+    # === NEW REFINED STRUCTURE (Phase 1: Non-Breaking Addition) ===
+    # Self-describing bar structure - each interval contains all its metadata
+    # Structure: {interval: BarIntervalData(derived, base, data, quality, gaps, updated)}
+    # Example: {"1m": BarIntervalData(derived=False, base=None, data=deque([...])),
+    #           "5m": BarIntervalData(derived=True, base="1m", data=[...])}
+    bars: Dict[str, BarIntervalData] = field(default_factory=dict)
+    
+    # Grouped session metrics (volume, high, low)
+    metrics: SessionMetrics = field(default_factory=SessionMetrics)
+    
+    # Session indicators (computed analytics like RSI, VWAP)
+    # Distinct from metrics (basic aggregations)
+    indicators: Dict[str, Any] = field(default_factory=dict)
+    
+    # Grouped historical data (bars + indicators)
+    historical: HistoricalData = field(default_factory=HistoricalData)
+    
+    # === OLD STRUCTURE (Kept for Backward Compatibility - Phase 2: Will Remove) ===
     # Base bars (1s or 1m depending on base_interval)
     bars_base: Deque[BarData] = field(default_factory=deque)
     
@@ -46,8 +136,10 @@ class SymbolSessionData:
     # Derived bars (e.g., {"1m": [...], "5m": [...], "15m": [...]})
     bars_derived: Dict[str, List[BarData]] = field(default_factory=dict)
     
-    # Bar quality metric (0-100%)
-    bar_quality: float = 0.0
+    # Bar quality metrics per interval (0-100%)
+    # Structure: {interval: quality_percentage}
+    # Example: {"1m": 100.0, "5m": 98.5, "1d": 100.0}
+    bar_quality: Dict[str, float] = field(default_factory=dict)
     
     # Other data types
     quotes: List = field(default_factory=list)  # QuoteData when implemented
@@ -71,6 +163,23 @@ class SymbolSessionData:
         default_factory=lambda: defaultdict(dict)
     )
     
+    # Historical indicators for this symbol
+    # Structure: {indicator_key: value}
+    # Example: {"avg_volume_2d": 12345678.9, "max_price_5d": 150.25}
+    historical_indicators: Dict[str, Any] = field(default_factory=dict)
+    
+    # Delta export tracking: track last exported indices (for delta mode)
+    _last_export_indices: Dict[str, Any] = field(
+        default_factory=lambda: {
+            "ticks": 0,
+            "quotes": 0,
+            "bars_base": 0,
+            "bars_derived": {},  # {interval: index}
+            "last_export_time": None  # Timestamp of last export
+        },
+        repr=False  # Don't show in repr
+    )
+    
     @property
     def bars_1m(self) -> Deque[BarData]:
         """Backward compatibility: Access to bars (works for 1m base or derived 1m from 1s).
@@ -90,14 +199,12 @@ class SymbolSessionData:
         Args:
             bar: New bar data
         """
-        # Update volume
+        # Update OLD structure (backward compatibility)
         self.session_volume += bar.volume
         
-        # Update high
         if self.session_high is None or bar.high > self.session_high:
             self.session_high = bar.high
         
-        # Update low
         if self.session_low is None or bar.low < self.session_low:
             self.session_low = bar.low
         
@@ -106,6 +213,17 @@ class SymbolSessionData:
         
         # Update latest bar cache
         self._latest_bar = bar
+        
+        # Update NEW structure (dual-write for Phase 1)
+        self.metrics.volume += bar.volume
+        
+        if self.metrics.high is None or bar.high > self.metrics.high:
+            self.metrics.high = bar.high
+        
+        if self.metrics.low is None or bar.low < self.metrics.low:
+            self.metrics.low = bar.low
+        
+        self.metrics.last_update = bar.timestamp
     
     def get_latest_bar(self, interval = None) -> Optional[BarData]:
         """Get the most recent bar (O(1) operation).
@@ -233,15 +351,276 @@ class SymbolSessionData:
     
     def reset_session_metrics(self) -> None:
         """Reset session metrics for a new session."""
+        # Reset OLD structure
         self.session_volume = 0
         self.session_high = None
         self.session_low = None
         self.last_update = None
-        self.bar_quality = 0.0
+        self.bar_quality = {}
         self.bars_updated = False
         self.quotes_updated = False
         self.ticks_updated = False
         self._latest_bar = None
+        
+        # Reset NEW structure (Phase 1: Dual-write)
+        self.metrics = SessionMetrics()
+        self.indicators = {}
+        # Note: bars and historical are typically cleared separately via clear_session_bars()
+    
+    def to_json(self, complete: bool = True) -> dict:
+        """Export symbol session data to JSON format.
+        
+        Args:
+            complete: If True, return full data including historical.
+                     If False, return delta (new data only, excludes historical).
+        
+        Returns:
+            Dictionary matching SYSTEM_JSON_EXAMPLE.json format for symbol data
+            
+        Delta Mode Strategy:
+            - Session metrics: Always included (small, frequently changing)
+            - Ticks/Quotes: Only new data since last export (index-based slice)
+            - Base/Derived bars: Only new bars since last export (index-based slice)
+            - Historical: EXCLUDED (never changes after load, can be massive)
+            
+        Performance:
+            - Complete: ~17K lines (includes historical)
+            - Delta: ~10-50 lines per export (only new session data)
+            - Memory: O(1) per symbol (just storing indices)
+            - Speed: O(n) where n = new data only (not total data)
+        """
+        result = {
+            "session": {
+                "volume": self.session_volume,
+                "high": self.session_high,
+                "low": self.session_low,
+                "data": {}
+            },
+            "historical": {}  # Will be populated below
+        }
+        
+        # Determine slice indices for delta mode
+        if complete:
+            # Full export: all data from beginning
+            ticks_start_idx = 0
+            quotes_start_idx = 0
+            bars_base_start_idx = 0
+        else:
+            # Delta export: only new data since last export
+            ticks_start_idx = self._last_export_indices["ticks"]
+            quotes_start_idx = self._last_export_indices["quotes"]
+            bars_base_start_idx = self._last_export_indices["bars_base"]
+        
+        # Ticks (count + data)
+        if self.ticks and len(self.ticks) > ticks_start_idx:
+            new_ticks = self.ticks[ticks_start_idx:]
+            if new_ticks:  # Only include if there's new data
+                latest_tick = new_ticks[-1]
+                result["session"]["data"]["ticks"] = {
+                    "count": len(new_ticks),
+                    "total_count": len(self.ticks),  # Total for reference
+                    "latest": {
+                        "timestamp": latest_tick.timestamp.isoformat(),
+                        "price": latest_tick.price,
+                        "size": latest_tick.size,
+                        "exchange": latest_tick.exchange
+                    }
+                }
+                # Update tracking index
+                self._last_export_indices["ticks"] = len(self.ticks)
+        
+        # Quotes (count + data)
+        if self.quotes and len(self.quotes) > quotes_start_idx:
+            new_quotes = self.quotes[quotes_start_idx:]
+            if new_quotes:  # Only include if there's new data
+                latest_quote = new_quotes[-1]
+                result["session"]["data"]["quotes"] = {
+                    "count": len(new_quotes),
+                    "total_count": len(self.quotes),  # Total for reference
+                    "latest": {
+                        "timestamp": latest_quote.timestamp.isoformat(),
+                        "bid": latest_quote.bid,
+                        "ask": latest_quote.ask,
+                        "bid_size": latest_quote.bid_size,
+                        "ask_size": latest_quote.ask_size
+                    }
+                }
+                # Update tracking index
+                self._last_export_indices["quotes"] = len(self.quotes)
+        
+        # Base bars (1m or 1s)
+        if len(self.bars_base) > bars_base_start_idx:
+            new_bars_base = list(self.bars_base)[bars_base_start_idx:]
+            if new_bars_base:  # Only include if there's new data
+                base_data = {
+                    "count": len(new_bars_base),
+                    "total_count": len(self.bars_base),  # Total for reference
+                    "generated": False,  # Base bars are streamed, not generated
+                    "columns": ["timestamp", "open", "high", "low", "close", "volume"],
+                    "data": [
+                        [
+                            bar.timestamp.time().isoformat(),
+                            bar.open,
+                            bar.high,
+                            bar.low,
+                            bar.close,
+                            bar.volume
+                        ]
+                        for bar in new_bars_base
+                    ]
+                }
+                
+                # Add quality metric if available for this interval
+                if self.base_interval in self.bar_quality:
+                    base_data["quality"] = self.bar_quality[self.base_interval]
+                
+                result["session"]["data"][self.base_interval] = base_data
+                
+                # Update tracking index
+                self._last_export_indices["bars_base"] = len(self.bars_base)
+        
+        # Derived bars (5m, 15m, etc.)
+        for interval, bars in self.bars_derived.items():
+            if bars:
+                # Get last exported index for this interval
+                if complete:
+                    derived_start_idx = 0
+                else:
+                    derived_start_idx = self._last_export_indices["bars_derived"].get(interval, 0)
+                
+                # Only export new bars
+                if len(bars) > derived_start_idx:
+                    new_bars_derived = bars[derived_start_idx:]
+                    if new_bars_derived:  # Only include if there's new data
+                        derived_data = {
+                            "count": len(new_bars_derived),
+                            "total_count": len(bars),  # Total for reference
+                            "generated": True,  # Derived bars are computed
+                            "columns": ["timestamp", "open", "high", "low", "close", "volume"],
+                            "data": [
+                                [
+                                    bar.timestamp.time().isoformat(),
+                                    bar.open,
+                                    bar.high,
+                                    bar.low,
+                                    bar.close,
+                                    bar.volume
+                                ]
+                                for bar in new_bars_derived
+                            ]
+                        }
+                        
+                        # Add quality metric if available for this interval
+                        if interval in self.bar_quality:
+                            derived_data["quality"] = self.bar_quality[interval]
+                        
+                        result["session"]["data"][interval] = derived_data
+                        
+                        # Update tracking index for this interval
+                        self._last_export_indices["bars_derived"][interval] = len(bars)
+        
+        # Historical bars - ONLY in complete mode (massive data, never changes)
+        if complete and self.historical_bars:
+            # Debug: Log what intervals we have
+            logger.debug(
+                f"[EXPORT] Historical bars intervals for {self.symbol}: "
+                f"{list(self.historical_bars.keys())}"
+            )
+            
+            result["historical"]["loaded"] = True
+            result["historical"]["data"] = {}
+            
+            # Add historical indicators nested under historical section
+            if self.historical_indicators:
+                for indicator_name, indicator_value in self.historical_indicators.items():
+                    result["historical"][indicator_name] = indicator_value
+            
+            for interval, dates_dict in self.historical_bars.items():
+                if dates_dict:
+                    all_bars = []
+                    dates_list = sorted(dates_dict.keys())
+                    
+                    # Collect all bars across dates
+                    for dt in dates_list:
+                        all_bars.extend(dates_dict[dt])
+                    
+                    if all_bars:
+                        # Normalize interval key to string format
+                        if isinstance(interval, int):
+                            interval_key = f"{interval}m"
+                        elif isinstance(interval, str):
+                            # Already a string, use as-is (e.g., "1m", "5m", "1d")
+                            interval_key = interval
+                        else:
+                            interval_key = str(interval)
+                        
+                        # Determine column format based on interval
+                        is_daily = interval_key == "1d"
+                        
+                        # Calculate date range for THIS interval
+                        date_range = {
+                            "start_date": dates_list[0].isoformat(),
+                            "end_date": dates_list[-1].isoformat(),
+                            "days": len(dates_list)
+                        }
+                        
+                        historical_interval_data = {
+                            "count": len(all_bars),
+                            "date_range": date_range,
+                            "dates": [dt.isoformat() for dt in dates_list],
+                            "columns": ["date", "open", "high", "low", "close", "volume"] if is_daily 
+                                      else ["timestamp", "open", "high", "low", "close", "volume"],
+                            "data": [
+                                [
+                                    bar.timestamp.date().isoformat() if is_daily else bar.timestamp.isoformat(),
+                                    bar.open,
+                                    bar.high,
+                                    bar.low,
+                                    bar.close,
+                                    bar.volume
+                                ]
+                                for bar in all_bars
+                            ]
+                        }
+                        
+                        # Add quality for this interval if available
+                        if interval_key in self.bar_quality:
+                            historical_interval_data["quality"] = self.bar_quality[interval_key]
+                        
+                        result["historical"]["data"][interval_key] = historical_interval_data
+        elif not complete and self.historical_bars:
+            # Delta mode: Just indicate historical is loaded, include per-interval date ranges but not data
+            result["historical"]["loaded"] = True
+            result["historical"]["intervals"] = {}  # Per-interval date ranges
+            
+            # Include date range for each interval
+            for interval, dates_dict in self.historical_bars.items():
+                if dates_dict:
+                    dates_list = sorted(dates_dict.keys())
+                    
+                    # Normalize interval key
+                    if isinstance(interval, int):
+                        interval_key = f"{interval}m"
+                    elif isinstance(interval, str):
+                        interval_key = interval
+                    else:
+                        interval_key = str(interval)
+                    
+                    interval_info = {
+                        "date_range": {
+                            "start_date": dates_list[0].isoformat(),
+                            "end_date": dates_list[-1].isoformat(),
+                            "days": len(dates_list)
+                        }
+                    }
+                    
+                    # Add quality for this interval if available
+                    if interval_key in self.bar_quality:
+                        interval_info["quality"] = self.bar_quality[interval_key]
+                    
+                    result["historical"]["intervals"][interval_key] = interval_info
+        
+        return result
 
 
 class SessionData:
@@ -280,11 +659,12 @@ class SessionData:
         self._active_streams: Dict[Tuple[str, str], bool] = {}
         # Event to signal upkeep thread when new data arrives
         self._data_arrival_event = threading.Event()
+        
+        # Delta export tracking: timestamp of last export
+        self._last_export_time: Optional[datetime] = None
+        
         # Thread lock for concurrent access
         self._lock = threading.RLock()
-        
-        # Historical indicators storage: {indicator_name: value}
-        self._historical_indicators: Dict[str, any] = {}
         
         logger.info("SessionData initialized")
     
@@ -1361,65 +1741,126 @@ class SessionData:
                 symbol_data.historical_bars[interval_int][bar_date] = []
             
             symbol_data.historical_bars[interval_int][bar_date].append(bar)
+            
+            # Debug logging for 1d bars
+            if interval == "1d" or interval_int == "1d":
+                logger.info(
+                    f"[HISTORICAL_LOAD] Appended 1d bar for {symbol} on {bar_date}: "
+                    f"close=${bar.close}, volume={bar.volume}"
+                )
     
     def set_quality(self, symbol: str, interval: str, quality: float) -> None:
         """Set quality score for a symbol/interval.
         
         Args:
             symbol: Stock symbol
-            interval: Bar interval
+            interval: Bar interval (e.g., "1m", "5m", "1d")
             quality: Quality percentage (0-100)
         """
         symbol = symbol.upper()
+        
+        # Normalize interval to string format
+        if isinstance(interval, int):
+            interval_key = f"{interval}m"
+        else:
+            interval_key = str(interval)
         
         with self._lock:
             symbol_data = self._symbols.get(symbol)
             if symbol_data is None:
                 symbol_data = self.register_symbol(symbol)
             
-            symbol_data.bar_quality = quality
-            logger.debug(f"Set quality for {symbol} {interval}: {quality:.1f}%")
+            symbol_data.bar_quality[interval_key] = quality
+            logger.debug(f"Set quality for {symbol} {interval_key}: {quality:.1f}%")
     
     def get_quality_metric(self, symbol: str, interval: str) -> Optional[float]:
         """Get quality score for a symbol/interval.
         
         Args:
             symbol: Stock symbol
-            interval: Bar interval
+            interval: Bar interval (e.g., "1m", "5m", "1d")
             
         Returns:
             Quality percentage (0-100) or None if not set
         """
         symbol = symbol.upper()
         
+        # Normalize interval to string format
+        if isinstance(interval, int):
+            interval_key = f"{interval}m"
+        else:
+            interval_key = str(interval)
+        
         with self._lock:
             symbol_data = self._symbols.get(symbol)
             if symbol_data is None:
                 return None
-            return symbol_data.bar_quality
+            return symbol_data.bar_quality.get(interval_key)
     
-    def set_historical_indicator(self, name: str, value: any) -> None:
-        """Store a historical indicator value.
+    def set_historical_indicator(self, symbol: str, name: str, value: any) -> None:
+        """Store a historical indicator value for a symbol.
         
         Args:
-            name: Indicator name
+            symbol: Stock symbol
+            name: Indicator name (e.g., "avg_volume_2d")
             value: Indicator value (can be scalar, list, dict, etc.)
         """
+        symbol = symbol.upper()
         with self._lock:
-            self._historical_indicators[name] = value
-            logger.debug(f"Set historical indicator: {name}")
+            symbol_data = self.get_symbol_data(symbol)
+            if symbol_data is None:
+                symbol_data = self.register_symbol(symbol)
+            symbol_data.historical_indicators[name] = value
+            logger.debug(f"Set historical indicator for {symbol}: {name} = {value}")
     
-    def get_historical_indicator(self, name: str) -> Optional[any]:
-        """Get a historical indicator value.
+    def get_historical_indicator(self, symbol: str, name: str) -> Optional[any]:
+        """Get a historical indicator value by name for a symbol.
+        
+        Indicator names include the period for clarity:
+        - "avg_volume_2d" - 2-day average volume
+        - "avg_volume_10d" - 10-day average volume
+        - "max_price_5d" - 5-day max price
+        
+        This allows multiple indicators with same base but different periods.
         
         Args:
-            name: Indicator name
+            symbol: Stock symbol
+            name: Full indicator name (e.g., "avg_volume_2d")
             
         Returns:
             Indicator value or None if not found
+            
+        Example:
+            # In analysis engine
+            avg_vol = session_data.get_historical_indicator("AAPL", "avg_volume_2d")
+            max_price = session_data.get_historical_indicator("AAPL", "max_price_5d")
         """
+        symbol = symbol.upper()
         with self._lock:
-            return self._historical_indicators.get(name)
+            symbol_data = self.get_symbol_data(symbol)
+            if symbol_data is None:
+                return None
+            return symbol_data.historical_indicators.get(name)
+    
+    def get_all_historical_indicators(self, symbol: str) -> Dict[str, any]:
+        """Get all historical indicators for a symbol.
+        
+        Args:
+            symbol: Stock symbol
+            
+        Returns:
+            Dictionary of indicator_name -> value
+            
+        Example:
+            indicators = session_data.get_all_historical_indicators("AAPL")
+            # {'avg_volume_2d': 12345678.9, 'max_price_5d': 150.25}
+        """
+        symbol = symbol.upper()
+        with self._lock:
+            symbol_data = self.get_symbol_data(symbol)
+            if symbol_data is None:
+                return {}
+            return symbol_data.historical_indicators.copy()
     
     def get_latest_quote(self, symbol: str) -> Optional['Quote']:
         """Get latest quote for symbol (backtest mode).
@@ -1517,6 +1958,37 @@ class SessionData:
             interval_int = interval
         
         return self.get_all_bars_including_historical(symbol, interval_int)
+    
+    def to_json(self, complete: bool = True) -> Tuple[dict, Optional[datetime]]:
+        """Export session data to JSON format.
+        
+        Args:
+            complete: If True, return full data including historical.
+                     If False, return delta (new data only, excludes historical).
+        
+        Returns:
+            Tuple of (result_dict, last_export_time):
+            - result_dict: Session data in JSON format
+            - last_export_time: Timestamp of previous export (for delta metadata)
+        """
+        # Get last export time before updating it
+        last_export_time = self._last_export_time
+        
+        result = {
+            "_session_active": self._session_active,
+            "_active_symbols": sorted(list(self._active_symbols)),
+            "symbols": {}
+        }
+        
+        # Export each symbol's data
+        with self._lock:
+            for symbol, symbol_data in self._symbols.items():
+                result["symbols"][symbol] = symbol_data.to_json(complete=complete)
+            
+            # Update last export time for next delta
+            self._last_export_time = datetime.now()
+        
+        return result, last_export_time
 
 
 # Global singleton instance
