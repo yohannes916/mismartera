@@ -30,9 +30,10 @@ DataCommandMeta = CommandMeta
 DATA_COMMANDS: List[DataCommandMeta] = [
     DataCommandMeta(
         name="list",
-        usage="data list",
-        description="List all symbols in database (1m bars, daily bars, ticks, quotes)",
-        examples=["data list"],
+        usage="data list <symbol>",
+        description="Show all available intervals for a symbol (seconds, minutes, days, weeks, quotes)",
+        examples=["data list AAPL", "data list TSLA"],
+        suggests_symbols_at=1,
     ),
     DataCommandMeta(
         name="info",
@@ -43,16 +44,25 @@ DATA_COMMANDS: List[DataCommandMeta] = [
     ),
     DataCommandMeta(
         name="quality",
-        usage="data quality <symbol>",
-        description="Check data quality for symbol",
-        examples=["data quality AAPL"],
+        usage="data quality <symbol> [--interval/-i <interval>] [--start <date>] [--end <date>]",
+        description="Check data quality with detailed gap analysis",
+        examples=[
+            "data quality AAPL",
+            "data quality AAPL -i 5m",
+            "data quality AAPL -i 1d --start 2025-07-01 --end 2025-07-31"
+        ],
         suggests_symbols_at=1,
     ),
     DataCommandMeta(
         name="delete",
-        usage="data delete <symbol>",
-        description="Delete all data for symbol",
-        examples=["data delete AAPL"],
+        usage="data delete <symbol> [--interval/-i <interval>] [--start <date>] [--end <date>]",
+        description="Delete market data with optional filters (interval, date range)",
+        examples=[
+            "data delete AAPL",
+            "data delete AAPL --interval 5m",
+            "data delete AAPL -i 1m --start 2025-07-01 --end 2025-07-31",
+            "data delete AAPL --start 2025-07-01"
+        ],
         suggests_symbols_at=1,
     ),
     DataCommandMeta(
@@ -80,6 +90,17 @@ DATA_COMMANDS: List[DataCommandMeta] = [
         description="Import CSV data with optional date range (YYYY-MM-DD)",
         examples=["data import-file data/aapl.csv AAPL"],
         suggests_symbols_at=2,
+    ),
+    DataCommandMeta(
+        name="aggregate",
+        usage="data aggregate <target> <source> <symbol> <start> <end>",
+        description="Aggregate existing Parquet data to new interval (e.g., 1m→5m, 1d→1w)",
+        examples=[
+            "data aggregate 5m 1m AAPL 2025-07-01 2025-07-31",
+            "data aggregate 1d 1m AAPL 2025-07-01 2025-07-31",
+            "data aggregate 1w 1d AAPL 2025-01-01 2025-12-31"
+        ],
+        suggests_symbols_at=3,
     ),
     DataCommandMeta(
         name="backtest-window",

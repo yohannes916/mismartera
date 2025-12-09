@@ -14,7 +14,7 @@ from rich.table import Table
 from rich import box
 from rich.text import Text
 import getpass
-import asyncio
+import time
 
 # Command history support
 try:
@@ -84,7 +84,6 @@ class CommandCompleter:
         if not self.cached_symbols:
             try:
                 # This will be populated by the CLI when logged in
-                import asyncio
                 from app.cli.data_commands import get_data_manager
                 from app.models.database import SessionLocal
                 
@@ -298,7 +297,7 @@ class InteractiveCLI:
         self.data_manager = get_data_manager()
         
         # Set up command history and tab completion
-        self.history_file = os.path.expanduser("~/.mismartera_history")
+        self.history_file = os.path.expanduser("~/.mismartera/history")
         self.completer = CommandCompleter()
         self._setup_history()
         
@@ -308,16 +307,29 @@ class InteractiveCLI:
             logger.warning("readline not available - command history and tab completion disabled")
             return
         
+        # Ensure .mismartera directory exists
+        history_dir = os.path.dirname(self.history_file)
+        os.makedirs(history_dir, exist_ok=True)
+        
         # Set history length
         readline.set_history_length(1000)
         
         # Load existing history
         if os.path.exists(self.history_file):
             try:
+                # Read history file using readline's native function
                 readline.read_history_file(self.history_file)
-                logger.debug(f"Loaded command history from {self.history_file}")
-            except Exception as e:
-                logger.warning(f"Could not load history file: {e}")
+                history_len = readline.get_current_history_length()
+                logger.debug(f"Loaded {history_len} commands from {self.history_file}")
+            except (OSError, IOError) as e:
+                # History file might be corrupt - delete and start fresh
+                logger.warning(f"History file corrupt ({e}), starting fresh")
+                try:
+                    os.remove(self.history_file)
+                except:
+                    pass
+        else:
+            logger.debug(f"No history file found at {self.history_file}, will create on exit")
         
         # Set up tab completion
         try:
@@ -341,15 +353,47 @@ class InteractiveCLI:
         atexit.register(self._save_history)
     
     def _save_history(self):
-        """Save command history to file"""
+        """Save command history to file (unique commands only)"""
         if not READLINE_AVAILABLE:
             return
         
         try:
+            # Ensure .mismartera directory exists
+            history_dir = os.path.dirname(self.history_file)
+            os.makedirs(history_dir, exist_ok=True)
+            
+            # Get current history length
+            history_length = readline.get_current_history_length()
+            if history_length == 0:
+                logger.debug("No history to save")
+                return
+            
+            # Collect unique commands to keep (filter out junk)
+            commands_to_keep = []
+            seen = set()
+            
+            for i in range(1, history_length + 1):
+                cmd = readline.get_history_item(i)
+                if cmd and cmd.strip():
+                    cmd_stripped = cmd.strip()
+                    # Skip single chars, yes/no, exit/quit, and duplicates
+                    if (len(cmd_stripped) > 1 and 
+                        cmd_stripped not in ['yes', 'no', 'exit', 'quit'] and
+                        cmd_stripped not in seen):
+                        commands_to_keep.append(cmd_stripped)
+                        seen.add(cmd_stripped)
+            
+            # Clear readline history and rebuild with filtered commands
+            readline.clear_history()
+            for cmd in commands_to_keep:
+                readline.add_history(cmd)
+            
+            # Use readline's native save function
             readline.write_history_file(self.history_file)
-            logger.debug(f"Saved command history to {self.history_file}")
+            
+            logger.debug(f"Saved {len(commands_to_keep)} unique commands to {self.history_file}")
         except Exception as e:
-            logger.warning(f"Could not save history file: {e}")
+            logger.error(f"Could not save history file: {e}")
     
     def display_banner(self):
         """Display welcome banner"""
@@ -360,9 +404,9 @@ class InteractiveCLI:
         banner.append("MISMARTERA", style="yellow bold")
         banner.append("                    ║\n", style="cyan bold")
         banner.append("║                                                  ║\n", style="cyan bold")
-        banner.append("║           ", style="cyan bold")
-        banner.append("Interactive Trading Terminal", style="green")
-        banner.append("           ║\n", style="cyan bold")
+        banner.append("║               ", style="cyan bold")
+        banner.append("Interactive Terminal", style="green")
+        banner.append("               ║\n", style="cyan bold")
         banner.append("║                                                  ║\n", style="cyan bold")
         banner.append("╚══════════════════════════════════════════════════╝", style="cyan bold")
         
@@ -595,7 +639,7 @@ class InteractiveCLI:
         self.console.print(table)
     
     def show_history(self, limit: int = 50):
-        """Display command history"""
+        """Display command history (unique commands only)"""
         if not READLINE_AVAILABLE:
             self.console.print("[yellow]Command history not available (readline not installed)[/yellow]")
             return
@@ -606,18 +650,31 @@ class InteractiveCLI:
             self.console.print("[dim]No command history yet[/dim]")
             return
         
-        # Calculate start index
-        start = max(1, history_length - limit + 1)
-        
-        self.console.print(f"\n[cyan]Command History[/cyan] [dim](showing last {min(limit, history_length)} commands)[/dim]\n")
-        
-        for i in range(start, history_length + 1):
+        # Collect unique commands (keep last occurrence)
+        seen = {}  # command -> last index
+        for i in range(1, history_length + 1):
             cmd = readline.get_history_item(i)
-            if cmd:
-                # Show index and command
-                self.console.print(f"[dim]{i:4d}[/dim]  {cmd}")
+            if cmd and cmd.strip():
+                cmd_stripped = cmd.strip()
+                # Filter matches save logic: skip single chars, yes/no, exit/quit
+                if len(cmd_stripped) > 1 and cmd_stripped not in ['yes', 'no', 'exit', 'quit']:
+                    seen[cmd_stripped] = i
         
-        self.console.print(f"\n[dim]Total commands in history: {history_length}[/dim]")
+        if not seen:
+            self.console.print("[dim]No command history yet[/dim]")
+            return
+        
+        # Sort by index and get last N unique commands
+        unique_commands = sorted(seen.items(), key=lambda x: x[1])
+        start_idx = max(0, len(unique_commands) - limit)
+        commands_to_show = unique_commands[start_idx:]
+        
+        self.console.print(f"\n[cyan]Command History[/cyan] [dim](showing last {len(commands_to_show)} commands)[/dim]\n")
+        
+        for idx, (cmd, _) in enumerate(commands_to_show, start=1):
+            self.console.print(f"[dim]{idx:4d}[/dim]  {cmd}")
+        
+        self.console.print(f"\n[dim]Total commands in history: {len(unique_commands)}[/dim]")
         self.console.print(f"[dim]History file: {self.history_file}[/dim]\n")
     
     def run_script(self, script_path: str) -> None:
@@ -779,7 +836,7 @@ class InteractiveCLI:
                 else:
                     ms = int(args[0])
                     self.console.print(f"[dim]Pausing for {ms}ms...[/dim]")
-                    asyncio.sleep(ms / 1000.0)
+                    time.sleep(ms / 1000.0)
                     self.console.print(f"[green]✓[/green] Resumed after {ms}ms")
             
             # ==================== ADMIN COMMANDS (from ADMIN_COMMANDS registry) ====================
@@ -1178,21 +1235,60 @@ class InteractiveCLI:
             elif cmd == 'data':
                 if args:
                     subcmd = args[0].lower()
-                    if subcmd == 'list':
+                    if subcmd == 'list' and len(args) >= 2:
+                        symbol = args[1].upper()
                         from app.cli.data_commands import list_symbols_command
-                        list_symbols_command()
+                        list_symbols_command(symbol)
                     elif subcmd == 'info' and len(args) >= 2:
                         symbol = args[1].upper()
                         from app.cli.data_commands import data_info_command
                         data_info_command(symbol)
                     elif subcmd == 'quality' and len(args) >= 2:
                         symbol = args[1].upper()
+                        # Parse optional flags: --interval/-i, --start, --end
+                        interval = "1m"  # default
+                        start_date = None
+                        end_date = None
+                        
+                        i = 2
+                        while i < len(args):
+                            if args[i] in ['--interval', '-i'] and i + 1 < len(args):
+                                interval = args[i + 1]
+                                i += 2
+                            elif args[i] == '--start' and i + 1 < len(args):
+                                start_date = args[i + 1]
+                                i += 2
+                            elif args[i] == '--end' and i + 1 < len(args):
+                                end_date = args[i + 1]
+                                i += 2
+                            else:
+                                i += 1
+                        
                         from app.cli.data_commands import data_quality_command
-                        data_quality_command(symbol)
+                        data_quality_command(symbol, interval, start_date, end_date)
                     elif subcmd == 'delete' and len(args) >= 2:
                         symbol = args[1].upper()
+                        # Parse optional flags: --interval/-i, --start, --end
+                        interval = None
+                        start_date = None
+                        end_date = None
+                        
+                        i = 2
+                        while i < len(args):
+                            if args[i] in ['--interval', '-i'] and i + 1 < len(args):
+                                interval = args[i + 1]
+                                i += 2
+                            elif args[i] == '--start' and i + 1 < len(args):
+                                start_date = args[i + 1]
+                                i += 2
+                            elif args[i] == '--end' and i + 1 < len(args):
+                                end_date = args[i + 1]
+                                i += 2
+                            else:
+                                i += 1
+                        
                         from app.cli.data_commands import delete_symbol_command
-                        delete_symbol_command(symbol)
+                        delete_symbol_command(symbol, interval, start_date, end_date)
                     elif subcmd == 'delete-all':
                         from app.cli.data_commands import delete_all_command
                         delete_all_command()
@@ -1215,6 +1311,15 @@ class InteractiveCLI:
                         end_date = args[4] if len(args) >= 5 else None
                         from app.cli.data_commands import import_csv_command
                         import_csv_command(file_path, symbol, start_date, end_date)
+                    elif subcmd == 'aggregate' and len(args) >= 6:
+                        # data aggregate <target> <source> <symbol> <start> <end>
+                        target = args[1]
+                        source = args[2]
+                        symbol = args[3].upper()
+                        start_date = args[4]
+                        end_date = args[5]
+                        from app.cli.data_commands import aggregate_command
+                        aggregate_command(target, source, symbol, start_date, end_date)
                     elif subcmd == 'export-csv' and len(args) >= 5:
                         # data export-csv <type> <symbol> <start> <end?> -f <file>
                         data_type = args[1]
@@ -1560,12 +1665,12 @@ class InteractiveCLI:
                             if streams_idx + 1 < len(args):
                                 streams = args[streams_idx + 1]
                         from app.cli.data_commands import add_symbol_command
-                        asyncio.run(add_symbol_command(symbol, streams))
+                        add_symbol_command(symbol, streams)
                     elif subcmd == 'remove-symbol' and len(args) >= 2:
                         # data remove-symbol <symbol>
                         symbol = args[1].upper()
                         from app.cli.data_commands import remove_symbol_command
-                        asyncio.run(remove_symbol_command(symbol))
+                        remove_symbol_command(symbol)
                     else:
                         from app.cli.data_commands import print_data_usage
                         print_data_usage(self.console)
@@ -2221,6 +2326,9 @@ class InteractiveCLI:
                     break
         
         finally:
+            # Save history before exiting
+            self._save_history()
+            
             # Logout and cleanup
             self.logout()
             self.console.print("\n[dim]Session ended[/dim]\n")

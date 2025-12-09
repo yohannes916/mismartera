@@ -407,8 +407,9 @@ class TimeManager:
             self._last_query_cache['result'] = result
             return result
         
-        # Check if holiday
-        holiday = TradingCalendarRepository.get_holiday(session, date, exchange)
+        # Check if holiday (need to map exchange to exchange_group)
+        exchange_group = self.get_exchange_group(exchange) if exchange else self.default_exchange_group
+        holiday = TradingCalendarRepository.get_holiday(session, date, exchange_group)
         
         if holiday and holiday.is_closed:
             # Full closure
@@ -797,7 +798,10 @@ class TimeManager:
         end_date: date,
         exchange: str = "NYSE"
     ) -> int:
-        """Count trading days between two dates (inclusive)
+        """Count trading days between two dates (inclusive).
+        
+        DEPRECATED: Use count_trading_time(session, start, end, unit='days') instead.
+        Kept for backward compatibility.
         
         Args:
             session: Database session
@@ -808,6 +812,161 @@ class TimeManager:
         Returns:
             Number of trading days
         """
+        # Delegate to unified API
+        start_dt = datetime.combine(start_date, datetime.min.time())
+        end_dt = datetime.combine(end_date, datetime.max.time())
+        return self.count_trading_time(session, start_dt, end_dt, unit='days', exchange=exchange)
+    
+    def count_trading_time(
+        self,
+        session: Session,
+        start: datetime,
+        end: datetime,
+        unit: str = "days",
+        exchange: str = "NYSE"
+    ) -> int:
+        """Unified API to count trading time in any unit.
+        
+        SINGLE SOURCE OF TRUTH for counting trading periods.
+        Accounts for:
+        - Holidays (market closed)
+        - Weekends (per exchange - varies globally)
+        - Early closes (half-days)
+        - Partial periods (intersects with start/end)
+        
+        TIMEZONE HANDLING:
+        - Accepts timezone-naive or timezone-aware datetimes
+        - Naive datetimes are assumed to be in exchange timezone (from system_manager.timezone)
+        - Converts all to exchange timezone for consistent calculations
+        
+        Args:
+            session: Database session
+            start: Start datetime (inclusive) - naive or aware
+            end: End datetime (inclusive) - naive or aware
+            unit: Time unit - 'seconds', 'minutes', 'days', or 'weeks'
+            exchange: Exchange identifier (e.g., 'NYSE', 'TSE', 'TASE')
+            
+        Returns:
+            Total trading time in requested unit
+        
+        Examples:
+            # Count trading seconds (intraday calculations)
+            count_trading_time(session, start_dt, end_dt, unit='seconds', exchange='NYSE')
+            # Returns: 1,535,400 (59 days × 6.5 hours × 3600 seconds)
+            
+            # Count trading minutes
+            count_trading_time(session, start_dt, end_dt, unit='minutes', exchange='NYSE')
+            # Returns: 25,590 (59 days × 6.5 hours × 60 minutes)
+            
+            # Count trading days
+            count_trading_time(session, start_dt, end_dt, unit='days', exchange='NYSE')
+            # Returns: 59
+            
+            # Count trading weeks
+            count_trading_time(session, start_dt, end_dt, unit='weeks', exchange='NYSE')
+            # Returns: 8 (approximately 2 months)
+        
+        Raises:
+            ValueError: If unit is not recognized
+        """
+        # Normalize timezone: naive → exchange timezone
+        config = self.get_market_config(exchange)
+        if config:
+            tz = ZoneInfo(config.timezone)
+            
+            # Convert naive to exchange timezone
+            if start.tzinfo is None:
+                start = start.replace(tzinfo=tz)
+            if end.tzinfo is None:
+                end = end.replace(tzinfo=tz)
+        
+        unit = unit.lower()
+        
+        if unit == 'seconds':
+            return self._count_trading_seconds(session, start, end, exchange)
+        elif unit == 'minutes':
+            seconds = self._count_trading_seconds(session, start, end, exchange)
+            return seconds // 60
+        elif unit == 'days':
+            return self._count_trading_days(session, start.date(), end.date(), exchange)
+        elif unit == 'weeks':
+            return self._count_trading_weeks(session, start.date(), end.date(), exchange)
+        else:
+            raise ValueError(
+                f"Invalid unit '{unit}'. Must be one of: 'seconds', 'minutes', 'days', 'weeks'"
+            )
+    
+    def _count_trading_seconds(
+        self,
+        session: Session,
+        start: datetime,
+        end: datetime,
+        exchange: str
+    ) -> int:
+        """Internal: Count total trading seconds between two datetimes."""
+        from app.logger import logger
+        
+        total_seconds = 0
+        current_date = start.date()
+        end_date = end.date()
+        trading_days_found = 0
+        
+        while current_date <= end_date:
+            # Get trading session for this date
+            trading_session = self.get_trading_session(session, current_date, exchange)
+            
+            # Skip non-trading days (weekends, holidays, etc.)
+            if not trading_session or not trading_session.is_trading_day or trading_session.is_holiday:
+                current_date += timedelta(days=1)
+                continue
+            
+            # Get trading hours from session
+            regular_open = trading_session.regular_open
+            regular_close = trading_session.regular_close
+            
+            if not regular_open or not regular_close:
+                logger.warning(
+                    f"Trading day {current_date} for {exchange} has no hours: "
+                    f"open={regular_open}, close={regular_close}"
+                )
+                current_date += timedelta(days=1)
+                continue
+            
+            trading_days_found += 1
+            
+            # Build datetime range for this trading day
+            # Use input timezone (already normalized by caller)
+            tz = start.tzinfo
+            open_dt = datetime.combine(current_date, regular_open).replace(tzinfo=tz)
+            close_dt = datetime.combine(current_date, regular_close).replace(tzinfo=tz)
+            
+            # Intersect with requested window
+            if close_dt >= start and open_dt <= end:
+                effective_open = max(open_dt, start)
+                effective_close = min(close_dt, end)
+                
+                day_seconds = (effective_close - effective_open).total_seconds()
+                if day_seconds > 0:
+                    total_seconds += int(day_seconds)
+            
+            current_date += timedelta(days=1)
+        
+        if trading_days_found == 0:
+            logger.error(
+                f"No trading days found for {exchange} between {start.date()} and {end.date()}. "
+                f"Check if trading sessions are loaded in database."
+            )
+        
+        return total_seconds
+    
+    def _count_trading_days(
+        self,
+        session: Session,
+        start_date: date,
+        end_date: date,
+        exchange: str
+    ) -> int:
+        """Internal: Count trading days between two dates."""
         count = 0
         current = start_date
         
@@ -817,6 +976,41 @@ class TimeManager:
             current += timedelta(days=1)
         
         return count
+    
+    def _count_trading_weeks(
+        self,
+        session: Session,
+        start_date: date,
+        end_date: date,
+        exchange: str
+    ) -> int:
+        """Internal: Count number of trading weeks between two dates."""
+        # Get the Monday of the week containing start_date
+        start_monday = start_date - timedelta(days=start_date.weekday())
+        
+        # Get the Sunday of the week containing end_date
+        end_sunday = end_date + timedelta(days=(6 - end_date.weekday()))
+        
+        trading_weeks = 0
+        current_monday = start_monday
+        
+        while current_monday <= end_sunday:
+            # Check if this week has any trading days
+            week_has_trading_day = False
+            
+            for day_offset in range(7):
+                check_date = current_monday + timedelta(days=day_offset)
+                if check_date >= start_date and check_date <= end_date:
+                    if self.is_trading_day(session, check_date, exchange):
+                        week_has_trading_day = True
+                        break
+            
+            if week_has_trading_day:
+                trading_weeks += 1
+            
+            current_monday += timedelta(days=7)
+        
+        return trading_weeks
     
     def get_first_trading_date(
         self,
@@ -942,28 +1136,42 @@ class TimeManager:
     def convert_timezone(
         self,
         dt: datetime,
-        to_timezone: str
+        to_timezone: str,
+        from_timezone: Optional[str] = None
     ) -> datetime:
         """Convert datetime to specified timezone
         
+        TIMEZONE HANDLING:
+        - If dt is timezone-aware, converts directly
+        - If dt is naive, assumes it's in system's default timezone (exchange timezone)
+        - Can override with from_timezone parameter
+        
         Args:
-            dt: Datetime (naive=UTC, or timezone-aware)
+            dt: Datetime to convert (naive or aware)
             to_timezone: Target timezone (IANA format)
+            from_timezone: Source timezone if dt is naive (defaults to system timezone)
             
         Returns:
             Timezone-aware datetime in target timezone
         """
         # Ensure dt is timezone-aware
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=ZoneInfo("UTC"))
+            # Naive datetime - use specified or default timezone
+            if from_timezone is None:
+                from_timezone = self.default_timezone  # Exchange timezone from system_manager
+            dt = dt.replace(tzinfo=ZoneInfo(from_timezone))
         
         return dt.astimezone(ZoneInfo(to_timezone))
     
     def to_utc(self, dt: datetime) -> datetime:
         """Convert datetime to UTC
         
+        TIMEZONE HANDLING:
+        - If dt is naive, assumes exchange timezone (system_manager.timezone)
+        - If dt is timezone-aware, converts from its timezone
+        
         Args:
-            dt: Datetime (naive=UTC, or timezone-aware)
+            dt: Datetime to convert (naive or aware)
             
         Returns:
             Timezone-aware datetime in UTC
@@ -977,12 +1185,16 @@ class TimeManager:
     ) -> datetime:
         """Convert datetime to market's local timezone
         
+        TIMEZONE HANDLING:
+        - If dt is naive, assumes system's exchange timezone
+        - If dt is timezone-aware, converts from its timezone
+        
         Args:
-            dt: Datetime to convert
+            dt: Datetime to convert (naive or aware)
             exchange: Exchange identifier
             
         Returns:
-            Datetime in market's timezone
+            Timezone-aware datetime in market's timezone
         """
         tz = self.get_market_timezone(exchange)
         return self.convert_timezone(dt, tz)
@@ -1030,10 +1242,13 @@ class TimeManager:
     ) -> Optional[MarketHoursConfig]:
         """Get market hours configuration
         
+        Supports both exchange groups (US_EQUITY) and individual exchanges (NYSE, NASDAQ).
+        Maps individual exchanges to their exchange group automatically.
+        
         Uses system manager defaults if parameters not specified.
         
         Args:
-            exchange: Exchange group identifier (uses system default if None)
+            exchange: Exchange identifier (e.g., 'NYSE', 'NASDAQ', 'US_EQUITY')
             asset_class: Asset class (uses system default if None)
             
         Returns:
@@ -1044,8 +1259,32 @@ class TimeManager:
         if asset_class is None:
             asset_class = self.default_asset_class
         
+        # Try direct lookup first
         key = (exchange, asset_class)
-        return self._market_configs.get(key)
+        config = self._market_configs.get(key)
+        if config:
+            return config
+        
+        # Map individual exchanges to exchange groups
+        exchange_group_map = {
+            'NYSE': 'US_EQUITY',
+            'NASDAQ': 'US_EQUITY',
+            'AMEX': 'US_EQUITY',
+            'ARCA': 'US_EQUITY',
+            'BATS': 'US_EQUITY',
+            # Add more mappings as needed for other countries/exchanges
+        }
+        
+        # Try mapped lookup
+        exchange_group = exchange_group_map.get(exchange)
+        if exchange_group:
+            key = (exchange_group, asset_class)
+            config = self._market_configs.get(key)
+            if config:
+                return config
+        
+        # Not found
+        return None
     
     # ==================== Holiday Management ====================
     
@@ -1417,8 +1656,9 @@ class TimeManager:
         # Find next trading day
         max_attempts = 100  # Prevent infinite loop (allow checking ~3 months)
         for attempt in range(max_attempts):
-            # Check if it's a weekend
-            if candidate_date.weekday() >= 5:  # Saturday=5, Sunday=6
+            # Check if it's a non-trading day per exchange config (NOT hardcoded weekends)
+            # Trading days are exchange-specific: NYSE=[0,1,2,3,4], TASE=[0,1,2,3,6], etc.
+            if not market_config.is_trading_day_of_week(candidate_date.weekday()):
                 candidate_date += timedelta(days=1)
                 continue
             

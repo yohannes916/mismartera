@@ -1,0 +1,145 @@
+{
+  "session_name": "Unified Config Example",
+  "exchange_group": "US_EQUITY",
+  "asset_class": "EQUITY",
+  "mode": "backtest",
+  
+  "backtest_config": {
+    "start_date": "2025-07-15",
+    "end_date": "2025-07-16",
+    "speed_multiplier": 60.0
+  },
+  
+  "session_data_config": {
+    "symbols": ["AAPL", "TSLA", "NVDA"],
+    
+    "streams": ["1m", "5m", "15m", "1d"],
+    
+    "streaming": {
+      "catchup_threshold_seconds": 60,
+      "catchup_check_interval": 10
+    },
+    
+    "historical": {
+      "enable_quality": true,
+      "data": [
+        {
+          "trailing_days": 20,
+          "intervals": ["1d"],
+          "apply_to": "all"
+        }
+      ]
+    },
+    
+    "gap_filler": {
+      "enable_session_quality": true,
+      "max_retries": 5,
+      "retry_interval_seconds": 60
+    },
+    
+    "indicators": {
+      "session": [
+        {
+          "name": "sma",
+          "period": 20,
+          "interval": "5m",
+          "type": "trend"
+        },
+        {
+          "name": "ema",
+          "period": 12,
+          "interval": "5m",
+          "type": "trend"
+        },
+        {
+          "name": "vwap",
+          "period": 0,
+          "interval": "1m",
+          "type": "trend"
+        },
+        {
+          "name": "rsi",
+          "period": 14,
+          "interval": "5m",
+          "type": "momentum"
+        },
+        {
+          "name": "macd",
+          "period": 0,
+          "interval": "15m",
+          "type": "momentum",
+          "params": {
+            "fast": 12,
+            "slow": 26,
+            "signal": 9
+          }
+        },
+        {
+          "name": "bbands",
+          "period": 20,
+          "interval": "5m",
+          "type": "volatility",
+          "params": {
+            "num_std": 2.0
+          }
+        },
+        {
+          "name": "atr",
+          "period": 14,
+          "interval": "5m",
+          "type": "volatility"
+        },
+        {
+          "name": "obv",
+          "period": 0,
+          "interval": "1m",
+          "type": "volume"
+        }
+      ],
+      
+      "historical": [
+        {
+          "name": "avg_volume",
+          "period": 5,
+          "unit": "days",
+          "interval": "1d",
+          "type": "historical"
+        },
+        {
+          "name": "atr_daily",
+          "period": 14,
+          "unit": "days",
+          "interval": "1d",
+          "type": "historical"
+        },
+        {
+          "name": "high_low",
+          "period": 20,
+          "unit": "days",
+          "interval": "1d",
+          "type": "historical"
+        },
+        {
+          "name": "high_low",
+          "period": 4,
+          "unit": "weeks",
+          "interval": "1w",
+          "type": "historical"
+        }
+      ]
+    }
+  },
+  
+  "trading_config": {
+    "max_buying_power": 100000,
+    "max_per_trade": 10000,
+    "max_per_symbol": 20000,
+    "max_open_positions": 5
+  },
+  
+  "api_config": {
+    "data_api": "alpaca",
+    "trade_api": "alpaca",
+    "account_id": null
+  }
+}

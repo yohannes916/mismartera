@@ -1,0 +1,4 @@
+system start
+data session 0
+exit
+y

@@ -107,66 +107,39 @@ class SymbolSessionData:
     symbol: str
     
     # Base interval for this symbol ("1s" or "1m")
+    # Kept for performance - enables O(1) base interval lookup
     base_interval: str = "1m"
     
-    # === NEW REFINED STRUCTURE (Phase 1: Non-Breaking Addition) ===
-    # Self-describing bar structure - each interval contains all its metadata
+    # === BARS (Self-Describing Structure) ===
+    # Each interval contains all its metadata: derived flag, base source, data, quality, gaps
     # Structure: {interval: BarIntervalData(derived, base, data, quality, gaps, updated)}
     # Example: {"1m": BarIntervalData(derived=False, base=None, data=deque([...])),
     #           "5m": BarIntervalData(derived=True, base="1m", data=[...])}
     bars: Dict[str, BarIntervalData] = field(default_factory=dict)
     
-    # Grouped session metrics (volume, high, low)
-    metrics: SessionMetrics = field(default_factory=SessionMetrics)
-    
-    # Session indicators (computed analytics like RSI, VWAP)
-    # Distinct from metrics (basic aggregations)
-    indicators: Dict[str, Any] = field(default_factory=dict)
-    
-    # Grouped historical data (bars + indicators)
-    historical: HistoricalData = field(default_factory=HistoricalData)
-    
-    # === OLD STRUCTURE (Kept for Backward Compatibility - Phase 2: Will Remove) ===
-    # Base bars (1s or 1m depending on base_interval)
-    bars_base: Deque[BarData] = field(default_factory=deque)
-    
-    # Cache for O(1) access to latest bar
-    _latest_bar: Optional[BarData] = None
-    
-    # Derived bars (e.g., {"1m": [...], "5m": [...], "15m": [...]})
-    bars_derived: Dict[str, List[BarData]] = field(default_factory=dict)
-    
-    # Bar quality metrics per interval (0-100%)
-    # Structure: {interval: quality_percentage}
-    # Example: {"1m": 100.0, "5m": 98.5, "1d": 100.0}
-    bar_quality: Dict[str, float] = field(default_factory=dict)
-    
-    # Other data types
+    # === QUOTES ===
     quotes: List = field(default_factory=list)  # QuoteData when implemented
-    ticks: List[TickData] = field(default_factory=list)
-    
-    # Session metrics (real-time tracking)
-    session_volume: int = 0
-    session_high: Optional[float] = None
-    session_low: Optional[float] = None
-    last_update: Optional[datetime] = None
-    
-    # Update flags (set by main thread when new data inserted)
-    bars_updated: bool = False
     quotes_updated: bool = False
+    
+    # === TICKS ===
+    ticks: List[TickData] = field(default_factory=list)
     ticks_updated: bool = False
     
-    # Historical bars for trailing days
-    # Structure: {interval: {date: [bars]}}
-    # Example: {"1m": {date1: [...], date2: [...]}, "5m": {date1: [...], date2: [...]}}
-    historical_bars: Dict[str, Dict[date, List[BarData]]] = field(
-        default_factory=lambda: defaultdict(dict)
-    )
+    # === SESSION METRICS (Basic OHLCV Aggregations) ===
+    metrics: SessionMetrics = field(default_factory=SessionMetrics)
     
-    # Historical indicators for this symbol
-    # Structure: {indicator_key: value}
-    # Example: {"avg_volume_2d": 12345678.9, "max_price_5d": 150.25}
-    historical_indicators: Dict[str, Any] = field(default_factory=dict)
+    # === SESSION INDICATORS (Computed Analytics) ===
+    # Computed real-time indicators like RSI, VWAP, momentum, etc.
+    # Distinct from metrics (which are basic aggregations)
+    indicators: Dict[str, Any] = field(default_factory=dict)
+    
+    # === HISTORICAL DATA ===
+    # Trailing days of bars and pre-calculated indicators
+    historical: HistoricalData = field(default_factory=HistoricalData)
+    
+    # === INTERNAL (Caching & Export Tracking) ===
+    # Cache for O(1) access to latest bar
+    _latest_bar: Optional[BarData] = None
     
     # Delta export tracking: track last exported indices (for delta mode)
     _last_export_indices: Dict[str, Any] = field(
@@ -181,17 +154,16 @@ class SymbolSessionData:
     )
     
     @property
-    def bars_1m(self) -> Deque[BarData]:
-        """Backward compatibility: Access to bars (works for 1m base or derived 1m from 1s).
+    def bars_1m(self) -> Union[Deque[BarData], List[BarData]]:
+        """Get 1m bars (convenience property).
         
         Returns:
-            Base bars if interval is 1m, otherwise derived 1m bars
+            1m bars if they exist, otherwise empty list
         """
-        if self.base_interval == "1m":
-            return self.bars_base
-        else:
-            # Return derived 1m bars (if computed from 1s)
-            return deque(self.bars_derived.get("1m", []))
+        interval_data = self.bars.get("1m")
+        if interval_data:
+            return interval_data.data
+        return []
     
     def update_from_bar(self, bar: BarData) -> None:
         """Update session metrics from a new bar.
@@ -199,22 +171,7 @@ class SymbolSessionData:
         Args:
             bar: New bar data
         """
-        # Update OLD structure (backward compatibility)
-        self.session_volume += bar.volume
-        
-        if self.session_high is None or bar.high > self.session_high:
-            self.session_high = bar.high
-        
-        if self.session_low is None or bar.low < self.session_low:
-            self.session_low = bar.low
-        
-        self.last_update = bar.timestamp
-        self.bars_updated = True
-        
-        # Update latest bar cache
-        self._latest_bar = bar
-        
-        # Update NEW structure (dual-write for Phase 1)
+        # Update session metrics
         self.metrics.volume += bar.volume
         
         if self.metrics.high is None or bar.high > self.metrics.high:
@@ -224,43 +181,41 @@ class SymbolSessionData:
             self.metrics.low = bar.low
         
         self.metrics.last_update = bar.timestamp
+        
+        # Update latest bar cache
+        self._latest_bar = bar
     
     def get_latest_bar(self, interval = None) -> Optional[BarData]:
         """Get the most recent bar (O(1) operation).
         
         Args:
-            interval: Bar interval (int minutes or string like "1s", "1m", "5m"). If None, uses base_interval.
+            interval: Bar interval (string like "1s", "1m", "5m"). If None, uses cached latest bar.
             
         Returns:
             Most recent bar or None
         """
+        # If no interval specified, return cached latest bar
+        if interval is None:
+            return self._latest_bar
+        
         # Normalize interval: convert int to string
         if isinstance(interval, int):
             interval = f"{interval}m"
         
-        if interval is None or interval == self.base_interval:
-            return self._latest_bar
-        else:
-            # Try string key first
-            bars = self.bars_derived.get(interval, [])
-            if not bars and isinstance(interval, str) and interval.endswith('m'):
-                # Fallback: try integer key
-                try:
-                    interval_int = int(interval[:-1])
-                    bars = self.bars_derived.get(interval_int, [])
-                except (ValueError, IndexError):
-                    pass
-            return bars[-1] if bars else None
+        # Get interval data
+        interval_data = self.bars.get(interval)
+        if not interval_data or not interval_data.data:
+            return None
+        
+        # Return last bar
+        return interval_data.data[-1]
     
     def get_last_n_bars(self, n: int, interval = None) -> List[BarData]:
         """Get the last N bars efficiently.
         
-        For base bars, uses deque for O(N) access.
-        For derived bars, uses list slicing.
-        
         Args:
             n: Number of bars to retrieve
-            interval: Bar interval (int minutes or string like "1s", "1m", "5m"). If None, uses base_interval.
+            interval: Bar interval (string like "1s", "1m", "5m"). If None, uses base_interval.
             
         Returns:
             List of last N bars (oldest to newest)
@@ -269,31 +224,28 @@ class SymbolSessionData:
         if isinstance(interval, int):
             interval = f"{interval}m"
         
-        if interval is None or interval == self.base_interval:
-            # Efficient: only iterate over last n items from base bars
-            if len(self.bars_base) <= n:
-                return list(self.bars_base)
-            else:
-                # Get last n items from deque
-                return list(self.bars_base)[-n:]
+        # Default to base interval
+        if interval is None:
+            interval = self.base_interval
+        
+        # Get interval data
+        interval_data = self.bars.get(interval)
+        if not interval_data or not interval_data.data:
+            return []
+        
+        # Return last n bars
+        bars = interval_data.data
+        if len(bars) <= n:
+            return list(bars)
         else:
-            # Try string key first
-            bars = self.bars_derived.get(interval, [])
-            if not bars and isinstance(interval, str) and interval.endswith('m'):
-                # Fallback: try integer key
-                try:
-                    interval_int = int(interval[:-1])
-                    bars = self.bars_derived.get(interval_int, [])
-                except (ValueError, IndexError):
-                    pass
-            return bars[-n:] if bars else []
+            return list(bars)[-n:]
     
     def get_bars_since(self, timestamp: datetime, interval = None) -> List[BarData]:
         """Get all bars since a specific timestamp.
         
         Args:
             timestamp: Start timestamp
-            interval: Bar interval (int minutes or string like "1s", "1m", "5m"). If None, uses base_interval.
+            interval: Bar interval (string like "1s", "1m", "5m"). If None, uses base_interval.
             
         Returns:
             List of bars after timestamp
@@ -302,69 +254,49 @@ class SymbolSessionData:
         if isinstance(interval, int):
             interval = f"{interval}m"
         
-        if interval is None or interval == self.base_interval:
-            # Efficient: iterate backward from newest until we hit timestamp
-            result = []
-            for bar in reversed(self.bars_base):
-                if bar.timestamp < timestamp:
-                    break
-                result.append(bar)
-            return list(reversed(result))
-        else:
-            # Try string key first
-            bars = self.bars_derived.get(interval, [])
-            if not bars and isinstance(interval, str) and interval.endswith('m'):
-                # Fallback: try integer key
-                try:
-                    interval_int = int(interval[:-1])
-                    bars = self.bars_derived.get(interval_int, [])
-                except (ValueError, IndexError):
-                    pass
-            return [b for b in bars if b.timestamp >= timestamp] if bars else []
+        # Default to base interval
+        if interval is None:
+            interval = self.base_interval
+        
+        # Get interval data
+        interval_data = self.bars.get(interval)
+        if not interval_data or not interval_data.data:
+            return []
+        
+        # Filter bars by timestamp
+        return [b for b in interval_data.data if b.timestamp >= timestamp]
     
     def get_bar_count(self, interval = None) -> int:
         """Get count of bars for an interval (O(1) operation).
         
         Args:
-            interval: Bar interval (int minutes, or string like "1s", "1m", "5m"). If None, uses base_interval.
+            interval: Bar interval (string like "1s", "1m", "5m"). If None, uses base_interval.
             
         Returns:
-            Number of bars available
+            Number of bars
         """
         # Normalize interval: convert int to string
         if isinstance(interval, int):
             interval = f"{interval}m"
         
-        if interval is None or interval == self.base_interval:
-            return len(self.bars_base)
-        else:
-            # Try string key first (e.g., "5m")
-            bars = self.bars_derived.get(interval)
-            if bars is None and isinstance(interval, str) and interval.endswith('m'):
-                # Fallback: try integer key (e.g., 5)
-                try:
-                    interval_int = int(interval[:-1])
-                    bars = self.bars_derived.get(interval_int)
-                except (ValueError, IndexError):
-                    pass
-            return len(bars) if bars else 0
+        # Default to base interval
+        if interval is None:
+            interval = self.base_interval
+        
+        # Get interval data
+        interval_data = self.bars.get(interval)
+        if not interval_data or not interval_data.data:
+            return 0
+        
+        return len(interval_data.data)
     
     def reset_session_metrics(self) -> None:
         """Reset session metrics for a new session."""
-        # Reset OLD structure
-        self.session_volume = 0
-        self.session_high = None
-        self.session_low = None
-        self.last_update = None
-        self.bar_quality = {}
-        self.bars_updated = False
+        self.metrics = SessionMetrics()
+        self.indicators = {}
         self.quotes_updated = False
         self.ticks_updated = False
         self._latest_bar = None
-        
-        # Reset NEW structure (Phase 1: Dual-write)
-        self.metrics = SessionMetrics()
-        self.indicators = {}
         # Note: bars and historical are typically cleared separately via clear_session_bars()
     
     def to_json(self, complete: bool = True) -> dict:
@@ -375,87 +307,52 @@ class SymbolSessionData:
                      If False, return delta (new data only, excludes historical).
         
         Returns:
-            Dictionary matching SYSTEM_JSON_EXAMPLE.json format for symbol data
-            
-        Delta Mode Strategy:
-            - Session metrics: Always included (small, frequently changing)
-            - Ticks/Quotes: Only new data since last export (index-based slice)
-            - Base/Derived bars: Only new bars since last export (index-based slice)
-            - Historical: EXCLUDED (never changes after load, can be massive)
-            
-        Performance:
-            - Complete: ~17K lines (includes historical)
-            - Delta: ~10-50 lines per export (only new session data)
-            - Memory: O(1) per symbol (just storing indices)
-            - Speed: O(n) where n = new data only (not total data)
+            Dictionary with structure:
+            {
+              "bars": {interval: {derived, base, quality, gaps, data}},
+              "quotes": {count, data},
+              "ticks": {count, data},
+              "metrics": {volume, high, low, last_update},
+              "indicators": {indicator_name: value},
+              "historical": {bars, indicators}
+            }
         """
         result = {
-            "session": {
-                "volume": self.session_volume,
-                "high": self.session_high,
-                "low": self.session_low,
-                "data": {}
+            "bars": {},
+            "quotes": {},
+            "ticks": {},
+            "metrics": {
+                "volume": self.metrics.volume,
+                "high": self.metrics.high,
+                "low": self.metrics.low,
+                "last_update": self.metrics.last_update.isoformat() if self.metrics.last_update else None
             },
-            "historical": {}  # Will be populated below
+            "indicators": self.indicators.copy(),
+            "historical": {}
         }
         
-        # Determine slice indices for delta mode
-        if complete:
-            # Full export: all data from beginning
-            ticks_start_idx = 0
-            quotes_start_idx = 0
-            bars_base_start_idx = 0
-        else:
-            # Delta export: only new data since last export
-            ticks_start_idx = self._last_export_indices["ticks"]
-            quotes_start_idx = self._last_export_indices["quotes"]
-            bars_base_start_idx = self._last_export_indices["bars_base"]
-        
-        # Ticks (count + data)
-        if self.ticks and len(self.ticks) > ticks_start_idx:
-            new_ticks = self.ticks[ticks_start_idx:]
-            if new_ticks:  # Only include if there's new data
-                latest_tick = new_ticks[-1]
-                result["session"]["data"]["ticks"] = {
-                    "count": len(new_ticks),
-                    "total_count": len(self.ticks),  # Total for reference
-                    "latest": {
-                        "timestamp": latest_tick.timestamp.isoformat(),
-                        "price": latest_tick.price,
-                        "size": latest_tick.size,
-                        "exchange": latest_tick.exchange
-                    }
-                }
-                # Update tracking index
-                self._last_export_indices["ticks"] = len(self.ticks)
-        
-        # Quotes (count + data)
-        if self.quotes and len(self.quotes) > quotes_start_idx:
-            new_quotes = self.quotes[quotes_start_idx:]
-            if new_quotes:  # Only include if there's new data
-                latest_quote = new_quotes[-1]
-                result["session"]["data"]["quotes"] = {
-                    "count": len(new_quotes),
-                    "total_count": len(self.quotes),  # Total for reference
-                    "latest": {
-                        "timestamp": latest_quote.timestamp.isoformat(),
-                        "bid": latest_quote.bid,
-                        "ask": latest_quote.ask,
-                        "bid_size": latest_quote.bid_size,
-                        "ask_size": latest_quote.ask_size
-                    }
-                }
-                # Update tracking index
-                self._last_export_indices["quotes"] = len(self.quotes)
-        
-        # Base bars (1m or 1s)
-        if len(self.bars_base) > bars_base_start_idx:
-            new_bars_base = list(self.bars_base)[bars_base_start_idx:]
-            if new_bars_base:  # Only include if there's new data
-                base_data = {
-                    "count": len(new_bars_base),
-                    "total_count": len(self.bars_base),  # Total for reference
-                    "generated": False,  # Base bars are streamed, not generated
+        # === BARS (Self-Describing Structure) ===
+        for interval, interval_data in self.bars.items():
+            if not interval_data.data:
+                continue
+            
+            # Determine start index for delta export
+            if complete:
+                start_idx = 0
+            else:
+                start_idx = self._last_export_indices.get("bars", {}).get(interval, 0)
+            
+            # Only export new bars
+            bars_list = list(interval_data.data)
+            if len(bars_list) > start_idx:
+                new_bars = bars_list[start_idx:]
+                
+                interval_export = {
+                    "derived": interval_data.derived,
+                    "base": interval_data.base,
+                    "quality": interval_data.quality,
+                    "count": len(new_bars),
+                    "total_count": len(bars_list),
                     "columns": ["timestamp", "open", "high", "low", "close", "volume"],
                     "data": [
                         [
@@ -466,159 +363,153 @@ class SymbolSessionData:
                             bar.close,
                             bar.volume
                         ]
-                        for bar in new_bars_base
+                        for bar in new_bars
                     ]
                 }
                 
-                # Add quality metric if available for this interval
-                if self.base_interval in self.bar_quality:
-                    base_data["quality"] = self.bar_quality[self.base_interval]
+                # Add gaps if present
+                if interval_data.gaps:
+                    interval_export["gaps"] = {
+                        "gap_count": len(interval_data.gaps),
+                        "missing_bars": sum(g.bar_count for g in interval_data.gaps if hasattr(g, 'bar_count')),
+                        "ranges": [
+                            {
+                                "start_time": g.start_time.time().isoformat() if hasattr(g, 'start_time') else None,
+                                "end_time": g.end_time.time().isoformat() if hasattr(g, 'end_time') else None,
+                                "bar_count": g.bar_count if hasattr(g, 'bar_count') else 0
+                            }
+                            for g in interval_data.gaps
+                        ]
+                    }
                 
-                result["session"]["data"][self.base_interval] = base_data
+                result["bars"][interval] = interval_export
                 
                 # Update tracking index
-                self._last_export_indices["bars_base"] = len(self.bars_base)
+                if not complete:
+                    if "bars" not in self._last_export_indices:
+                        self._last_export_indices["bars"] = {}
+                    self._last_export_indices["bars"][interval] = len(bars_list)
         
-        # Derived bars (5m, 15m, etc.)
-        for interval, bars in self.bars_derived.items():
-            if bars:
-                # Get last exported index for this interval
-                if complete:
-                    derived_start_idx = 0
-                else:
-                    derived_start_idx = self._last_export_indices["bars_derived"].get(interval, 0)
+        # === QUOTES ===
+        if self.quotes:
+            start_idx = 0 if complete else self._last_export_indices.get("quotes", 0)
+            if len(self.quotes) > start_idx:
+                new_quotes = self.quotes[start_idx:]
+                if new_quotes:
+                    latest_quote = new_quotes[-1]
+                    result["quotes"] = {
+                        "count": len(new_quotes),
+                        "total_count": len(self.quotes),
+                        "latest": {
+                            "timestamp": latest_quote.timestamp.isoformat(),
+                            "bid": latest_quote.bid,
+                            "ask": latest_quote.ask,
+                            "bid_size": latest_quote.bid_size,
+                            "ask_size": latest_quote.ask_size
+                        }
+                    }
+                    if not complete:
+                        self._last_export_indices["quotes"] = len(self.quotes)
+        
+        # === TICKS ===
+        if self.ticks:
+            start_idx = 0 if complete else self._last_export_indices.get("ticks", 0)
+            if len(self.ticks) > start_idx:
+                new_ticks = self.ticks[start_idx:]
+                if new_ticks:
+                    latest_tick = new_ticks[-1]
+                    result["ticks"] = {
+                        "count": len(new_ticks),
+                        "total_count": len(self.ticks),
+                        "latest": {
+                            "timestamp": latest_tick.timestamp.isoformat(),
+                            "price": latest_tick.price,
+                            "size": latest_tick.size,
+                            "exchange": latest_tick.exchange
+                        }
+                    }
+                    if not complete:
+                        self._last_export_indices["ticks"] = len(self.ticks)
+        
+        # === HISTORICAL (Only in complete mode) ===
+        if complete and self.historical.bars:
+            result["historical"]["loaded"] = True
+            result["historical"]["bars"] = {}
+            
+            # Export historical indicators
+            if self.historical.indicators:
+                result["historical"]["indicators"] = self.historical.indicators.copy()
+            
+            # Export historical bars per interval
+            for interval, hist_interval_data in self.historical.bars.items():
+                if not hist_interval_data.data_by_date:
+                    continue
                 
-                # Only export new bars
-                if len(bars) > derived_start_idx:
-                    new_bars_derived = bars[derived_start_idx:]
-                    if new_bars_derived:  # Only include if there's new data
-                        derived_data = {
-                            "count": len(new_bars_derived),
-                            "total_count": len(bars),  # Total for reference
-                            "generated": True,  # Derived bars are computed
-                            "columns": ["timestamp", "open", "high", "low", "close", "volume"],
-                            "data": [
-                                [
-                                    bar.timestamp.time().isoformat(),
-                                    bar.open,
-                                    bar.high,
-                                    bar.low,
-                                    bar.close,
-                                    bar.volume
-                                ]
-                                for bar in new_bars_derived
-                            ]
-                        }
-                        
-                        # Add quality metric if available for this interval
-                        if interval in self.bar_quality:
-                            derived_data["quality"] = self.bar_quality[interval]
-                        
-                        result["session"]["data"][interval] = derived_data
-                        
-                        # Update tracking index for this interval
-                        self._last_export_indices["bars_derived"][interval] = len(bars)
-        
-        # Historical bars - ONLY in complete mode (massive data, never changes)
-        if complete and self.historical_bars:
-            # Debug: Log what intervals we have
-            logger.debug(
-                f"[EXPORT] Historical bars intervals for {self.symbol}: "
-                f"{list(self.historical_bars.keys())}"
-            )
-            
-            result["historical"]["loaded"] = True
-            result["historical"]["data"] = {}
-            
-            # Add historical indicators nested under historical section
-            if self.historical_indicators:
-                for indicator_name, indicator_value in self.historical_indicators.items():
-                    result["historical"][indicator_name] = indicator_value
-            
-            for interval, dates_dict in self.historical_bars.items():
-                if dates_dict:
-                    all_bars = []
-                    dates_list = sorted(dates_dict.keys())
+                # Collect all bars across dates
+                dates_list = sorted(hist_interval_data.data_by_date.keys())
+                all_bars = []
+                for dt in dates_list:
+                    all_bars.extend(hist_interval_data.data_by_date[dt])
+                
+                if all_bars:
+                    is_daily = interval == "1d"
                     
-                    # Collect all bars across dates
-                    for dt in dates_list:
-                        all_bars.extend(dates_dict[dt])
-                    
-                    if all_bars:
-                        # Normalize interval key to string format
-                        if isinstance(interval, int):
-                            interval_key = f"{interval}m"
-                        elif isinstance(interval, str):
-                            # Already a string, use as-is (e.g., "1m", "5m", "1d")
-                            interval_key = interval
-                        else:
-                            interval_key = str(interval)
-                        
-                        # Determine column format based on interval
-                        is_daily = interval_key == "1d"
-                        
-                        # Calculate date range for THIS interval
-                        date_range = {
-                            "start_date": dates_list[0].isoformat(),
-                            "end_date": dates_list[-1].isoformat(),
-                            "days": len(dates_list)
-                        }
-                        
-                        historical_interval_data = {
-                            "count": len(all_bars),
-                            "date_range": date_range,
-                            "dates": [dt.isoformat() for dt in dates_list],
-                            "columns": ["date", "open", "high", "low", "close", "volume"] if is_daily 
-                                      else ["timestamp", "open", "high", "low", "close", "volume"],
-                            "data": [
-                                [
-                                    bar.timestamp.date().isoformat() if is_daily else bar.timestamp.isoformat(),
-                                    bar.open,
-                                    bar.high,
-                                    bar.low,
-                                    bar.close,
-                                    bar.volume
-                                ]
-                                for bar in all_bars
-                            ]
-                        }
-                        
-                        # Add quality for this interval if available
-                        if interval_key in self.bar_quality:
-                            historical_interval_data["quality"] = self.bar_quality[interval_key]
-                        
-                        result["historical"]["data"][interval_key] = historical_interval_data
-        elif not complete and self.historical_bars:
-            # Delta mode: Just indicate historical is loaded, include per-interval date ranges but not data
-            result["historical"]["loaded"] = True
-            result["historical"]["intervals"] = {}  # Per-interval date ranges
-            
-            # Include date range for each interval
-            for interval, dates_dict in self.historical_bars.items():
-                if dates_dict:
-                    dates_list = sorted(dates_dict.keys())
-                    
-                    # Normalize interval key
-                    if isinstance(interval, int):
-                        interval_key = f"{interval}m"
-                    elif isinstance(interval, str):
-                        interval_key = interval
-                    else:
-                        interval_key = str(interval)
-                    
-                    interval_info = {
+                    hist_export = {
+                        "count": len(all_bars),
+                        "quality": hist_interval_data.quality,
                         "date_range": {
                             "start_date": dates_list[0].isoformat(),
                             "end_date": dates_list[-1].isoformat(),
                             "days": len(dates_list)
-                        }
+                        },
+                        "dates": [dt.isoformat() for dt in dates_list],
+                        "columns": ["date", "open", "high", "low", "close", "volume"] if is_daily 
+                                  else ["timestamp", "open", "high", "low", "close", "volume"],
+                        "data": [
+                            [
+                                bar.timestamp.date().isoformat() if is_daily else bar.timestamp.isoformat(),
+                                bar.open,
+                                bar.high,
+                                bar.low,
+                                bar.close,
+                                bar.volume
+                            ]
+                            for bar in all_bars
+                        ]
                     }
                     
-                    # Add quality for this interval if available
-                    if interval_key in self.bar_quality:
-                        interval_info["quality"] = self.bar_quality[interval_key]
+                    # Add gaps if present
+                    if hist_interval_data.gaps:
+                        hist_export["gaps"] = {
+                            "gap_count": len(hist_interval_data.gaps),
+                            "missing_bars": sum(g.bar_count for g in hist_interval_data.gaps if hasattr(g, 'bar_count')),
+                            "ranges": [
+                                {
+                                    "start_time": g.start_time.time().isoformat() if hasattr(g, 'start_time') else None,
+                                    "end_time": g.end_time.time().isoformat() if hasattr(g, 'end_time') else None,
+                                    "bar_count": g.bar_count if hasattr(g, 'bar_count') else 0
+                                }
+                                for g in hist_interval_data.gaps
+                            ]
+                        }
                     
-                    result["historical"]["intervals"][interval_key] = interval_info
+                    result["historical"]["bars"][interval] = hist_export
+        elif not complete and self.historical.bars:
+            # Delta mode: Just indicate historical is loaded
+            result["historical"]["loaded"] = True
+            result["historical"]["intervals"] = {}
+            
+            for interval, hist_interval_data in self.historical.bars.items():
+                if hist_interval_data.data_by_date:
+                    dates_list = sorted(hist_interval_data.data_by_date.keys())
+                    result["historical"]["intervals"][interval] = {
+                        "date_range": {
+                            "start_date": dates_list[0].isoformat(),
+                            "end_date": dates_list[-1].isoformat(),
+                            "days": len(dates_list)
+                        },
+                        "quality": hist_interval_data.quality
+                    }
         
         return result
 
@@ -650,9 +541,6 @@ class SessionData:
         
         # Per-symbol data structures
         self._symbols: Dict[str, SymbolSessionData] = {}
-        
-        # Active symbols set (for quick lookup)
-        self._active_symbols: Set[str] = set()
         
         # Active streams tracking: {(symbol, stream_type): True}
         # stream_type: "bars", "ticks", "quotes"
@@ -771,12 +659,49 @@ class SessionData:
         with self._lock:
             if symbol not in self._symbols:
                 self._symbols[symbol] = SymbolSessionData(symbol=symbol)
-                self._active_symbols.add(symbol)
-                logger.info(f"✓ Registered symbol: {symbol} (total active: {len(self._active_symbols)})")
+                logger.info(f"✓ Registered symbol: {symbol} (total active: {len(self._symbols)})")
             else:
                 logger.debug(f"Symbol already registered: {symbol}")
             
             return self._symbols[symbol]
+    
+    def register_symbol_data(self, symbol_data: SymbolSessionData) -> None:
+        """Register a fully-populated SymbolSessionData object.
+        
+        Used by SessionCoordinator to register symbols with pre-configured bar structure.
+        The symbol_data should have bars dict populated with BarIntervalData objects.
+        
+        Args:
+            symbol_data: Fully configured SymbolSessionData with bar structure
+        """
+        symbol = symbol_data.symbol.upper()
+        with self._lock:
+            self._symbols[symbol] = symbol_data
+            bar_intervals = list(symbol_data.bars.keys())
+            logger.info(
+                f"✓ Registered symbol with structure: {symbol} "
+                f"(intervals: {bar_intervals}, total symbols: {len(self._symbols)})"
+            )
+    
+    def get_symbols_with_derived(self) -> Dict[str, List[str]]:
+        """Get map of symbols to their derived intervals.
+        
+        Returns:
+            Dict mapping symbol to list of derived interval names
+            
+        Example:
+            {"AAPL": ["5m", "15m"], "RIVN": ["5m"]}
+        """
+        result = {}
+        with self._lock:
+            for symbol, symbol_data in self._symbols.items():
+                derived = [
+                    interval for interval, data in symbol_data.bars.items()
+                    if data.derived
+                ]
+                if derived:
+                    result[symbol] = derived
+        return result
     
     def get_symbol_data(self, symbol: str, internal: bool = False) -> Optional[SymbolSessionData]:
         """Get data for a symbol.
@@ -855,7 +780,7 @@ class SessionData:
         symbol = symbol.upper()
         
         # Auto-register symbol if not already registered
-        if symbol not in self._active_symbols:
+        if symbol not in self._symbols:
             self.register_symbol(symbol)
         
         # Get current session date to determine where to store the bar
@@ -879,18 +804,18 @@ class SessionData:
                     f"SessionCoordinator should add current session bars directly. "
                     f"Bar: {symbol} {bar.timestamp}"
                 )
-                # Do NOT add to bars_base to prevent duplicates!
-                # symbol_data.bars_base.append(bar)  # REMOVED
-                # symbol_data.update_from_bar(bar)   # REMOVED
+                # Do NOT add to session bars to prevent duplicates!
+                # (V2 structure uses symbol_data.bars[interval].data)
+                # SessionCoordinator handles current session bar additions
             else:
-                # Historical bar - add to historical_bars storage
+                # Historical bar - add to historical.bars storage
                 # Store by interval (string) and date
                 interval_key = bar.interval
-                if interval_key not in symbol_data.historical_bars:
-                    symbol_data.historical_bars[interval_key] = {}
-                if bar_date not in symbol_data.historical_bars[interval_key]:
-                    symbol_data.historical_bars[interval_key][bar_date] = []
-                symbol_data.historical_bars[interval_key][bar_date].append(bar)
+                if interval_key not in symbol_data.historical.bars:
+                    symbol_data.historical.bars[interval_key] = HistoricalBarIntervalData()
+                if bar_date not in symbol_data.historical.bars[interval_key].data_by_date:
+                    symbol_data.historical.bars[interval_key].data_by_date[bar_date] = []
+                symbol_data.historical.bars[interval_key].data_by_date[bar_date].append(bar)
     
     def add_bars_batch(
         self, 
@@ -911,7 +836,7 @@ class SessionData:
         """
         symbol = symbol.upper()
         
-        if symbol not in self._active_symbols:
+        if symbol not in self._symbols:
             self.register_symbol(symbol)
         
         with self._lock:
@@ -919,20 +844,23 @@ class SessionData:
             
             if insert_mode == "historical":
                 # Force all bars to historical storage
-                if 1 not in symbol_data.historical_bars:
-                    symbol_data.historical_bars[1] = {}
+                if "1m" not in symbol_data.historical.bars:
+                    symbol_data.historical.bars["1m"] = HistoricalBarIntervalData()
                 for bar in bars:
                     bar_date = bar.timestamp.date()
-                    if bar_date not in symbol_data.historical_bars[1]:
-                        symbol_data.historical_bars[1][bar_date] = []
-                    symbol_data.historical_bars[1][bar_date].append(bar)
+                    if bar_date not in symbol_data.historical.bars["1m"].data_by_date:
+                        symbol_data.historical.bars["1m"].data_by_date[bar_date] = []
+                    symbol_data.historical.bars["1m"].data_by_date[bar_date].append(bar)
                 return
             
             if insert_mode == "stream":
                 # Fast path: assume bars are chronological, just append
-                symbol_data.bars_1m.extend(bars)
-                for bar in bars:
-                    symbol_data.update_from_bar(bar)
+                interval_data = symbol_data.bars.get("1m")
+                if interval_data:
+                    interval_data.data.extend(bars)
+                    for bar in bars:
+                        symbol_data.update_from_bar(bar)
+                    interval_data.updated = True
                 # Signal upkeep thread that new data arrived
                 self._data_arrival_event.set()
                 return
@@ -940,15 +868,18 @@ class SessionData:
             if insert_mode == "gap_fill":
                 # Sorted insertion to maintain chronological order
                 import bisect
-                bars_list = list(symbol_data.bars_1m)
-                for bar in bars:
-                    # Find insertion point to maintain sorted order
-                    idx = bisect.bisect_left([b.timestamp for b in bars_list], bar.timestamp)
-                    bars_list.insert(idx, bar)
-                    symbol_data.update_from_bar(bar)
-                # Replace deque with updated sorted list
-                from collections import deque
-                symbol_data.bars_1m = deque(bars_list)
+                interval_data = symbol_data.bars.get("1m")
+                if interval_data:
+                    bars_list = list(interval_data.data)
+                    for bar in bars:
+                        # Find insertion point to maintain sorted order
+                        idx = bisect.bisect_left([b.timestamp for b in bars_list], bar.timestamp)
+                        bars_list.insert(idx, bar)
+                        symbol_data.update_from_bar(bar)
+                    # Replace deque with updated sorted list
+                    from collections import deque
+                    interval_data.data = deque(bars_list)
+                    interval_data.updated = True
                 # Signal upkeep thread that new data arrived
                 self._data_arrival_event.set()
                 return
@@ -970,24 +901,27 @@ class SessionData:
             # Add current session bars with sorted insertion
             if current_session_bars:
                 import bisect
-                bars_list = list(symbol_data.bars_1m)
-                for bar in current_session_bars:
-                    idx = bisect.bisect_left([b.timestamp for b in bars_list], bar.timestamp)
-                    bars_list.insert(idx, bar)
-                    symbol_data.update_from_bar(bar)
-                from collections import deque
-                symbol_data.bars_1m = deque(bars_list)
+                interval_data = symbol_data.bars.get("1m")
+                if interval_data:
+                    bars_list = list(interval_data.data)
+                    for bar in current_session_bars:
+                        idx = bisect.bisect_left([b.timestamp for b in bars_list], bar.timestamp)
+                        bars_list.insert(idx, bar)
+                        symbol_data.update_from_bar(bar)
+                    from collections import deque
+                    interval_data.data = deque(bars_list)
+                    interval_data.updated = True
                 # Signal upkeep thread that new data arrived
                 self._data_arrival_event.set()
             
             # Add historical bars
             if historical_bars_by_date:
-                if 1 not in symbol_data.historical_bars:
-                    symbol_data.historical_bars[1] = {}
+                if "1m" not in symbol_data.historical.bars:
+                    symbol_data.historical.bars["1m"] = HistoricalBarIntervalData()
                 for bar_date, date_bars in historical_bars_by_date.items():
-                    if bar_date not in symbol_data.historical_bars[1]:
-                        symbol_data.historical_bars[1][bar_date] = []
-                    symbol_data.historical_bars[1][bar_date].extend(date_bars)
+                    if bar_date not in symbol_data.historical.bars["1m"].data_by_date:
+                        symbol_data.historical.bars["1m"].data_by_date[bar_date] = []
+                    symbol_data.historical.bars["1m"].data_by_date[bar_date].extend(date_bars)
     
     # ==================== FAST ACCESS METHODS ====================
     # These methods are optimized for AnalysisEngine and other high-frequency readers
@@ -1171,11 +1105,19 @@ class SessionData:
             if symbol_data is None:
                 return deque() if interval == 1 else []
             
-            # Return direct reference (zero-copy)
-            if interval == 1:
-                return symbol_data.bars_1m
+            # Normalize interval to string format
+            if isinstance(interval, int):
+                interval_key = f"{interval}m"
             else:
-                return symbol_data.bars_derived.get(interval, [])
+                interval_key = str(interval)
+            
+            # Get bar data from new structure (zero-copy)
+            interval_data = symbol_data.bars.get(interval_key)
+            if interval_data:
+                return interval_data.data  # Direct reference to deque or list
+            else:
+                # Return empty container of appropriate type
+                return deque() if interval == 1 else []
     
     def get_bars(
         self,
@@ -1218,11 +1160,18 @@ class SessionData:
             if symbol_data is None:
                 return []
             
-            # Get bars based on interval
-            if interval == 1:
-                bars = list(symbol_data.bars_1m)
+            # Normalize interval to string format
+            if isinstance(interval, int):
+                interval_key = f"{interval}m"
             else:
-                bars = symbol_data.bars_derived.get(interval, []).copy()
+                interval_key = str(interval)
+            
+            # Get bars from new structure (creates copy)
+            interval_data = symbol_data.bars.get(interval_key)
+            if interval_data:
+                bars = list(interval_data.data)  # Create copy
+            else:
+                return []
             
             # Apply time filters if specified
             if start is not None or end is not None:
@@ -1258,14 +1207,21 @@ class SessionData:
             if symbol_data is None:
                 return {}
             
+            # Get bar count from base interval
+            base_interval_data = symbol_data.bars.get(symbol_data.base_interval)
+            bar_count = len(base_interval_data.data) if base_interval_data else 0
+            
+            # Get quality from base interval
+            quality = base_interval_data.quality if base_interval_data else 0.0
+            
             return {
                 "symbol": symbol,
-                "session_volume": symbol_data.session_volume,
-                "session_high": symbol_data.session_high,
-                "session_low": symbol_data.session_low,
-                "last_update": symbol_data.last_update,
-                "bar_quality": symbol_data.bar_quality,
-                "bar_count": len(symbol_data.bars_1m),
+                "session_volume": symbol_data.metrics.volume,
+                "session_high": symbol_data.metrics.high,
+                "session_low": symbol_data.metrics.low,
+                "last_update": symbol_data.metrics.last_update,
+                "bar_quality": quality,
+                "bar_count": bar_count,
             }
     
     # ==================== HISTORICAL BARS METHODS (Phase 3) ====================
@@ -1310,7 +1266,7 @@ class SessionData:
         
         symbol = symbol.upper()
         
-        if symbol not in self._active_symbols:
+        if symbol not in self._symbols:
             self.register_symbol(symbol)
         
         current_session_date = self.get_current_session_date()
@@ -1348,11 +1304,12 @@ class SessionData:
                         bar_date = bar.timestamp.date()
                         bars_by_date[bar_date].append(bar)
                     
-                    # Store in historical_bars
-                    if interval not in symbol_data.historical_bars:
-                        symbol_data.historical_bars[interval] = {}
+                    # Store in historical.bars
+                    interval_key = f"{interval}m" if isinstance(interval, int) else interval
+                    if interval_key not in symbol_data.historical.bars:
+                        symbol_data.historical.bars[interval_key] = HistoricalBarIntervalData()
                     
-                    symbol_data.historical_bars[interval].update(dict(bars_by_date))
+                    symbol_data.historical.bars[interval_key].data_by_date.update(dict(bars_by_date))
                     total_loaded += len(bars_db)
                     
                     # Format interval for display
@@ -1450,14 +1407,18 @@ class SessionData:
             if symbol_data is None:
                 return {}
             
-            historical = symbol_data.historical_bars.get(interval, {})
+            interval_key = f"{interval}m" if isinstance(interval, int) else interval
+            historical_data = symbol_data.historical.bars.get(interval_key)
+            
+            if not historical_data or not historical_data.data_by_date:
+                return {}
             
             if days_back <= 0:
-                return dict(historical)
+                return dict(historical_data.data_by_date)
             
             # Get last N days
-            dates = sorted(historical.keys(), reverse=True)[:days_back]
-            return {d: historical[d] for d in dates}
+            dates = sorted(historical_data.data_by_date.keys(), reverse=True)[:days_back]
+            return {d: historical_data.data_by_date[d] for d in dates}
     
     def get_all_bars_including_historical(
         self,
@@ -1491,16 +1452,17 @@ class SessionData:
             all_bars = []
             
             # Add historical bars (sorted by date)
-            historical = symbol_data.historical_bars.get(interval, {})
-            for bar_date in sorted(historical.keys()):
-                all_bars.extend(historical[bar_date])
+            interval_key = f"{interval}m" if isinstance(interval, int) else interval
+            historical_data = symbol_data.historical.bars.get(interval_key)
+            if historical_data and historical_data.data_by_date:
+                for bar_date in sorted(historical_data.data_by_date.keys()):
+                    all_bars.extend(historical_data.data_by_date[bar_date])
             
-            # Add current session bars
-            if interval == 1:
-                all_bars.extend(list(symbol_data.bars_1m))
-            else:
-                derived = symbol_data.bars_derived.get(interval, [])
-                all_bars.extend(derived)
+            # Add current session bars from new structure
+            interval_key = f"{interval}m" if isinstance(interval, int) else str(interval)
+            interval_data = symbol_data.bars.get(interval_key)
+            if interval_data:
+                all_bars.extend(list(interval_data.data))
             
             return all_bars
     
@@ -1530,35 +1492,33 @@ class SessionData:
             
             # For each symbol, move current session to historical
             for symbol_data in self._symbols.values():
-                # Move current 1m bars to historical
-                if len(symbol_data.bars_1m) > 0:
-                    historical_bars = list(symbol_data.bars_1m)
-                    if 1 not in symbol_data.historical_bars:
-                        symbol_data.historical_bars[1] = {}
-                    symbol_data.historical_bars[1][old_date] = historical_bars
-                
-                # Move derived bars to historical
-                for interval, bars in symbol_data.bars_derived.items():
-                    if len(bars) > 0:
-                        if interval not in symbol_data.historical_bars:
-                            symbol_data.historical_bars[interval] = {}
-                        symbol_data.historical_bars[interval][old_date] = bars.copy()
+                # Move all bars (base and derived) to historical
+                for interval_key, interval_data in symbol_data.bars.items():
+                    if len(interval_data.data) > 0:
+                        # Store with same interval key format
+                        if interval_key not in symbol_data.historical.bars:
+                            symbol_data.historical.bars[interval_key] = HistoricalBarIntervalData()
+                        
+                        symbol_data.historical.bars[interval_key].data_by_date[old_date] = list(interval_data.data)
                 
                 # Remove oldest day if exceeding trailing days
                 max_days = self.historical_bars_trailing_days
                 if max_days > 0:
-                    for interval in list(symbol_data.historical_bars.keys()):
-                        dates = sorted(symbol_data.historical_bars[interval].keys())
+                    for interval_key in list(symbol_data.historical.bars.keys()):
+                        interval_data = symbol_data.historical.bars[interval_key]
+                        dates = sorted(interval_data.data_by_date.keys())
                         while len(dates) > max_days:
                             oldest = dates.pop(0)
-                            del symbol_data.historical_bars[interval][oldest]
+                            del interval_data.data_by_date[oldest]
                             logger.debug(
-                                f"Removed oldest historical day: {oldest} for interval {interval}m"
+                                f"Removed oldest historical day: {oldest} for interval {interval_key}"
                             )
                 
-                # Clear current session data
-                symbol_data.bars_1m.clear()
-                symbol_data.bars_derived.clear()
+                # Clear current session data from new structure
+                for interval_data in symbol_data.bars.values():
+                    interval_data.data.clear()
+                    interval_data.updated = False
+                
                 symbol_data.quotes.clear()
                 symbol_data.ticks.clear()
                 symbol_data.reset_session_metrics()
@@ -1580,10 +1540,13 @@ class SessionData:
         a new session after TimeManager has been updated.
         """
         with self._lock:
-            # Reset all symbol data
+            # Reset all symbol data using new structure
             for symbol_data in self._symbols.values():
-                symbol_data.bars_1m.clear()
-                symbol_data.bars_derived.clear()
+                # Clear all bar intervals
+                for interval_data in symbol_data.bars.values():
+                    interval_data.data.clear()
+                    interval_data.updated = False
+                
                 symbol_data.quotes.clear()
                 symbol_data.ticks.clear()
                 symbol_data.reset_session_metrics()
@@ -1610,10 +1573,9 @@ class SessionData:
         Note: Current date comes from TimeManager, not stored here.
         """
         with self._lock:
-            num_symbols = len(self._active_symbols)
+            num_symbols = len(self._symbols)
             num_streams = len(self._active_streams)
             self._symbols.clear()
-            self._active_symbols.clear()
             self._active_streams.clear()  # Clear active streams tracking
             logger.warning(f"⚠ Session data cleared! Removed {num_symbols} symbols, {num_streams} active streams")
             import traceback
@@ -1643,9 +1605,6 @@ class SessionData:
             # Remove SymbolSessionData
             del self._symbols[symbol]
             
-            # Remove from active symbols
-            self._active_symbols.discard(symbol)
-            
             # Remove from active streams
             streams_to_remove = [
                 key for key in self._active_streams.keys() 
@@ -1665,13 +1624,14 @@ class SessionData:
         """Get set of active symbols (thread-safe read).
         
         Returns:
-            Set of active symbols (empty set if session deactivated)
+            Set of active symbol names
         """
-        # Block access during catchup (Phase 2: Dynamic symbol management)
+        # Block access when session inactive (catchup mode)
         if not self._check_session_active():
             return set()
         
-        symbols = self._active_symbols.copy()
+        with self._lock:
+            symbols = set(self._symbols.keys())
         logger.debug(f"get_active_symbols() returning {len(symbols)} symbols: {symbols}")
         return symbols
     
@@ -1692,17 +1652,38 @@ class SessionData:
         """Clear all historical bars for all symbols."""
         with self._lock:
             for symbol_data in self._symbols.values():
-                symbol_data.historical_bars.clear()
+                symbol_data.historical.bars.clear()
             logger.debug("Cleared all historical bars")
+    
+    def clear_symbol_historical(self, symbol: str) -> None:
+        """Clear historical bars for a specific symbol.
+        
+        Args:
+            symbol: Symbol to clear historical data for
+        """
+        with self._lock:
+            symbol_data = self._symbols.get(symbol)
+            if symbol_data:
+                symbol_data.historical.bars.clear()
+                symbol_data.historical.indicators.clear()
+                logger.debug(f"Cleared historical data for {symbol}")
+            else:
+                logger.warning(f"Cannot clear historical for {symbol} - symbol not found")
     
     def clear_session_bars(self) -> None:
         """Clear current session bars (not historical)."""
         with self._lock:
             symbols_cleared = []
             for symbol, symbol_data in self._symbols.items():
-                bars_before = len(symbol_data.bars_base)
-                symbol_data.bars_base.clear()
-                symbol_data.bars_derived.clear()
+                # Get count from base interval before clearing
+                base_interval_data = symbol_data.bars.get(symbol_data.base_interval)
+                bars_before = len(base_interval_data.data) if base_interval_data else 0
+                
+                # Clear all bar intervals
+                for interval_data in symbol_data.bars.values():
+                    interval_data.data.clear()
+                    interval_data.updated = False
+                
                 symbol_data._latest_bar = None
                 symbols_cleared.append(f"{symbol}({bars_before}→0)")
             logger.info(f"Cleared current session bars for {len(self._symbols)} symbols: {', '.join(symbols_cleared)}")
@@ -1725,25 +1706,22 @@ class SessionData:
             # Store in historical bars by date
             bar_date = bar.timestamp.date()
             
-            # Normalize interval to integer if it's a string like "1m"
-            if isinstance(interval, str) and interval.endswith('m'):
-                try:
-                    interval_int = int(interval[:-1])
-                except ValueError:
-                    interval_int = interval
+            # Normalize interval to string key format (e.g., "1m", "5m", "1d")
+            if isinstance(interval, int):
+                interval_key = f"{interval}m"
             else:
-                interval_int = interval
+                interval_key = interval
             
-            if interval_int not in symbol_data.historical_bars:
-                symbol_data.historical_bars[interval_int] = {}
+            if interval_key not in symbol_data.historical.bars:
+                symbol_data.historical.bars[interval_key] = HistoricalBarIntervalData()
             
-            if bar_date not in symbol_data.historical_bars[interval_int]:
-                symbol_data.historical_bars[interval_int][bar_date] = []
+            if bar_date not in symbol_data.historical.bars[interval_key].data_by_date:
+                symbol_data.historical.bars[interval_key].data_by_date[bar_date] = []
             
-            symbol_data.historical_bars[interval_int][bar_date].append(bar)
+            symbol_data.historical.bars[interval_key].data_by_date[bar_date].append(bar)
             
             # Debug logging for 1d bars
-            if interval == "1d" or interval_int == "1d":
+            if interval == "1d" or interval_key == "1d":
                 logger.info(
                     f"[HISTORICAL_LOAD] Appended 1d bar for {symbol} on {bar_date}: "
                     f"close=${bar.close}, volume={bar.volume}"
@@ -1770,8 +1748,13 @@ class SessionData:
             if symbol_data is None:
                 symbol_data = self.register_symbol(symbol)
             
-            symbol_data.bar_quality[interval_key] = quality
-            logger.debug(f"Set quality for {symbol} {interval_key}: {quality:.1f}%")
+            # Update quality in bar structure
+            interval_data = symbol_data.bars.get(interval_key)
+            if interval_data:
+                interval_data.quality = quality
+                logger.debug(f"Set quality for {symbol} {interval_key}: {quality:.1f}%")
+            else:
+                logger.warning(f"No interval data for {symbol} {interval_key}, cannot set quality")
     
     def get_quality_metric(self, symbol: str, interval: str) -> Optional[float]:
         """Get quality score for a symbol/interval.
@@ -1795,7 +1778,66 @@ class SessionData:
             symbol_data = self._symbols.get(symbol)
             if symbol_data is None:
                 return None
-            return symbol_data.bar_quality.get(interval_key)
+            
+            # Get quality from bar structure
+            interval_data = symbol_data.bars.get(interval_key)
+            return interval_data.quality if interval_data else None
+    
+    def set_gaps(self, symbol: str, interval: str, gaps: List) -> None:
+        """Set gaps for a symbol/interval.
+        
+        Args:
+            symbol: Stock symbol
+            interval: Bar interval (e.g., "1m", "5m", "1d")
+            gaps: List of GapInfo objects
+        """
+        symbol = symbol.upper()
+        
+        # Normalize interval to string format
+        if isinstance(interval, int):
+            interval_key = f"{interval}m"
+        else:
+            interval_key = str(interval)
+        
+        with self._lock:
+            symbol_data = self._symbols.get(symbol)
+            if symbol_data is None:
+                symbol_data = self.register_symbol(symbol)
+            
+            # Update gaps in bar structure
+            interval_data = symbol_data.bars.get(interval_key)
+            if interval_data:
+                interval_data.gaps = gaps
+                logger.debug(f"Set {len(gaps)} gaps for {symbol} {interval_key}")
+            else:
+                logger.warning(f"No interval data for {symbol} {interval_key}, cannot set gaps")
+    
+    def get_gaps(self, symbol: str, interval: str) -> List:
+        """Get gaps for a symbol/interval.
+        
+        Args:
+            symbol: Stock symbol
+            interval: Bar interval (e.g., "1m", "5m", "1d")
+            
+        Returns:
+            List of GapInfo objects or empty list if not set
+        """
+        symbol = symbol.upper()
+        
+        # Normalize interval to string format
+        if isinstance(interval, int):
+            interval_key = f"{interval}m"
+        else:
+            interval_key = str(interval)
+        
+        with self._lock:
+            symbol_data = self._symbols.get(symbol)
+            if symbol_data is None:
+                return []
+            
+            # Get gaps from bar structure
+            interval_data = symbol_data.bars.get(interval_key)
+            return interval_data.gaps if interval_data else []
     
     def set_historical_indicator(self, symbol: str, name: str, value: any) -> None:
         """Store a historical indicator value for a symbol.
@@ -1810,7 +1852,7 @@ class SessionData:
             symbol_data = self.get_symbol_data(symbol)
             if symbol_data is None:
                 symbol_data = self.register_symbol(symbol)
-            symbol_data.historical_indicators[name] = value
+            symbol_data.historical.indicators[name] = value
             logger.debug(f"Set historical indicator for {symbol}: {name} = {value}")
     
     def get_historical_indicator(self, symbol: str, name: str) -> Optional[any]:
@@ -1840,7 +1882,7 @@ class SessionData:
             symbol_data = self.get_symbol_data(symbol)
             if symbol_data is None:
                 return None
-            return symbol_data.historical_indicators.get(name)
+            return symbol_data.historical.indicators.get(name)
     
     def get_all_historical_indicators(self, symbol: str) -> Dict[str, any]:
         """Get all historical indicators for a symbol.
@@ -1860,7 +1902,7 @@ class SessionData:
             symbol_data = self.get_symbol_data(symbol)
             if symbol_data is None:
                 return {}
-            return symbol_data.historical_indicators.copy()
+            return symbol_data.historical.indicators.copy()
     
     def get_latest_quote(self, symbol: str) -> Optional['Quote']:
         """Get latest quote for symbol (backtest mode).
@@ -1889,9 +1931,10 @@ class SessionData:
             if not symbol_data:
                 return None
             
-            # Try base bars first (1s or 1m depending on base_interval)
-            if symbol_data.bars_base and len(symbol_data.bars_base) > 0:
-                latest_bar = symbol_data.bars_base[-1]
+            # Try base interval first
+            base_interval_data = symbol_data.bars.get(symbol_data.base_interval)
+            if base_interval_data and len(base_interval_data.data) > 0:
+                latest_bar = base_interval_data.data[-1]
                 return Quote(
                     symbol=symbol,
                     timestamp=latest_bar.timestamp,
@@ -1902,22 +1945,25 @@ class SessionData:
                     source="bar"
                 )
             
-            # Try derived 1m bars (if base is 1s but have generated 1m)
-            if "1m" in symbol_data.bars_derived and symbol_data.bars_derived["1m"]:
-                latest_bar = symbol_data.bars_derived["1m"][-1]
-                return Quote(
-                    symbol=symbol,
-                    timestamp=latest_bar.timestamp,
-                    bid=latest_bar.close,
-                    ask=latest_bar.close,
-                    bid_size=0,
-                    ask_size=0,
-                    source="bar"
-                )
+            # Try 1m bars (if different from base)
+            if symbol_data.base_interval != "1m":
+                interval_1m = symbol_data.bars.get("1m")
+                if interval_1m and len(interval_1m.data) > 0:
+                    latest_bar = interval_1m.data[-1]
+                    return Quote(
+                        symbol=symbol,
+                        timestamp=latest_bar.timestamp,
+                        bid=latest_bar.close,
+                        ask=latest_bar.close,
+                        bid_size=0,
+                        ask_size=0,
+                        source="bar"
+                    )
             
-            # Try derived 1d bars
-            if "1d" in symbol_data.bars_derived and symbol_data.bars_derived["1d"]:
-                latest_bar = symbol_data.bars_derived["1d"][-1]
+            # Try 1d bars
+            interval_1d = symbol_data.bars.get("1d")
+            if interval_1d and len(interval_1d.data) > 0:
+                latest_bar = interval_1d.data[-1]
                 return Quote(
                     symbol=symbol,
                     timestamp=latest_bar.timestamp,
@@ -1976,7 +2022,7 @@ class SessionData:
         
         result = {
             "_session_active": self._session_active,
-            "_active_symbols": sorted(list(self._active_symbols)),
+            "_active_symbols": sorted(list(self._symbols.keys())),
             "symbols": {}
         }
         

@@ -96,6 +96,9 @@ class SystemManager:
         # All timestamps returned by managers are in this timezone
         self.timezone: Optional[str] = None  # Derived from exchange+asset
         
+        # Initialize timezone based on default exchange/asset
+        self._update_timezone()
+        
         logger.info("SystemManager initialized")
     
     # =========================================================================
@@ -556,6 +559,13 @@ class SystemManager:
         logger.debug("Creating analysis queue...")
         analysis_queue = queue.Queue()
         
+        # 2.5. Create analysis subscription (analysis → processor, for data-driven sync)
+        logger.debug("Creating analysis subscription...")
+        analysis_subscription = StreamSubscription(
+            mode=subscription_mode,
+            stream_id="analysis_engine->data_processor"
+        )
+        
         # 3. Wire coordinator → processor
         self._coordinator.set_data_processor(
             self._data_processor,
@@ -565,9 +575,16 @@ class SystemManager:
         # 4. Wire coordinator → quality manager
         self._coordinator.set_quality_manager(self._quality_manager)
         
-        # 5. Wire processor → analysis
+        # 4.5. Wire indicator_manager to data_processor (Phase 6b)
+        if hasattr(self._coordinator, 'indicator_manager'):
+            self._data_processor.indicator_manager = self._coordinator.indicator_manager
+            logger.debug("Wired indicator_manager to data_processor")
+        
+        # 5. Wire processor → analysis (queue and subscription)
         self._data_processor.set_analysis_engine_queue(analysis_queue)
+        self._data_processor.set_analysis_subscription(analysis_subscription)
         self._analysis_engine.set_notification_queue(analysis_queue)
+        self._analysis_engine.set_processor_subscription(analysis_subscription)
         
         logger.success("Thread pool wired")
     
@@ -680,17 +697,102 @@ class SystemManager:
         
         return True
     
+    def pause(self) -> bool:
+        """
+        Pause the backtest.
+        
+        Only applies to backtest mode - ignored in live mode.
+        
+        In backtest mode, pauses:
+        - Time advancement (data-driven and clock-driven)
+        - Bar processing
+        - All downstream processing (processor, analysis)
+        
+        System state changes to PAUSED.
+        Threads remain alive but idle (blocked on pause event).
+        
+        Returns:
+            True if paused successfully, False if not applicable
+        
+        Raises:
+            RuntimeError: If system not running
+        """
+        if self._state != SystemState.RUNNING:
+            raise RuntimeError(f"Cannot pause - system is {self._state.value}")
+        
+        if self._mode != OperationMode.BACKTEST:
+            logger.warning("[PAUSE] Ignored - only applies to backtest mode")
+            return False
+        
+        logger.info("=" * 70)
+        logger.info("PAUSING BACKTEST")
+        logger.info("=" * 70)
+        
+        # Pause coordinator streaming
+        if self._coordinator is not None:
+            self._coordinator.pause_backtest()
+        
+        # Update state
+        self._state = SystemState.PAUSED
+        
+        logger.success("BACKTEST PAUSED")
+        logger.info("=" * 70)
+        
+        return True
+    
+    def resume(self) -> bool:
+        """
+        Resume the backtest.
+        
+        Only applies to backtest mode - ignored in live mode.
+        Resumes time advancement and processing.
+        
+        System state changes back to RUNNING.
+        
+        Returns:
+            True if resumed successfully, False if not applicable
+        
+        Raises:
+            RuntimeError: If system not paused
+        """
+        if self._state != SystemState.PAUSED:
+            raise RuntimeError(f"Cannot resume - system is {self._state.value}")
+        
+        if self._mode != OperationMode.BACKTEST:
+            logger.warning("[RESUME] Ignored - only applies to backtest mode")
+            return False
+        
+        logger.info("=" * 70)
+        logger.info("RESUMING BACKTEST")
+        logger.info("=" * 70)
+        
+        # Resume coordinator streaming
+        if self._coordinator is not None:
+            self._coordinator.resume_backtest()
+        
+        # Update state
+        self._state = SystemState.RUNNING
+        
+        logger.success("BACKTEST RESUMED")
+        logger.info("=" * 70)
+        
+        return True
+    
     # =========================================================================
     # State Queries
     # =========================================================================
     
     def is_running(self) -> bool:
-        """Check if system is running."""
+        """Check if system is running (not stopped, not paused)."""
         return self._state == SystemState.RUNNING
     
     def is_stopped(self) -> bool:
         """Check if system is stopped."""
         return self._state == SystemState.STOPPED
+    
+    def is_paused(self) -> bool:
+        """Check if system is paused."""
+        return self._state == SystemState.PAUSED
     
     def get_state(self) -> SystemState:
         """Get current system state."""

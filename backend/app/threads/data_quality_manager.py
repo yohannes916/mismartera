@@ -333,15 +333,15 @@ class DataQualityManager(threading.Thread):
             return
         
         # Get current session bars based on interval
-        # bars_base contains the base interval (1s, 1m, or 1d)
-        # bars_derived contains all other intervals
+        # V2 structure: symbol_data.bars[interval] contains BarIntervalData
+        # with derived flag, base source, and data for each interval
         
-        if interval == symbol_data.base_interval:
-            # This is the base interval - use bars_base
-            bars = list(symbol_data.bars_base)
+        # Get bars using new V2 structure
+        interval_data = symbol_data.bars.get(interval)
+        if interval_data:
+            bars = list(interval_data.data)
         else:
-            # This is a derived interval - check bars_derived
-            bars = symbol_data.bars_derived.get(interval, [])
+            bars = []
         
         actual_bars = len(bars)
         
@@ -364,7 +364,7 @@ class DataQualityManager(threading.Thread):
         # Update quality in SessionData
         self.session_data.set_quality(symbol, interval, quality)
         
-        # Detect gaps for logging (using proper interval parsing)
+        # Detect and store gaps (using proper interval parsing)
         with SessionLocal() as db_session:
             trading_session = self._time_manager.get_trading_session(db_session, current_date)
             interval_minutes = parse_interval_to_minutes(interval, trading_session)
@@ -406,6 +406,9 @@ class DataQualityManager(threading.Thread):
             expected_bars = int(elapsed_minutes / interval_minutes) if interval_minutes else 0
         else:
             expected_bars = 0
+        
+        # Store gaps in SessionData
+        self.session_data.set_gaps(symbol, interval, gaps)
         
         logger.info(
             f"{symbol} {interval} quality: {quality:.1f}% | "
@@ -663,29 +666,23 @@ class DataQualityManager(threading.Thread):
         if not symbol_data:
             return
         
-        # Propagate to all derived intervals in bars_derived dictionary
-        if hasattr(symbol_data, 'bars_derived') and symbol_data.bars_derived:
-            for derived_key, derived_bars in symbol_data.bars_derived.items():
-                # derived_key can be int (5) or string ("5m")
-                if isinstance(derived_key, int):
-                    derived_interval = f"{derived_key}m"
-                else:
-                    derived_interval = derived_key
-                
-                # Skip if no bars or if it's the same as base
-                if not derived_bars or derived_interval == interval:
+        # Propagate to all derived intervals in V2 bars structure
+        if symbol_data.bars:
+            for interval_key, interval_data in symbol_data.bars.items():
+                # Skip if it's not derived or if it's the same as base or has no data
+                if not interval_data.derived or interval_key == interval or not interval_data.data:
                     continue
                 
                 # Copy base quality to derived interval
                 self.session_data.set_quality(
                     symbol,
-                    derived_interval,
+                    interval_key,
                     base_quality
                 )
                 
                 logger.debug(
                     f"Propagated quality {base_quality:.1f}% from {symbol} {interval} "
-                    f"to {derived_interval}"
+                    f"to {interval_key}"
                 )
     
     # =========================================================================

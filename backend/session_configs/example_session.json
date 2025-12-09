@@ -1,5 +1,5 @@
 {
-  "session_name": "Example Trading Session",
+  "session_name": "Example Trading Session - All Indicator Types",
   "exchange_group": "US_EQUITY",
   "asset_class": "EQUITY",
   "mode": "backtest",
@@ -9,8 +9,8 @@
     "speed_multiplier": 60.0
   },
   "session_data_config": {
-    "symbols": ["RIVN"],
-    "streams": ["1m", "5m", "10m", "quotes"],
+    "symbols": ["RIVN", "AAPL"],
+    "streams": ["1m", "5m", "15m", "quotes"],
     "streaming": {
       "catchup_threshold_seconds": 60,
       "catchup_check_interval": 10
@@ -19,29 +19,227 @@
       "enable_quality": true,
       "data": [
         {
-          "trailing_days": 3,
+          "trailing_days": 5,
           "intervals": ["1m"],
           "apply_to": "all"
         },
         {
-          "trailing_days": 2,
+          "trailing_days": 20,
           "intervals": ["1d"],
           "apply_to": "all"
         }
-      ],
-      "indicators": {
-        "avg_volume": {
-          "type": "trailing_average",
-          "period": "2d",
-          "granularity": "daily",
-          "field": "volume"
-        }
-      }
+      ]
     },
     "gap_filler": {
       "enable_session_quality": true,
       "max_retries": 5,
       "retry_interval_seconds": 60
+    },
+    "indicators": {
+      "session": [
+        {
+          "name": "sma",
+          "period": 20,
+          "interval": "5m",
+          "type": "trend",
+          "params": {}
+        },
+        {
+          "name": "ema",
+          "period": 9,
+          "interval": "5m",
+          "type": "trend",
+          "params": {}
+        },
+        {
+          "name": "vwap",
+          "period": 0,
+          "interval": "1m",
+          "type": "trend",
+          "params": {}
+        },
+        {
+          "name": "hma",
+          "period": 10,
+          "interval": "15m",
+          "type": "trend",
+          "params": {}
+        },
+        {
+          "name": "rsi",
+          "period": 14,
+          "interval": "5m",
+          "type": "momentum",
+          "params": {}
+        },
+        {
+          "name": "macd",
+          "period": 0,
+          "interval": "5m",
+          "type": "momentum",
+          "params": {
+            "fast": 12,
+            "slow": 26,
+            "signal": 9
+          }
+        },
+        {
+          "name": "stochastic",
+          "period": 14,
+          "interval": "15m",
+          "type": "momentum",
+          "params": {
+            "k_period": 3,
+            "d_period": 3
+          }
+        },
+        {
+          "name": "cci",
+          "period": 20,
+          "interval": "5m",
+          "type": "momentum",
+          "params": {}
+        },
+        {
+          "name": "williams_r",
+          "period": 14,
+          "interval": "15m",
+          "type": "momentum",
+          "params": {}
+        },
+        {
+          "name": "atr",
+          "period": 14,
+          "interval": "5m",
+          "type": "volatility",
+          "params": {}
+        },
+        {
+          "name": "bbands",
+          "period": 20,
+          "interval": "5m",
+          "type": "volatility",
+          "params": {
+            "num_std": 2.0
+          }
+        },
+        {
+          "name": "keltner",
+          "period": 20,
+          "interval": "15m",
+          "type": "volatility",
+          "params": {
+            "atr_multiplier": 2.0
+          }
+        },
+        {
+          "name": "donchian",
+          "period": 20,
+          "interval": "15m",
+          "type": "volatility",
+          "params": {}
+        },
+        {
+          "name": "obv",
+          "period": 0,
+          "interval": "5m",
+          "type": "volume",
+          "params": {}
+        },
+        {
+          "name": "volume_sma",
+          "period": 20,
+          "interval": "5m",
+          "type": "volume",
+          "params": {}
+        },
+        {
+          "name": "volume_ratio",
+          "period": 0,
+          "interval": "1m",
+          "type": "volume",
+          "params": {}
+        },
+        {
+          "name": "high_low",
+          "period": 20,
+          "interval": "1d",
+          "type": "support_resistance",
+          "params": {}
+        },
+        {
+          "name": "swing_high",
+          "period": 5,
+          "interval": "15m",
+          "type": "support_resistance",
+          "params": {}
+        },
+        {
+          "name": "swing_low",
+          "period": 5,
+          "interval": "15m",
+          "type": "support_resistance",
+          "params": {}
+        },
+        {
+          "name": "pivot_points",
+          "period": 0,
+          "interval": "1d",
+          "type": "support_resistance",
+          "params": {}
+        }
+      ],
+      "historical": [
+        {
+          "name": "avg_volume",
+          "period": 20,
+          "unit": "days",
+          "interval": "1d",
+          "type": "historical",
+          "params": {}
+        },
+        {
+          "name": "avg_range",
+          "period": 10,
+          "unit": "days",
+          "interval": "1d",
+          "type": "historical",
+          "params": {}
+        },
+        {
+          "name": "atr_daily",
+          "period": 14,
+          "unit": "days",
+          "interval": "1d",
+          "type": "historical",
+          "params": {}
+        },
+        {
+          "name": "gap_stats",
+          "period": 30,
+          "unit": "days",
+          "interval": "1d",
+          "type": "historical",
+          "params": {}
+        },
+        {
+          "name": "range_ratio",
+          "period": 20,
+          "unit": "days",
+          "interval": "1d",
+          "type": "historical",
+          "params": {}
+        },
+        {
+          "name": "high_low",
+          "period": 52,
+          "unit": "weeks",
+          "interval": "1d",
+          "type": "historical",
+          "params": {},
+          "comment": "52 weeks of daily bars (not 1w - Alpaca doesn't provide weekly)"
+        }
+      ]
     }
   },
   "trading_config": {
@@ -56,8 +254,8 @@
   },
   "metadata": {
     "created_by": "user",
-    "description": "Example session configuration matching SESSION_ARCHITECTURE.md",
-    "strategy": "momentum_scalping",
-    "version": "2.0"
+    "description": "Comprehensive example with all indicator types: trend, momentum, volatility, volume, support/resistance, and historical",
+    "strategy": "multi_indicator_demo",
+    "version": "3.0"
   }
 }

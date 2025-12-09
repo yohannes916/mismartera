@@ -25,11 +25,15 @@ from app.logger import logger
 # =============================================================================
 
 class IntervalType(Enum):
-    """Interval type classification."""
+    """Interval type classification.
+    
+    NOTE: Hourly intervals are NOT supported.
+    Use minutes instead (e.g., 60m, 120m, 240m for 1h, 2h, 4h).
+    """
     SECOND = "second"      # 1s, 5s, 10s, etc.
-    MINUTE = "minute"      # 1m, 5m, 15m, etc.
-    HOUR = "hour"          # 1h, 4h, etc.
+    MINUTE = "minute"      # 1m, 5m, 15m, 60m, etc.
     DAY = "day"            # 1d, 5d, etc.
+    WEEK = "week"          # 1w, 2w, etc.
     QUOTE = "quote"        # quotes
 
 
@@ -133,11 +137,12 @@ def parse_interval(interval: str) -> IntervalInfo:
     # Parse bar interval: <number><unit>
     # Normalize to lowercase for parsing
     interval_lower = interval.lower()
-    match = re.match(r'^(\d+)([smhd])$', interval_lower)
+    match = re.match(r'^(\d+)([smdw])$', interval_lower)
     if not match:
         raise ValueError(
             f"Invalid interval format: '{interval}'. "
-            f"Expected format: <number><unit> (e.g., '1s', '5m', '1h', '1d') or 'quotes'"
+            f"Expected format: <number><unit> (e.g., '1s', '5m', '1d', '1w') or 'quotes'. "
+            f"NOTE: Hourly intervals not supported - use minutes (60m, 120m, etc.)"
         )
     
     value = int(match.group(1))
@@ -155,16 +160,16 @@ def parse_interval(interval: str) -> IntervalInfo:
         interval_type = IntervalType.MINUTE
         seconds = value * 60
         is_base = (value == 1)  # Only 1m is base
-    elif unit == 'h':
-        interval_type = IntervalType.HOUR
-        seconds = value * 3600
-        is_base = False  # Hours never base (derived from 1m)
     elif unit == 'd':
         interval_type = IntervalType.DAY
         seconds = value * 86400
         is_base = (value == 1)  # Only 1d is base
+    elif unit == 'w':
+        interval_type = IntervalType.WEEK
+        seconds = value * 604800  # 7 days
+        is_base = (value == 1)  # Only 1w is base
     else:
-        raise ValueError(f"Invalid unit: {unit}")
+        raise ValueError(f"Invalid unit: {unit}. Supported: s, m, d, w (no hourly!)")
     
     return IntervalInfo(
         interval=interval,
@@ -189,8 +194,9 @@ def determine_required_base(interval: str) -> str:
         
     Rules (Req 9-11):
         - Sub-second (5s, 10s, etc.) → requires 1s (only valid source)
-        - Minute (5m, 15m, 1h, etc.) → requires 1m (preferred, not 1s)
+        - Minute (5m, 15m, 60m, etc.) → requires 1m (preferred, not 1s)
         - Day (1d, 5d, etc.) → requires 1m (aggregation from 1m)
+        - Week (1w, 2w, etc.) → requires 1d (aggregation from 1d)
         
     Examples:
         >>> determine_required_base("5s")
@@ -220,13 +226,13 @@ def determine_required_base(interval: str) -> str:
     if info.type == IntervalType.MINUTE:
         return "1m"
     
-    # Rule 3 (Req 11): Hour intervals require 1m
-    if info.type == IntervalType.HOUR:
-        return "1m"
-    
     # Rule 3 (Req 11): Day intervals require 1m (for aggregation)
     if info.type == IntervalType.DAY:
         return "1m"
+    
+    # Rule 4: Week intervals require 1d (aggregate daily bars to weekly)
+    if info.type == IntervalType.WEEK:
+        return "1d"
     
     raise ValueError(f"Cannot determine base interval for: {interval}")
 
@@ -235,13 +241,13 @@ def select_smallest_base(bases: List[str]) -> str:
     """Select the smallest base interval from a list.
     
     Args:
-        bases: List of base intervals (e.g., ["1s", "1m", "1m"])
+        bases: List of base intervals (e.g., ["1s", "1m", "1d"])
         
     Returns:
         Smallest base interval
         
     Rule (Req 12):
-        Priority: 1s < 1m < 1d
+        Priority: 1s < 1m < 1d < 1w
         
     Examples:
         >>> select_smallest_base(["1m", "1s", "1m"])
@@ -249,12 +255,15 @@ def select_smallest_base(bases: List[str]) -> str:
         
         >>> select_smallest_base(["1m", "1d"])
         "1m"
+        
+        >>> select_smallest_base(["1d", "1w"])
+        "1d"
     """
     if not bases:
         raise ValueError("Cannot select base from empty list")
     
     # Priority order (smallest first)
-    priority = {"1s": 1, "1m": 2, "1d": 3}
+    priority = {"1s": 1, "1m": 2, "1d": 3, "1w": 4}
     
     # Filter out None values and get unique bases
     valid_bases = [b for b in bases if b is not None]

@@ -1,0 +1,19 @@
+https://www.supermicro.com/products/system/4U/4028/SYS-4028GR-TR.php?_gl=1*1v1bcxp*_up*MQ..*_ga*MTUxNDI2NDM1Ni4xNzY1MDcxMTg1*_ga_BMMP56ELKC*czE3NjUwNzExODMkbzEkZzEkdDE3NjUwNzEyMDEkajQyJGwwJGgw*_ga_K1TNNPLV4M*czE3NjUwNzExODMkbzEkZzEkdDE3NjUwNzEyMDEkajQyJGwwJGgyMDIxOTU1NDE4
+
+BMC Enable/Disable
+Use jumper JPB1 to enable or disable the
+BMC (Baseboard Management Controller),
+which supports IPMI 2.0/KVM. See the
+table on the right for jumper settings.
+
+
+BMC Heartbeat LED
+The BMC Heartbeat LED is designated
+LEDM1. When it is blinking, the BMC
+(Baseboard Management Controller) is
+functioning normally.
+
+
+https://www.cablesandkits.com/cart?show_options=1&country_id=223&state=&zip_code=95864#shipping_estimator
+
+https://192.168.0.7 user/password: ADMIN/ADMIN

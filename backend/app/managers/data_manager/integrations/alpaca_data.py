@@ -15,7 +15,7 @@ from app.config import settings
 from app.logger import logger
 
 
-async def fetch_1m_bars(
+def fetch_1m_bars(
     symbol: str,
     start: datetime,
     end: datetime,
@@ -26,6 +26,11 @@ async def fetch_1m_bars(
     symbol, timestamp, interval, open, high, low, close, volume.
     """
     if not settings.ALPACA.api_key_id or not settings.ALPACA.api_secret_key:
+        logger.error(
+            f"Alpaca credentials check failed: "
+            f"api_key_id={'SET' if settings.ALPACA.api_key_id else 'EMPTY'} ({len(settings.ALPACA.api_key_id) if settings.ALPACA.api_key_id else 0} chars), "
+            f"api_secret_key={'SET' if settings.ALPACA.api_secret_key else 'EMPTY'} ({len(settings.ALPACA.api_secret_key) if settings.ALPACA.api_secret_key else 0} chars)"
+        )
         raise RuntimeError("Alpaca API credentials are missing")
 
     # Use Alpaca historical data endpoint base URL
@@ -54,7 +59,7 @@ async def fetch_1m_bars(
 
     all_bars: List[Dict] = []
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    with httpx.Client(timeout=30.0) as client:
         page = 0
         next_page_token: str | None = None
 
@@ -69,7 +74,7 @@ async def fetch_1m_bars(
                 f"[Alpaca] Requesting 1m bars for {symbol.upper()} (page {page}, total fetched: {len(all_bars)}) | Range: {params['start']} to {params['end']}"
             )
 
-            resp = await client.get(url, headers=headers, params=params)
+            resp = client.get(url, headers=headers, params=params)
 
             if resp.status_code != 200:
                 logger.error(
@@ -124,7 +129,7 @@ async def fetch_1m_bars(
     return all_bars
 
 
-async def fetch_1d_bars(
+def fetch_1d_bars(
     symbol: str,
     start: datetime,
     end: datetime,
@@ -163,7 +168,7 @@ async def fetch_1d_bars(
 
     all_bars: List[Dict] = []
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    with httpx.Client(timeout=30.0) as client:
         page = 0
         next_page_token: str | None = None
 
@@ -178,7 +183,7 @@ async def fetch_1d_bars(
                 f"[Alpaca] Requesting daily bars for {symbol.upper()} (page {page}, total fetched: {len(all_bars)}) | Range: {params['start']} to {params['end']}"
             )
 
-            resp = await client.get(url, headers=headers, params=params)
+            resp = client.get(url, headers=headers, params=params)
 
             if resp.status_code != 200:
                 logger.error(
@@ -233,7 +238,7 @@ async def fetch_1d_bars(
     return all_bars
 
 
-async def fetch_ticks(
+def fetch_ticks(
     symbol: str,
     start: datetime,
     end: datetime,
@@ -269,7 +274,7 @@ async def fetch_ticks(
 
     ticks: List[Dict] = []
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    with httpx.Client(timeout=30.0) as client:
         page = 0
         next_page_token: str | None = None
 
@@ -284,7 +289,7 @@ async def fetch_ticks(
                 f"[Alpaca] Requesting ticks for {symbol.upper()} (page {page}, total fetched: {len(ticks)}) | Range: {params['start']} to {params['end']}"
             )
 
-            resp = await client.get(url, headers=headers, params=params)
+            resp = client.get(url, headers=headers, params=params)
 
             if resp.status_code != 200:
                 logger.error(
@@ -341,7 +346,7 @@ async def fetch_ticks(
     return ticks
 
 
-async def fetch_quotes(
+def fetch_quotes(
     symbol: str,
     start: datetime,
     end: datetime,
@@ -377,7 +382,7 @@ async def fetch_quotes(
 
     quotes: List[Dict] = []
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    with httpx.Client(timeout=30.0) as client:
         page = 0
         next_page_token: str | None = None
 
@@ -392,7 +397,7 @@ async def fetch_quotes(
                 f"[Alpaca] Requesting quotes for {symbol.upper()} (page {page}, total fetched: {len(quotes)}) | Range: {params['start']} to {params['end']}"
             )
 
-            resp = await client.get(url, headers=headers, params=params)
+            resp = client.get(url, headers=headers, params=params)
 
             if resp.status_code != 200:
                 logger.error(
@@ -446,7 +451,7 @@ async def fetch_quotes(
     return quotes
 
 
-async def fetch_snapshot(symbol: str) -> Optional[Dict]:
+def fetch_snapshot(symbol: str) -> Optional[Dict]:
     """Fetch latest snapshot for a symbol from Alpaca REST API.
     
     Snapshot includes:
@@ -473,9 +478,9 @@ async def fetch_snapshot(symbol: str) -> Optional[Dict]:
         "APCA-API-SECRET-KEY": settings.ALPACA.api_secret_key,
     }
     
-    async with httpx.AsyncClient() as client:
+    with httpx.Client() as client:
         try:
-            resp = await client.get(url, headers=headers, timeout=30.0)
+            resp = client.get(url, headers=headers, timeout=30.0)
             resp.raise_for_status()
             data = resp.json()
             
@@ -556,7 +561,7 @@ async def fetch_snapshot(symbol: str) -> Optional[Dict]:
             return None
 
 
-async def fetch_session_data(symbol: str, session_date: date) -> Optional[Dict]:
+def fetch_session_data(symbol: str, session_date: date) -> Optional[Dict]:
     """Fetch session high/low/volume using Alpaca's daily bar endpoint.
     
     This is more reliable than snapshot for getting complete session data
@@ -580,7 +585,8 @@ async def fetch_session_data(symbol: str, session_date: date) -> Optional[Dict]:
     from app.managers.system_manager import get_system_manager
     from zoneinfo import ZoneInfo
     system_mgr = get_system_manager()
-    system_tz = ZoneInfo(system_mgr.timezone)
+    timezone_str = system_mgr.timezone or "America/New_York"
+    system_tz = ZoneInfo(timezone_str)
     
     start_dt = datetime.combine(session_date, time.min, tzinfo=system_tz)
     end_dt = datetime.combine(session_date, time.max, tzinfo=system_tz)
@@ -597,9 +603,9 @@ async def fetch_session_data(symbol: str, session_date: date) -> Optional[Dict]:
         "APCA-API-SECRET-KEY": settings.ALPACA.api_secret_key,
     }
     
-    async with httpx.AsyncClient() as client:
+    with httpx.Client() as client:
         try:
-            resp = await client.get(url, headers=headers, params=params, timeout=30.0)
+            resp = client.get(url, headers=headers, params=params, timeout=30.0)
             resp.raise_for_status()
             data = resp.json()
             

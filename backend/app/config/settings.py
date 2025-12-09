@@ -4,89 +4,108 @@ Application configuration using pydantic-settings with nested structure
 from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import Optional, List
+from pathlib import Path
 
 
 # ============================================================================
 # NESTED CONFIGURATION MODELS
 # ============================================================================
 
-class SystemConfig(BaseModel):
+# Get absolute path to .env file (backend directory)
+_BASE_DIR = Path(__file__).resolve().parent.parent.parent
+_ENV_FILE = _BASE_DIR / ".env"
+
+
+class SystemConfig(BaseSettings):
     """System-level configuration."""
-    operating_mode: str = "backtest"                 # "backtest" or "live"
-    disable_cli_login: bool = True                   # Disable login requirement for CLI
+    operating_mode: str = "backtest"
+    disable_cli_login: bool = True
+    model_config = SettingsConfigDict(env_prefix="", extra="ignore")
 
 
-class APIConfig(BaseModel):
+class APIConfig(BaseSettings):
     """HTTP API server configuration."""
-    host: str = "127.0.0.1"                         # API server host
-    port: int = 8000                                 # API server port
+    host: str = "127.0.0.1"
+    port: int = 8000
+    model_config = SettingsConfigDict(env_prefix="", extra="ignore")
 
 
-class SecurityConfig(BaseModel):
+class SecurityConfig(BaseSettings):
     """Security and authentication configuration."""
-    secret_key: str = "INSECURE-DEFAULT-CHANGE-IN-PRODUCTION"  # JWT secret key (MUST set via SECURITY__SECRET_KEY)
-    algorithm: str = "HS256"                         # JWT algorithm
-    access_token_expire_minutes: int = 1440          # Token expiration (24 hours)
+    secret_key: str = "INSECURE-DEFAULT-CHANGE-IN-PRODUCTION"
+    algorithm: str = "HS256"
+    access_token_expire_minutes: int = 1440
+    model_config = SettingsConfigDict(env_prefix="", extra="ignore")
 
 
-class DatabaseConfig(BaseModel):
+class DatabaseConfig(BaseSettings):
     """Database connection configuration."""
-    url: str = "sqlite+aiosqlite:///./data/trading_app.db"  # Database connection string
+    url: str = "sqlite+aiosqlite:///./data/trading_app.db"
+    model_config = SettingsConfigDict(env_prefix="", extra="ignore")
 
 
-class SchwabConfig(BaseModel):
+class SchwabConfig(BaseSettings):
     """Charles Schwab API credentials and configuration."""
-    app_key: str = ""                                # Schwab app key
-    app_secret: str = ""                             # Schwab app secret
-    callback_url: str = "https://127.0.0.1:8000/callback"  # OAuth callback URL
-    api_base_url: str = "https://api.schwabapi.com"  # Schwab API base URL
+    app_key: str = ""
+    app_secret: str = ""
+    callback_url: str = "https://127.0.0.1:8000/callback"
+    api_base_url: str = "https://api.schwabapi.com"
+    model_config = SettingsConfigDict(env_prefix="", extra="ignore")
 
 
-class AlpacaConfig(BaseModel):
+class AlpacaConfig(BaseSettings):
     """Alpaca API credentials and configuration."""
-    api_key_id: str = ""                             # Alpaca API key ID
-    api_secret_key: str = ""                         # Alpaca API secret key
-    api_base_url: str = "https://api.alpaca.markets"  # Trading API base URL
-    data_base_url: str = "https://data.alpaca.markets"  # Historical data API base URL
-    paper_trading: bool = True                       # Use paper trading account
-
-
-class ClaudeConfig(BaseModel):
-    """Anthropic Claude API configuration."""
-    api_key: str = ""                                # Anthropic API key
-    model: str = "claude-opus-4-20250514"            # Claude model to use
-
-
-class LoggerConfig(BaseModel):
-    """Logger configuration settings."""
-    # Core logging settings
-    default_level: str = "INFO"                      # Log level (TRACE, DEBUG, INFO, WARNING, ERROR, CRITICAL)
-    file_path: str = "./data/logs/app.log"          # Log file location
-    rotation: str = "10 MB"                          # Rotate when file reaches this size
-    retention: str = "30 days"                       # Keep logs for this duration
+    api_key_id: str = ""
+    api_secret_key: str = ""
+    api_base_url: str = "https://api.alpaca.markets"
+    data_base_url: str = "https://data.alpaca.markets"
+    paper_trading: bool = True
     
-    # Deduplication filter settings
-    filter_enabled: bool = True                      # Enable log deduplication filter
-    filter_max_history: int = 5                      # Number of recent log locations to track
-    filter_time_threshold_seconds: float = 1.0       # Suppress duplicates within this time window (seconds)
+    model_config = SettingsConfigDict(
+        env_prefix="ALPACA__",
+        env_file=str(_ENV_FILE) if '_ENV_FILE' in globals() else None,
+        extra="ignore"
+    )
 
 
-class DataManagerConfig(BaseModel):
+class ClaudeConfig(BaseSettings):
+    """Anthropic Claude API configuration."""
+    api_key: str = ""
+    model: str = "claude-opus-4-20250514"
+    model_config = SettingsConfigDict(env_prefix="", extra="ignore")
+
+
+class LoggerConfig(BaseSettings):
+    """Logger configuration settings."""
+    default_level: str = "INFO"
+    file_path: str = "./data/logs/app.log"
+    rotation: str = "10 MB"
+    retention: str = "30 days"
+    filter_enabled: bool = True
+    filter_max_history: int = 5
+    filter_time_threshold_seconds: float = 1.0
+    model_config = SettingsConfigDict(env_prefix="", extra="ignore")
+
+
+class DataManagerConfig(BaseSettings):
     """Data Manager configuration."""
-    data_api: str = "alpaca"                         # Data provider: "alpaca" or "schwab"
+    data_api: str = "alpaca"
+    model_config = SettingsConfigDict(env_prefix="", extra="ignore")
 
 
-class ExecutionConfig(BaseModel):
+class ExecutionConfig(BaseSettings):
     """Execution Manager configuration."""
-    default_brokerage: str = "mismartera"            # Default brokerage: "alpaca", "schwab", or "mismartera"
+    default_brokerage: str = "mismartera"
+    model_config = SettingsConfigDict(env_prefix="", extra="ignore")
 
 
-class MismarteraConfig(BaseModel):
+class MismarteraConfig(BaseSettings):
     """Mismartera simulated trading configuration."""
-    initial_balance: float = 100000.0                # Starting cash balance
-    buying_power_multiplier: float = 1.0             # Margin multiplier (1.0=cash, 2.0=2x leverage)
-    execution_cost_pct: float = 0.001                # Total execution cost as % (0.1% = 10 bps)
-    slippage_pct: float = 0.0001                     # Market order slippage (0.01% = 1 bp)
+    initial_balance: float = 100000.0
+    buying_power_multiplier: float = 1.0
+    execution_cost_pct: float = 0.001
+    slippage_pct: float = 0.0001
+    model_config = SettingsConfigDict(env_prefix="", extra="ignore")
 
 
 # ============================================================================
@@ -110,27 +129,64 @@ class Settings(BaseSettings):
     APP_VERSION: str = "1.0.0"
     DEBUG: bool = True
     
-    # Nested configuration sections (initialized with defaults, overridden by env vars via env_nested_delimiter)
-    SYSTEM: SystemConfig = Field(default_factory=SystemConfig)
-    API: APIConfig = Field(default_factory=APIConfig)
-    SECURITY: SecurityConfig = Field(default_factory=SecurityConfig)  # Requires SECURITY__SECRET_KEY in .env
-    DATABASE: DatabaseConfig = Field(default_factory=DatabaseConfig)
-    SCHWAB: SchwabConfig = Field(default_factory=SchwabConfig)
-    ALPACA: AlpacaConfig = Field(default_factory=AlpacaConfig)
-    CLAUDE: ClaudeConfig = Field(default_factory=ClaudeConfig)
-    LOGGER: LoggerConfig = Field(default_factory=LoggerConfig)
-    DATA_MANAGER: DataManagerConfig = Field(default_factory=DataManagerConfig)
-    EXECUTION: ExecutionConfig = Field(default_factory=ExecutionConfig)
-    MISMARTERA: MismarteraConfig = Field(default_factory=MismarteraConfig)
+    # Nested configuration sections (manually construct from environment)
+    SYSTEM: SystemConfig = None
+    API: APIConfig = None
+    SECURITY: SecurityConfig = None
+    DATABASE: DatabaseConfig = None
+    SCHWAB: SchwabConfig = None
+    ALPACA: AlpacaConfig = None
+    CLAUDE: ClaudeConfig = None
+    LOGGER: LoggerConfig = None
+    DATA_MANAGER: DataManagerConfig = None
+    EXECUTION: ExecutionConfig = None
+    MISMARTERA: MismarteraConfig = None
+    
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        # Manually construct nested configs AFTER environment is loaded
+        import os
+        self.SYSTEM = SystemConfig()
+        self.API = APIConfig()
+        self.SECURITY = SecurityConfig()
+        self.DATABASE = DatabaseConfig()
+        self.SCHWAB = SchwabConfig()
+        
+        # ALPACA: Manually override from environment
+        self.ALPACA = AlpacaConfig()
+        if os.getenv('ALPACA__API_KEY_ID'):
+            self.ALPACA.api_key_id = os.getenv('ALPACA__API_KEY_ID')
+        if os.getenv('ALPACA__API_SECRET_KEY'):
+            self.ALPACA.api_secret_key = os.getenv('ALPACA__API_SECRET_KEY')
+        if os.getenv('ALPACA__API_BASE_URL'):
+            self.ALPACA.api_base_url = os.getenv('ALPACA__API_BASE_URL')
+        if os.getenv('ALPACA__DATA_BASE_URL'):
+            self.ALPACA.data_base_url = os.getenv('ALPACA__DATA_BASE_URL')
+        if os.getenv('ALPACA__PAPER_TRADING'):
+            self.ALPACA.paper_trading = os.getenv('ALPACA__PAPER_TRADING').lower() == 'true'
+        
+        self.CLAUDE = ClaudeConfig()
+        self.LOGGER = LoggerConfig()
+        self.DATA_MANAGER = DataManagerConfig()
+        self.EXECUTION = ExecutionConfig()
+        self.MISMARTERA = MismarteraConfig()
     
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=str(_ENV_FILE),
         env_file_encoding="utf-8",
         case_sensitive=True,
         extra="ignore",
-        env_nested_delimiter="__"
+        env_nested_delimiter="__",
+        validate_default=True,
+        env_prefix=""
     )
 
 
 # Global settings instance
+from dotenv import load_dotenv
+
+# Load .env file into environment variables
+if _ENV_FILE.exists():
+    load_dotenv(str(_ENV_FILE), override=True)
+
 settings = Settings()

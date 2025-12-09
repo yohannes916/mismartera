@@ -15,7 +15,7 @@ from app.config import settings
 from app.logger import logger
 
 
-async def fetch_1m_bars(
+def fetch_1m_bars(
     symbol: str,
     start: datetime,
     end: datetime,
@@ -34,7 +34,7 @@ async def fetch_1m_bars(
     # Get valid OAuth access token
     from app.integrations.schwab_client import schwab_client
     try:
-        access_token = await schwab_client.get_valid_access_token()
+        access_token = schwab_client.get_valid_access_token()
     except RuntimeError as e:
         raise RuntimeError(
             f"{str(e)}\n\n"
@@ -73,7 +73,7 @@ async def fetch_1m_bars(
     current_start = start
     chunk_num = 0
     
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    with httpx.Client(timeout=30.0) as client:
         while current_start <= end:
             chunk_num += 1
             
@@ -126,7 +126,7 @@ async def fetch_1m_bars(
             logger.info(f"Authorization header: Bearer {access_token[:20]}...")
             logger.debug(f"Full headers: {headers}")
 
-            resp = await client.get(url, headers=headers, params=params)
+            resp = client.get(url, headers=headers, params=params)
             
             logger.info(f"Response status: {resp.status_code}")
             logger.info(f"Response content-type: {resp.headers.get('content-type')}")
@@ -184,7 +184,8 @@ async def fetch_1m_bars(
                     from app.managers.system_manager import get_system_manager
                     from zoneinfo import ZoneInfo
                     system_mgr = get_system_manager()
-                    system_tz = ZoneInfo(system_mgr.timezone)
+                    timezone_str = system_mgr.timezone or "America/New_York"
+                    system_tz = ZoneInfo(timezone_str)
                     
                     ts_ms = candle.get("datetime")
                     ts = datetime.fromtimestamp(ts_ms / 1000, tz=system_tz)
@@ -215,7 +216,7 @@ async def fetch_1m_bars(
     return all_bars
 
 
-async def fetch_1d_bars(
+def fetch_1d_bars(
     symbol: str,
     start: datetime,
     end: datetime,
@@ -239,7 +240,7 @@ async def fetch_1d_bars(
     from app.integrations.schwab_client import schwab_client
 
     try:
-        access_token = await schwab_client.get_valid_access_token()
+        access_token = schwab_client.get_valid_access_token()
     except RuntimeError as e:
         raise RuntimeError(
             f"{str(e)}\n\n"
@@ -319,8 +320,8 @@ async def fetch_1d_bars(
     logger.info(f"Full GET request: {full_url}")
     logger.info(f"Authorization header: Bearer {access_token[:20]}...")
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.get(url, headers=headers, params=params)
+    with httpx.Client(timeout=30.0) as client:
+        resp = client.get(url, headers=headers, params=params)
         
         logger.info(f"Response status: {resp.status_code}")
         logger.info(f"Response content-type: {resp.headers.get('content-type')}")
@@ -406,7 +407,7 @@ async def fetch_1d_bars(
     return all_bars
 
 
-async def fetch_ticks(
+def fetch_ticks(
     symbol: str,
     start: datetime,
     end: datetime,
@@ -435,7 +436,7 @@ async def fetch_ticks(
     )
 
 
-async def fetch_quotes(
+def fetch_quotes(
     symbol: str,
     start: datetime,
     end: datetime,
@@ -463,7 +464,7 @@ async def fetch_quotes(
     )
 
 
-async def get_latest_quote(symbol: str) -> Optional[Dict]:
+def get_latest_quote(symbol: str) -> Optional[Dict]:
     """Get the latest real-time quote for a symbol from Schwab.
 
     Returns a quote dict with: symbol, bid_price, bid_size, ask_price, ask_size, last_price.
@@ -474,7 +475,7 @@ async def get_latest_quote(symbol: str) -> Optional[Dict]:
     # Get valid OAuth access token
     from app.integrations.schwab_client import schwab_client
     try:
-        access_token = await schwab_client.get_valid_access_token()
+        access_token = schwab_client.get_valid_access_token()
     except RuntimeError as e:
         raise RuntimeError(
             f"{str(e)}\n\n"
@@ -494,10 +495,10 @@ async def get_latest_quote(symbol: str) -> Optional[Dict]:
         "fields": "quote,fundamental",
     }
 
-    async with httpx.AsyncClient(timeout=10.0) as client:
+    with httpx.Client(timeout=10.0) as client:
         logger.info(f"Requesting Schwab real-time quote for {symbol.upper()}")
 
-        resp = await client.get(url, headers=headers, params=params)
+        resp = client.get(url, headers=headers, params=params)
 
         if resp.status_code != 200:
             logger.error(

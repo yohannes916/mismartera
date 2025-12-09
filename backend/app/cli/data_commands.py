@@ -4,7 +4,8 @@ CLI commands for market data management
 from pathlib import Path
 from typing import Optional
 from datetime import datetime, date
-import asyncio
+import threading
+import math
 
 import typer
 from rich.table import Table
@@ -66,13 +67,12 @@ def get_data_manager() -> DataManager:
     return system_mgr.get_data_manager()
 
 
-def register_background_task(task: asyncio.Task) -> None:
-    """Register a background task to prevent garbage collection.
+def register_background_task(task: threading.Thread) -> None:
+    """Register a background thread to prevent garbage collection.
     
-    Also adds a callback to remove the task when it completes.
+    Keeps a reference to the thread.
     """
     _background_tasks.add(task)
-    task.add_done_callback(_background_tasks.discard)
 
 
 def parse_start_date(date_str: str) -> datetime:
@@ -231,8 +231,10 @@ def import_csv_command(
             
             if result.get('quality_score'):
                 quality_pct = result['quality_score'] * 100
+                # Always round down to 1 decimal place
+                quality_pct_display = math.floor(quality_pct * 10) / 10
                 quality_color = "green" if quality_pct >= 95 else "yellow" if quality_pct >= 80 else "red"
-                console.print(f"  Quality: [{quality_color}]{quality_pct:.1f}%[/{quality_color}]")
+                console.print(f"  Quality: [{quality_color}]{quality_pct_display:.1f}%[/{quality_color}]")
             
             if result.get('missing_bars', 0) > 0:
                 console.print(f"  [yellow]⚠ Missing bars: {result['missing_bars']}[/yellow]")
@@ -244,112 +246,122 @@ def import_csv_command(
         logger.error(f"CSV import error: {e}")
 
 
-def list_symbols_command() -> None:
-    """List all symbols in Parquet storage (1m bars, daily bars, ticks, quotes)"""
+def list_symbols_command(symbol: str) -> None:
+    """List all available intervals for a symbol in unified table.
+    
+    Shows seconds, minutes, days, weeks, and quotes in single view.
+    """
+    symbol = symbol.upper()
+    
     try:
-        with SessionLocal() as session:
-            dm = get_data_manager()
-
-            # ---- 1m bar data ----
-            symbols = dm.get_symbols(session)
-            if not symbols:
-                console.print("\n[yellow]No 1m bar data in Parquet yet. Use 'data import-api 1m SYMBOL START END' to import.[/yellow]")
+        from app.managers.data_manager.parquet_storage import parquet_storage
+        
+        # Get all available intervals for this symbol
+        intervals = parquet_storage.get_available_intervals(symbol)
+        
+        if not intervals:
+            console.print(f"\n[yellow]No data found for {symbol}[/yellow]")
+            console.print(f"[dim]Import data using: data import-api <interval> {symbol} <start> <end>[/dim]")
+            return
+        
+        # Create unified table
+        table = Table(
+            title=f"\nData Summary: {symbol}",
+            show_header=True,
+            header_style="bold cyan"
+        )
+        table.add_column("Interval", style="cyan", width=10)
+        table.add_column("Type", style="magenta", width=12)
+        table.add_column("Bars", justify="right", style="green", width=12)
+        table.add_column("Quality", justify="right", style="white", width=8)
+        table.add_column("Start Date", style="dim")
+        table.add_column("End Date", style="dim")
+        
+        # Process each interval
+        for interval in sorted(intervals):
+            # Determine interval type
+            if interval == 'quotes':
+                interval_type = "Quotes"
+            elif interval.endswith('s'):
+                interval_type = "Seconds"
+            elif interval.endswith('m'):
+                interval_type = "Minutes"
+            elif interval.endswith('d'):
+                interval_type = "Days"
+            elif interval.endswith('w'):
+                interval_type = "Weeks"
             else:
-                table = Table(title="\n1-Minute Bar Data (Parquet)", show_header=True, header_style="bold cyan")
-                table.add_column("Symbol", style="cyan", width=10)
-                table.add_column("Bars", justify="right", style="green")
-                table.add_column("Start Date", style="dim")
-                table.add_column("End Date", style="dim")
-
-                for symbol in symbols:
-                    quality = dm.check_data_quality(session, symbol)
-                    total_bars = quality.get("total_bars", 0)
-                    start_date, end_date = dm.get_date_range(session, symbol)
-
-                    table.add_row(
-                        symbol,
-                        f"{total_bars:,}",
-                        format_timestamp(start_date, include_seconds=False),
-                        format_timestamp(end_date, include_seconds=False),
-                    )
-
-                console.print(table)
-                console.print(f"\n[dim]Total bar symbols: {len(symbols)}[/dim]\n")
-
-            # ---- 1d (daily) bar data ----
-            daily_symbols = dm.get_symbols(session, interval="1d")
-            if daily_symbols:
-                daily_table = Table(title="Daily Bar Data (Parquet)", show_header=True, header_style="bold cyan")
-                daily_table.add_column("Symbol", style="cyan", width=10)
-                daily_table.add_column("Bars", justify="right", style="green")
-                daily_table.add_column("Start Date", style="dim")
-                daily_table.add_column("End Date", style="dim")
-
-                for symbol in daily_symbols:
-                    total_bars = dm.get_bar_count(session, symbol, interval="1d")
-                    start_date, end_date = dm.get_date_range(session, symbol, interval="1d")
-
-                    daily_table.add_row(
-                        symbol,
-                        f"{total_bars:,}",
-                        format_timestamp(start_date, include_seconds=False),
-                        format_timestamp(end_date, include_seconds=False),
-                    )
-
-                console.print(daily_table)
-                console.print(f"\n[dim]Total daily bar symbols: {len(daily_symbols)}[/dim]\n")
-
-            # ---- Tick data (stored as 1s bars in Parquet) ----
-            tick_symbols = dm.get_symbols(session, interval="tick")
-            if tick_symbols:
-                tick_table = Table(title="Tick Data - 1s Bars (Parquet)", show_header=True, header_style="bold cyan")
-                tick_table.add_column("Symbol", style="cyan", width=10)
-                tick_table.add_column("Ticks", justify="right", style="green")
-                tick_table.add_column("Start Tick", style="dim")
-                tick_table.add_column("End Tick", style="dim")
-
-                for symbol in tick_symbols:
-                    total_ticks = dm.get_bar_count(session, symbol, interval="tick")
-                    start_tick, end_tick = dm.get_date_range(session, symbol, interval="tick")
-
-                    tick_table.add_row(
-                        symbol,
-                        f"{total_ticks:,}",
-                        format_timestamp(start_tick),
-                        format_timestamp(end_tick),
-                    )
-
-                console.print(tick_table)
-                console.print(f"\n[dim]Total tick symbols: {len(tick_symbols)}[/dim]\n")
+                interval_type = "Unknown"
             
-            # ---- Quote data (bid/ask) - from Parquet ----
-            from app.managers.data_manager.parquet_storage import parquet_storage
-
-            quote_symbols = parquet_storage.get_available_symbols('quotes')
-            if quote_symbols:
-                quote_table = Table(title="Quote Data Symbols (Parquet)", show_header=True, header_style="bold cyan")
-                quote_table.add_column("Symbol", style="cyan", width=10)
-                quote_table.add_column("Storage", justify="left", style="green")
-                quote_table.add_column("First Quote", style="dim")
-                quote_table.add_column("Last Quote", style="dim")
-
-                for symbol in quote_symbols:
-                    start_q, end_q = parquet_storage.get_date_range('quotes', symbol)
+            # Get bar count and date range
+            try:
+                with SessionLocal() as session:
+                    dm = get_data_manager()
                     
-                    quote_table.add_row(
-                        symbol,
-                        "Parquet",
-                        format_timestamp(start_q),
-                        format_timestamp(end_q),
+                    if interval == 'quotes':
+                        # Quotes are stored differently
+                        try:
+                            quotes = parquet_storage.read_quotes(
+                                symbol=symbol,
+                                start_date=None,
+                                end_date=None
+                            )
+                            bar_count = len(quotes)
+                            if bar_count > 0:
+                                start_date = quotes[0]['timestamp']
+                                end_date = quotes[-1]['timestamp']
+                            else:
+                                start_date = None
+                                end_date = None
+                        except:
+                            bar_count = 0
+                            start_date = None
+                            end_date = None
+                    else:
+                        # Regular bars
+                        bar_count = dm.get_bar_count(session, symbol, interval=interval)
+                        start_date, end_date = dm.get_date_range(session, symbol, interval=interval)
+                        
+                        # Get quality score
+                        quality_result = dm.check_data_quality(session, symbol, interval=interval)
+                        quality_score = quality_result.get('quality_score', 0.0)
+                        quality_pct = quality_score * 100
+                        # Always round down to 1 decimal place
+                        quality_pct_display = math.floor(quality_pct * 10) / 10
+                        
+                        # Color code quality
+                        if quality_pct >= 95:
+                            quality_str = f"[green]{quality_pct_display:.0f}%[/green]"
+                        elif quality_pct >= 80:
+                            quality_str = f"[yellow]{quality_pct_display:.0f}%[/yellow]"
+                        else:
+                            quality_str = f"[red]{quality_pct_display:.0f}%[/red]"
+                    
+                    table.add_row(
+                        interval,
+                        interval_type,
+                        f"{bar_count:,}" if bar_count > 0 else "0",
+                        quality_str if bar_count > 0 else "N/A",
+                        format_timestamp(start_date, include_seconds=False) if start_date else "N/A",
+                        format_timestamp(end_date, include_seconds=False) if end_date else "N/A",
                     )
-
-                console.print(quote_table)
-                console.print(f"[dim italic]Note: Quotes are aggregated to 1 per second (tightest spread)[/dim italic]")
-                console.print(f"[dim]Total quote symbols: {len(quote_symbols)}[/dim]\n")
+            except Exception as e:
+                logger.warning(f"Error reading {interval} for {symbol}: {e}")
+                table.add_row(
+                    interval,
+                    interval_type,
+                    "Error",
+                    "N/A",
+                    "N/A",
+                    "N/A",
+                )
+        
+        console.print(table)
+        console.print(f"\n[dim]Available intervals: {', '.join(sorted(intervals))}[/dim]")
     
     except Exception as e:
         console.print(f"[red]✗ Error: {e}[/red]")
-        logger.error(f"List symbols error: {e}")
+        logger.error(f"List data error: {e}")
 
 
 def data_info_command(symbol: str) -> None:
@@ -391,37 +403,67 @@ def data_info_command(symbol: str) -> None:
         logger.error(f"Data info error: {e}")
 
 
-def data_quality_command(symbol: str) -> None:
-    """
-    Check data quality for a symbol
+def data_quality_command(
+    symbol: str,
+    interval: str = "1m",
+    start_date: str = None,
+    end_date: str = None
+) -> None:
+    """Check data quality for a symbol using unified quality analyzer.
     
     Args:
         symbol: Stock symbol
+        interval: Bar interval (e.g., "1m", "5m", "1d", "1w")
+        start_date: Optional start date (YYYY-MM-DD)
+        end_date: Optional end date (YYYY-MM-DD)
     """
     try:
         with SessionLocal() as session:
             dm = get_data_manager()
-            quality = dm.check_data_quality(session, symbol.upper())
+            quality = dm.check_data_quality(
+                session,
+                symbol.upper(),
+                interval=interval,
+                start_date=start_date,
+                end_date=end_date
+            )
             
-            if quality['total_bars'] == 0:
-                console.print(f"\n[yellow]No data found for {symbol.upper()}[/yellow]")
+            if not quality.get('success') or quality['total_bars'] == 0:
+                message = quality.get('message', 'No data found')
+                console.print(f"\n[yellow]{message} for {symbol.upper()} {interval}[/yellow]")
                 return
             
+            # Build title
+            title = f"\nData Quality: {symbol.upper()} {interval}"
+            if start_date or end_date:
+                title += f" ({start_date or 'start'} to {end_date or 'end'})"
+            
             # Create table
-            table = Table(title=f"\nData Quality: {symbol.upper()}", show_header=True, header_style="bold cyan")
+            table = Table(title=title, show_header=True, header_style="bold cyan")
             table.add_column("Metric", style="cyan")
             table.add_column("Value", justify="right", style="white")
             
+            table.add_row("Interval", interval)
             table.add_row("Total bars", f"{quality['total_bars']:,}")
             table.add_row("Expected bars", f"{quality['expected_bars']:,}")
-            table.add_row("Missing bars", f"{quality['missing_bars']:,}")
-            # Only show duplicate timestamps if there are any
-            if quality['duplicate_timestamps'] > 0:
-                table.add_row("Duplicate timestamps", f"{quality['duplicate_timestamps']}")
+            
+            # Show missing or surplus bars
+            missing = quality.get('missing_bars', 0)
+            surplus = quality.get('surplus_bars', 0)
+            if surplus > 0:
+                table.add_row("Surplus bars", f"[green]+{surplus:,}[/green]")
+            else:
+                table.add_row("Missing bars", f"{missing:,}")
+            
+            # Show duplicates if any
+            if quality.get('duplicate_bars', 0) > 0:
+                table.add_row("Duplicate bars", f"{quality['duplicate_bars']:,}")
             
             quality_pct = quality['quality_score'] * 100
+            # Always round down to 1 decimal place (99.99 => 99.9, not 100.0)
+            quality_pct_display = math.floor(quality_pct * 10) / 10
             quality_color = "green" if quality_pct >= 95 else "yellow" if quality_pct >= 80 else "red"
-            table.add_row("Quality score", f"[{quality_color}]{quality_pct:.1f}%[/{quality_color}]")
+            table.add_row("Quality score", f"[{quality_color}]{quality_pct_display:.1f}%[/{quality_color}]")
             
             if quality.get('date_range'):
                 table.add_row("Start date", quality['date_range']['start'])
@@ -429,19 +471,26 @@ def data_quality_command(symbol: str) -> None:
             
             console.print(table)
             
-            # Quality assessment
-            if quality_pct >= 95:
-                console.print("\n[green]✓ Excellent data quality[/green]")
-            elif quality_pct >= 80:
-                console.print("\n[yellow]⚠ Good data quality with some gaps[/yellow]")
-            else:
-                console.print("\n[red]✗ Poor data quality - consider re-importing[/red]")
+            # Show message
+            console.print(f"\n[dim]{quality.get('message', '')}[/dim]")
+            
+            # Show gaps if any
+            gaps = quality.get('gaps', [])
+            if gaps:
+                console.print(f"\n[yellow]Detected {len(gaps)} gap(s):[/yellow]")
+                for i, gap in enumerate(gaps[:5], 1):  # Show first 5
+                    console.print(
+                        f"  {i}. {gap['start']} to {gap['end']} "
+                        f"({gap['missing_count']} bars missing)"
+                    )
+                if len(gaps) > 5:
+                    console.print(f"  ... and {len(gaps) - 5} more gaps")
             
             console.print()
     
     except Exception as e:
         console.print(f"[red]✗ Error: {e}[/red]")
-        logger.error(f"Data quality error: {e}")
+        logger.error(f"Data quality error: {e}", exc_info=True)
 
 
 def select_data_api_command(api: str) -> None:
@@ -521,29 +570,121 @@ def import_from_api_command(
         logger.error(f"API import error: {e}")
 
 
-def delete_symbol_command(symbol: str) -> None:
-    """Delete all market data for a symbol."""
+def aggregate_command(
+    target_interval: str,
+    source_interval: str,
+    symbol: str,
+    start_date: str,
+    end_date: str,
+) -> None:
+    """Aggregate existing Parquet data to new interval.
+    
+    Examples:
+        data aggregate 5m 1m AAPL 2025-07-01 2025-07-31
+        data aggregate 1d 1m AAPL 2025-07-01 2025-07-31
+        data aggregate 1w 1d AAPL 2025-01-01 2025-12-31
+    """
+    console.print(
+        f"\n[cyan]Aggregating {source_interval} → {target_interval} bars for {symbol.upper()}[/cyan]"
+    )
+    console.print(f"[dim]Date range: {start_date} to {end_date}[/dim]\n")
+    
+    dm = get_data_manager()
+    
+    try:
+        with SessionLocal() as session:
+            result = dm.aggregate_and_store(
+                session=session,
+                target_interval=target_interval,
+                source_interval=source_interval,
+                symbol=symbol,
+                start_date=start_date,
+                end_date=end_date,
+            )
+        
+        # Display results
+        if result.get("success"):
+            console.print(f"[green]✓ Aggregation successful![/green]\n")
+            console.print(f"  Mode: [cyan]{result.get('mode', 'unknown')}[/cyan]")
+            console.print(f"  Source bars ({source_interval}): {result.get('source_bars', 0):,}")
+            console.print(f"  Aggregated bars ({target_interval}): {result.get('aggregated_bars', 0):,}")
+            console.print(f"  Files written: {result.get('files_written', 0)}")
+            console.print(f"  Date range: {result.get('date_range', 'N/A')}")
+            
+            # Show reduction ratio
+            source_bars = result.get('source_bars', 0)
+            agg_bars = result.get('aggregated_bars', 0)
+            if source_bars > 0 and agg_bars > 0:
+                ratio = source_bars / agg_bars
+                console.print(f"  Compression: {ratio:.1f}x ({source_bars:,} → {agg_bars:,})")
+            
+            console.print(f"\n[green]{result.get('message', 'Complete')}[/green]")
+        else:
+            console.print(f"[yellow]⚠ Aggregation incomplete[/yellow]\n")
+            console.print(f"  {result.get('message', 'No details available')}")
+            
+            # Show what was processed
+            if result.get('source_bars', 0) > 0:
+                console.print(f"\n  Source bars loaded: {result.get('source_bars', 0):,}")
+                console.print(f"  Aggregated bars: {result.get('aggregated_bars', 0)}")
+    
+    except ValueError as e:
+        console.print(f"[red]✗ Validation error:[/red]\n  {e}")
+        logger.warning(f"Aggregation validation error: {e}")
+    except Exception as e:
+        console.print(f"[red]✗ Aggregation error: {e}[/red]")
+        logger.error(f"Aggregation error: {e}", exc_info=True)
+
+
+def delete_symbol_command(
+    symbol: str,
+    interval: str = None,
+    start_date: str = None,
+    end_date: str = None
+) -> None:
+    """Delete market data for a symbol with optional filters.
+    
+    Args:
+        symbol: Stock symbol
+        interval: Optional interval filter (e.g., "1m", "5m"). If None, deletes ALL intervals.
+        start_date: Optional start date (YYYY-MM-DD)
+        end_date: Optional end date (YYYY-MM-DD)
+    """
+    # Build confirmation message
+    delete_desc = f"{symbol.upper()}"
+    if interval:
+        delete_desc += f" {interval} data"
+    else:
+        delete_desc += " ALL intervals"
+    
+    if start_date or end_date:
+        delete_desc += f" from {start_date or 'start'} to {end_date or 'end'}"
+    
     if not Confirm.ask(
-        f"\n[yellow]⚠ Delete ALL data for {symbol.upper()}? This cannot be undone![/yellow]"
+        f"\n[yellow]⚠ Delete {delete_desc}? This cannot be undone![/yellow]"
     ):
         console.print("[dim]Cancelled[/dim]")
         return
-
+    
     try:
-        with SessionLocal() as session:
-            manager = get_data_manager()
-            deleted = manager.delete_symbol_data(session, symbol.upper())
-
-        if deleted > 0:
-            console.print(
-                f"\n[green]✓ Deleted {deleted:,} bars for {symbol.upper()}[/green]\n"
-            )
+        dm = get_data_manager()
+        result = dm.delete_data(
+            symbol=symbol,
+            interval=interval,
+            start_date=start_date,
+            end_date=end_date
+        )
+        
+        if result["success"]:
+            console.print(f"\n[green]✓ {result['message']}[/green]")
+            console.print(f"  Intervals deleted: {', '.join(result['intervals_deleted'])}")
+            console.print(f"  Files deleted: {result['files_deleted']}\n")
         else:
-            console.print(f"\n[yellow]No data found for {symbol.upper()}[/yellow]\n")
-
-    except Exception as e:  # noqa: BLE001
+            console.print(f"\n[yellow]{result['message']}[/yellow]\n")
+    
+    except Exception as e:
         console.print(f"[red]✗ Error: {e}[/red]")
-        logger.error(f"Delete symbol error: {e}")
+        logger.error(f"Delete data error: {e}")
 
 
 def delete_all_command() -> None:
@@ -966,12 +1107,10 @@ def stream_bars_command(
                 except Exception as e:
                     logger.error(f"Error in file writer: {e}")
             
-            # Create task and register it to prevent garbage collection
-            task = asyncio.create_task(consume_and_close())
-            register_background_task(task)
-            
-            # Yield control to let the task start
-            asyncio.sleep(0)
+            # Create thread and start it in background
+            thread = threading.Thread(target=consume_and_close, daemon=True)
+            register_background_task(thread)
+            thread.start()
             
             console.print(f"[green]✓[/green] Bar stream started with stream id [yellow]{stream_id}[/yellow]")
             console.print(f"[dim]Writing to {file_path}[/dim]")
@@ -1063,12 +1202,10 @@ def stream_ticks_command(
                 except Exception as e:
                     logger.error(f"Error in file writer: {e}")
             
-            # Create task and register it to prevent garbage collection
-            task = asyncio.create_task(consume_and_close())
-            register_background_task(task)
-            
-            # Yield control to let the task start
-            asyncio.sleep(0)
+            # Create thread and start it in background
+            thread = threading.Thread(target=consume_and_close, daemon=True)
+            register_background_task(thread)
+            thread.start()
             
             console.print(f"[green]✓[/green] Tick stream started with stream id [yellow]{stream_id}[/yellow]")
             console.print(f"[dim]Writing to {file_path}[/dim]")
@@ -1160,12 +1297,10 @@ def stream_quotes_command(
                 except Exception as e:
                     logger.error(f"Error in file writer: {e}")
             
-            # Create task and register it to prevent garbage collection
-            task = asyncio.create_task(consume_and_close())
-            register_background_task(task)
-            
-            # Yield control to let the task start
-            asyncio.sleep(0)
+            # Create thread and start it in background
+            thread = threading.Thread(target=consume_and_close, daemon=True)
+            register_background_task(thread)
+            thread.start()
             
             console.print(f"[green]✓[/green] Quote stream started with stream id [yellow]{stream_id}[/yellow]")
             console.print(f"[dim]Writing to {file_path}[/dim]")
@@ -1509,33 +1644,58 @@ app = typer.Typer()
 
 
 @app.command("list")
-def data_list() -> None:
-    """List all symbols in database (1m bars, daily bars, ticks, quotes)."""
-    asyncio.run(list_symbols_command())
+def data_list(
+    symbol: str = typer.Argument(..., help="Stock symbol"),
+) -> None:
+    """Show all available intervals for a symbol (seconds, minutes, days, weeks, quotes)."""
+    list_symbols_command(symbol)
 
 
 @app.command("info")
 def data_info(symbol: str = typer.Argument(..., help="Stock symbol")) -> None:
     """Show data info for a symbol."""
-    asyncio.run(data_info_command(symbol))
+    data_info_command(symbol)
 
 
 @app.command("quality")
-def data_quality(symbol: str = typer.Argument(..., help="Stock symbol")) -> None:
-    """Check data quality for a symbol."""
-    asyncio.run(data_quality_command(symbol))
+def data_quality(
+    symbol: str = typer.Argument(..., help="Stock symbol"),
+    interval: str = typer.Option("1m", "--interval", "-i", help="Bar interval (e.g., 1m, 5m, 1d)"),
+    start_date: str = typer.Option(None, "--start", help="Optional start date (YYYY-MM-DD)"),
+    end_date: str = typer.Option(None, "--end", help="Optional end date (YYYY-MM-DD)"),
+) -> None:
+    """Check data quality for a symbol with detailed gap analysis.
+    
+    Examples:
+        data quality AAPL                      # Check 1m data (default)
+        data quality AAPL -i 5m                # Check 5m data
+        data quality AAPL -i 1d --start 2025-07-01 --end 2025-07-31
+    """
+    data_quality_command(symbol, interval, start_date, end_date)
 
 
 @app.command("delete")
-def data_delete(symbol: str = typer.Argument(..., help="Stock symbol")) -> None:
-    """Delete all data for a symbol (⚠)."""
-    asyncio.run(delete_symbol_command(symbol))
+def data_delete(
+    symbol: str = typer.Argument(..., help="Stock symbol"),
+    interval: str = typer.Option(None, "--interval", "-i", help="Optional interval (e.g., 1m, 5m, 1d)"),
+    start_date: str = typer.Option(None, "--start", help="Optional start date (YYYY-MM-DD)"),
+    end_date: str = typer.Option(None, "--end", help="Optional end date (YYYY-MM-DD)"),
+) -> None:
+    """Delete market data for a symbol with optional filters.
+    
+    Examples:
+        data delete AAPL                           # Delete all data
+        data delete AAPL --interval 5m             # Delete only 5m data
+        data delete AAPL --start 2025-07-01        # Delete from July 2025 onwards
+        data delete AAPL -i 1m --start 2025-07-01 --end 2025-07-31
+    """
+    delete_symbol_command(symbol, interval, start_date, end_date)
 
 
 @app.command("delete-all")
 def data_delete_all() -> None:
     """Delete ALL data (⚠)."""
-    asyncio.run(delete_all_command())
+    delete_all_command()
 
 
 @app.command("backtest-speed")
@@ -1543,7 +1703,7 @@ def backtest_speed(
     speed: str = typer.Argument(..., help="Backtest speed multiplier: 0=max, 1.0=realtime, 2.0=2x speed, 0.5=half speed"),
 ) -> None:
     """Set backtest execution speed multiplier."""
-    asyncio.run(set_backtest_speed_command(speed))
+    set_backtest_speed_command(speed)
 
 
 @app.command("backtest-window")
@@ -1555,7 +1715,7 @@ def backtest_window(
     ),
 ) -> None:
     """Set DataManager backtest window dates."""
-    asyncio.run(set_backtest_window_command(start_date, end_date))
+    set_backtest_window_command(start_date, end_date)
 
 
 @app.command("export-csv")
@@ -1570,7 +1730,7 @@ def export_csv(
     file_path: str = typer.Option(..., "--file", "-f", help="Output CSV file path"),
 ) -> None:
     """Export bars or ticks to CSV via DataManager (data export-csv)."""
-    asyncio.run(export_csv_command(data_type, symbol, start_date, end_date, file_path))
+    export_csv_command(data_type, symbol, start_date, end_date, file_path)
 
 
 @app.command("bars")
@@ -1581,7 +1741,7 @@ def on_demand_bars(
     interval: str = typer.Option("1m", "--interval", help="Bar interval (e.g., 1m, tick)"),
 ) -> None:
     """Fetch and display bars from the local DB (no API calls)."""
-    asyncio.run(on_demand_bars_command(symbol, start_date, end_date, interval))
+    on_demand_bars_command(symbol, start_date, end_date, interval)
 
 
 @app.command("ticks")
@@ -1591,7 +1751,7 @@ def on_demand_ticks(
     end_date: str = typer.Argument(..., help="End date (YYYY-MM-DD)"),
 ) -> None:
     """Fetch and display ticks from the local DB (no API calls)."""
-    asyncio.run(on_demand_ticks_command(symbol, start_date, end_date))
+    on_demand_ticks_command(symbol, start_date, end_date)
 
 
 @app.command("quotes")
@@ -1601,7 +1761,7 @@ def on_demand_quotes(
     end_date: str = typer.Argument(..., help="End date (YYYY-MM-DD)"),
 ) -> None:
     """Fetch and display quotes from the local DB (no API calls)."""
-    asyncio.run(on_demand_quotes_command(symbol, start_date, end_date))
+    on_demand_quotes_command(symbol, start_date, end_date)
 
 
 @app.command("latest-bar")
@@ -1610,7 +1770,7 @@ def latest_bar(
     interval: str = typer.Option("1m", "--interval", help="Bar interval (e.g., 1m, tick)"),
 ) -> None:
     """Show the latest bar for a symbol."""
-    asyncio.run(latest_bar_command(symbol, interval))
+    latest_bar_command(symbol, interval)
 
 
 @app.command("latest-tick")
@@ -1618,7 +1778,7 @@ def latest_tick(
     symbol: str = typer.Argument(..., help="Stock symbol"),
 ) -> None:
     """Show the latest tick for a symbol."""
-    asyncio.run(latest_tick_command(symbol))
+    latest_tick_command(symbol)
 
 
 @app.command("latest-quote")
@@ -1626,7 +1786,7 @@ def latest_quote(
     symbol: str = typer.Argument(..., help="Stock symbol"),
 ) -> None:
     """Show the latest bid/ask quote for a symbol."""
-    asyncio.run(latest_quote_command(symbol))
+    latest_quote_command(symbol)
 
 
 @app.command("session")
@@ -1636,9 +1796,9 @@ def session(
     duration: Optional[int] = typer.Option(None, "--duration", "-d", help="Duration to run in seconds (default: run indefinitely)"),
     no_live: bool = typer.Option(False, "--no-live", help="Disable live updating, print each refresh (better for scripts)"),
 ) -> None:
-    """Display live session data with auto-refresh and CSV export (default: 1s, exports to validation/test_session.csv)."""
+    """Display live session data with auto-refresh (default: 1s). CSV export not yet implemented in new version."""
     from app.cli.session_data_display import data_session_command
-    asyncio.run(data_session_command(refresh_seconds, csv_file, duration, no_live))
+    data_session_command(refresh_seconds, csv_file, duration, no_live)
 
 
 @app.command("validate")
@@ -1680,7 +1840,7 @@ def stream_bars(
     file_path: Optional[str] = typer.Argument(None, help="Optional output CSV file"),
 ) -> None:
     """Start streaming bars to console or CSV file."""
-    asyncio.run(stream_bars_command(symbol, interval, file_path))
+    stream_bars_command(symbol, interval, file_path)
 
 
 @app.command("stream-ticks")
@@ -1689,7 +1849,7 @@ def stream_ticks(
     file_path: Optional[str] = typer.Argument(None, help="Optional output CSV file"),
 ) -> None:
     """Start streaming ticks to console or CSV file."""
-    asyncio.run(stream_ticks_command(symbol, file_path))
+    stream_ticks_command(symbol, file_path)
 
 
 @app.command("stream-quotes")
@@ -1698,7 +1858,7 @@ def stream_quotes(
     file_path: Optional[str] = typer.Argument(None, help="Optional output CSV file"),
 ) -> None:
     """Start streaming quotes to console or CSV file."""
-    asyncio.run(stream_quotes_command(symbol, file_path))
+    stream_quotes_command(symbol, file_path)
 
 
 @app.command("stop-stream-bars")
@@ -1706,7 +1866,7 @@ def stop_stream_bars(
     stream_id: Optional[str] = typer.Argument(None, help="Optional stream id; omit to stop all"),
 ) -> None:
     """Signal active bar stream(s) to stop."""
-    asyncio.run(stop_bars_stream_command(stream_id))
+    stop_bars_stream_command(stream_id)
 
 
 @app.command("stop-stream-ticks")
@@ -1714,7 +1874,7 @@ def stop_stream_ticks(
     stream_id: Optional[str] = typer.Argument(None, help="Optional stream id; omit to stop all"),
 ) -> None:
     """Signal active tick stream(s) to stop."""
-    asyncio.run(stop_ticks_stream_command(stream_id))
+    stop_ticks_stream_command(stream_id)
 
 
 @app.command("stop-stream-quotes")
@@ -1722,13 +1882,13 @@ def stop_stream_quotes(
     stream_id: Optional[str] = typer.Argument(None, help="Optional stream id; omit to stop all"),
 ) -> None:
     """Signal active quote stream(s) to stop."""
-    asyncio.run(stop_quotes_stream_command(stream_id))
+    stop_quotes_stream_command(stream_id)
 
 
 @app.command("stop-all-streams")
 def stop_all_streams() -> None:
     """Stop ALL active data streams (bars, ticks, quotes) and coordinator worker."""
-    asyncio.run(stop_all_streams_command())
+    stop_all_streams_command()
 
 
 @app.command("snapshot")
@@ -1736,7 +1896,7 @@ def snapshot(
     symbol: str = typer.Argument(..., help="Stock symbol"),
 ) -> None:
     """Get latest snapshot from data provider (live mode only)."""
-    asyncio.run(snapshot_command(symbol))
+    snapshot_command(symbol)
 
 
 @app.command("session-volume")
@@ -1744,7 +1904,7 @@ def session_volume(
     symbol: str = typer.Argument(..., help="Stock symbol"),
 ) -> None:
     """Get cumulative volume for current trading session."""
-    asyncio.run(session_volume_command(symbol))
+    session_volume_command(symbol)
 
 
 @app.command("session-high-low")
@@ -1752,7 +1912,7 @@ def session_high_low(
     symbol: str = typer.Argument(..., help="Stock symbol"),
 ) -> None:
     """Get session high and low prices."""
-    asyncio.run(session_high_low_command(symbol))
+    session_high_low_command(symbol)
 
 
 @app.command("avg-volume")
@@ -1761,7 +1921,7 @@ def avg_volume(
     days: int = typer.Argument(..., help="Number of trading days"),
 ) -> None:
     """Get average daily volume over specified trading days."""
-    asyncio.run(avg_volume_command(symbol, days))
+    avg_volume_command(symbol, days)
 
 
 @app.command("high-low")
@@ -1770,7 +1930,7 @@ def high_low(
     days: int = typer.Argument(..., help="Number of days lookback"),
 ) -> None:
     """Get historical high/low prices over specified period."""
-    asyncio.run(high_low_command(symbol, days))
+    high_low_command(symbol, days)
 
 
 @app.command("api")
@@ -1780,7 +1940,7 @@ def set_api(
     ),
 ) -> None:
     """Select data API provider via DataManager and auto-connect."""
-    asyncio.run(select_data_api_command(api))
+    select_data_api_command(api)
 
 
 @app.command("import-api")
@@ -1791,7 +1951,7 @@ def import_api(
     end_date: str = typer.Argument(..., help="End date (YYYY-MM-DD)"),
 ) -> None:
     """Import data from external API via DataManager.import_from_api."""
-    asyncio.run(import_from_api_command(data_type, symbol, start_date, end_date))
+    import_from_api_command(data_type, symbol, start_date, end_date)
 
 
 @app.command("import-file")
@@ -1802,14 +1962,32 @@ def import_file(
     end_date: str = typer.Option(None, "--end", help="End date (YYYY-MM-DD)"),
 ) -> None:
     """Import CSV data via DataManager (data import-file)."""
-    asyncio.run(import_csv_command(file_path, symbol, start_date, end_date))
+    import_csv_command(file_path, symbol, start_date, end_date)
+
+
+@app.command("aggregate")
+def aggregate_data(
+    target: str = typer.Argument(..., help="Target interval (5m, 1d, 1w)"),
+    source: str = typer.Argument(..., help="Source interval (1s, 1m, 5m, 1d)"),
+    symbol: str = typer.Argument(..., help="Stock symbol"),
+    start_date: str = typer.Argument(..., help="Start date (YYYY-MM-DD)"),
+    end_date: str = typer.Argument(..., help="End date (YYYY-MM-DD)"),
+) -> None:
+    """Aggregate existing Parquet data to new interval.
+    
+    Examples:
+        data aggregate 5m 1m AAPL 2025-07-01 2025-07-31
+        data aggregate 1d 1m AAPL 2025-07-01 2025-07-31
+        data aggregate 1w 1d AAPL 2025-01-01 2025-12-31
+    """
+    aggregate_command(target, source, symbol, start_date, end_date)
 
 
 # ============================================================================
 # Dynamic Symbol Management Commands
 # ============================================================================
 
-async def add_symbol_command(symbol: str, streams: Optional[str]) -> None:
+def add_symbol_command(symbol: str, streams: Optional[str]) -> None:
     """Add a symbol dynamically to the active session."""
     try:
         from app.managers.system_manager import get_system_manager
@@ -1851,7 +2029,7 @@ async def add_symbol_command(symbol: str, streams: Optional[str]) -> None:
         logger.error(f"Add symbol command error: {e}", exc_info=True)
 
 
-async def remove_symbol_command(symbol: str) -> None:
+def remove_symbol_command(symbol: str) -> None:
     """Remove a symbol from the active session."""
     try:
         from app.managers.system_manager import get_system_manager
@@ -1890,7 +2068,7 @@ def add_symbol(
     streams: Optional[str] = typer.Option(None, "--streams", help="Comma-separated stream types (default: 1m)"),
 ) -> None:
     """Add a symbol dynamically to the active session."""
-    asyncio.run(add_symbol_command(symbol, streams))
+    add_symbol_command(symbol, streams)
 
 
 @app.command("remove-symbol")
@@ -1898,4 +2076,4 @@ def remove_symbol(
     symbol: str = typer.Argument(..., help="Stock symbol to remove"),
 ) -> None:
     """Remove a symbol from the active session."""
-    asyncio.run(remove_symbol_command(symbol))
+    remove_symbol_command(symbol)

@@ -84,13 +84,11 @@ class TestSymbolRemoval:
         """Create a coordinator with an existing symbol."""
         coordinator = Mock(spec=SessionCoordinator)
         coordinator._symbol_operation_lock = MagicMock()
-        coordinator._loaded_symbols = {"AAPL"}
+        # NOTE: _loaded_symbols, _streamed_data, _generated_data removed in Phase 4
         coordinator._pending_symbols = set()
         coordinator._symbol_check_counters = defaultdict(int)
         coordinator._symbol_check_counters["AAPL"] = 47
         coordinator._bar_queues = {}
-        coordinator._streamed_data = {"AAPL": ["1m"]}
-        coordinator._generated_data = {"AAPL": ["5m", "15m"]}
         coordinator.session_config = Mock()
         coordinator.session_config.session_data_config = Mock()
         coordinator.session_config.session_data_config.symbols = ["AAPL"]
@@ -115,11 +113,10 @@ class TestSymbolRemoval:
         
         coordinator.remove_symbol("AAPL")
         
-        assert "AAPL" not in coordinator._loaded_symbols
+        # NOTE: _loaded_symbols removed in Phase 4 - SessionData is now source of truth
         assert "AAPL" not in coordinator._pending_symbols
         assert "AAPL" not in coordinator._symbol_check_counters
-        assert "AAPL" not in coordinator._streamed_data
-        assert "AAPL" not in coordinator._generated_data
+        # NOTE: _streamed_data and _generated_data removed in Phase 4 - SessionData is now source of truth
     
     def test_remove_nonexistent_symbol_returns_false(self, mock_coordinator_with_symbol):
         """Removing non-existent symbol should return False."""
@@ -134,6 +131,9 @@ class TestSymbolRemoval:
         """Removing symbol should remove from SessionData."""
         coordinator = mock_coordinator_with_symbol
         coordinator.remove_symbol = SessionCoordinator.remove_symbol.__get__(coordinator)
+        
+        # Activate session to allow get_symbol_data to work
+        coordinator.session_data.activate_session()
         
         # Verify symbol exists
         assert coordinator.session_data.get_symbol_data("AAPL") is not None
@@ -153,7 +153,7 @@ class TestPendingSymbolProcessing:
         """Create coordinator with pending symbols."""
         coordinator = Mock(spec=SessionCoordinator)
         coordinator._symbol_operation_lock = MagicMock()
-        coordinator._loaded_symbols = set()
+        # NOTE: _loaded_symbols removed in Phase 4
         coordinator._pending_symbols = {"AAPL", "TSLA"}
         coordinator._symbol_check_counters = defaultdict(int)
         coordinator._stream_paused = Mock()
@@ -162,6 +162,10 @@ class TestPendingSymbolProcessing:
         coordinator.session_config = Mock()
         coordinator.session_config.session_data_config = Mock()
         coordinator.session_config.session_data_config.symbols = ["AAPL", "TSLA"]
+        
+        # Mock SessionData for symbol tracking
+        coordinator.session_data = Mock()
+        coordinator.session_data.get_active_symbols = Mock(return_value=set())
         
         # Mock the parameterized methods
         coordinator._validate_and_mark_streams = Mock(return_value=True)
@@ -198,8 +202,8 @@ class TestPendingSymbolProcessing:
         
         coordinator._process_pending_symbols()
         
-        assert "AAPL" in coordinator._loaded_symbols
-        assert "TSLA" in coordinator._loaded_symbols
+        # NOTE: _loaded_symbols removed in Phase 4 - symbols now tracked in SessionData
+        # After processing, pending_symbols should be cleared
         assert len(coordinator._pending_symbols) == 0
     
     def test_process_pending_resumes_stream(self, coordinator_with_pending):
@@ -221,21 +225,42 @@ class TestAccessorMethods:
         """Create coordinator with various state."""
         coordinator = Mock(spec=SessionCoordinator)
         coordinator._symbol_operation_lock = MagicMock()
-        coordinator._loaded_symbols = {"AAPL", "RIVN"}
+        # NOTE: _loaded_symbols removed in Phase 4 - now tracked in SessionData
         coordinator._pending_symbols = {"TSLA"}
-        coordinator._generated_data = {"AAPL": ["5m", "15m"]}
-        coordinator._streamed_data = {"AAPL": ["1m"], "RIVN": ["1m"]}
+        # NOTE: _generated_data and _streamed_data removed in Phase 4 - now in SessionData
+        
+        # Mock SessionData to provide symbol information
+        coordinator.session_data = Mock()
+        coordinator.session_data.get_active_symbols = Mock(return_value={"AAPL", "RIVN"})
+        coordinator.session_data.get_symbols_with_derived = Mock(return_value={"AAPL": ["5m", "15m"]})
+        
+        # Mock symbol_data with proper bars structure
+        def get_mock_symbol_data(sym, internal=False):
+            if sym in ["AAPL", "RIVN"]:
+                mock_sym_data = Mock()
+                mock_sym_data.base_interval = "1m"
+                # Create proper bars dict with BarIntervalData-like mocks
+                mock_sym_data.bars = {
+                    "1m": Mock(derived=False),
+                    "5m": Mock(derived=True),
+                    "15m": Mock(derived=True)
+                }
+                return mock_sym_data
+            return None
+        
+        coordinator.session_data.get_symbol_data = Mock(side_effect=get_mock_symbol_data)
+        
         return coordinator
     
     def test_get_loaded_symbols(self, coordinator_with_state):
-        """get_loaded_symbols should return copy of loaded symbols."""
+        """get_loaded_symbols should return active symbols from SessionData."""
         coordinator = coordinator_with_state
         coordinator.get_loaded_symbols = SessionCoordinator.get_loaded_symbols.__get__(coordinator)
         
         loaded = coordinator.get_loaded_symbols()
         
         assert loaded == {"AAPL", "RIVN"}
-        assert loaded is not coordinator._loaded_symbols  # Should be a copy
+        # NOTE: Now returns from session_data.get_active_symbols()
     
     def test_get_pending_symbols(self, coordinator_with_state):
         """get_pending_symbols should return copy of pending symbols."""
@@ -248,24 +273,24 @@ class TestAccessorMethods:
         assert pending is not coordinator._pending_symbols  # Should be a copy
     
     def test_get_generated_data(self, coordinator_with_state):
-        """get_generated_data should return copy of generated data."""
+        """get_generated_data should return derived intervals from SessionData."""
         coordinator = coordinator_with_state
         coordinator.get_generated_data = SessionCoordinator.get_generated_data.__get__(coordinator)
         
         generated = coordinator.get_generated_data()
         
         assert generated == {"AAPL": ["5m", "15m"]}
-        assert generated is not coordinator._generated_data  # Should be a copy
+        # NOTE: Now returns from session_data.get_symbols_with_derived()
     
     def test_get_streamed_data(self, coordinator_with_state):
-        """get_streamed_data should return copy of streamed data."""
+        """get_streamed_data should return base intervals from SessionData."""
         coordinator = coordinator_with_state
         coordinator.get_streamed_data = SessionCoordinator.get_streamed_data.__get__(coordinator)
         
         streamed = coordinator.get_streamed_data()
         
         assert streamed == {"AAPL": ["1m"], "RIVN": ["1m"]}
-        assert streamed is not coordinator._streamed_data  # Should be a copy
+        # NOTE: Now constructed from session_data by checking base_interval
 
 
 @pytest.mark.integration

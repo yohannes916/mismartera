@@ -15,11 +15,11 @@ class SystemState(Enum):
     Values:
         STOPPED: System is not running
         RUNNING: System is actively running
-        PAUSED: System is paused (future use)
+        PAUSED: System is paused (backtest mode only)
     """
     STOPPED = "stopped"
     RUNNING = "running"
-    PAUSED = "paused"  # Future use
+    PAUSED = "paused"
 
 
 class OperationMode(Enum):

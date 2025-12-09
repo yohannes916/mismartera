@@ -1,0 +1,99 @@
+{
+  "session_name": "52-Week High/Low Example",
+  "exchange_group": "US_EQUITY",
+  "asset_class": "EQUITY",
+  "mode": "backtest",
+  
+  "backtest_config": {
+    "start_date": "2025-07-15",
+    "end_date": "2025-07-16",
+    "speed_multiplier": 0.0
+  },
+  
+  "session_data_config": {
+    "symbols": ["AAPL", "TSLA", "NVDA"],
+    
+    "streams": ["1m", "5m", "1d", "1w"],
+    
+    "streaming": {
+      "catchup_threshold_seconds": 60,
+      "catchup_check_interval": 10
+    },
+    
+    "historical": {
+      "enable_quality": true,
+      "data": [
+        {
+          "trailing_days": 365,
+          "intervals": ["1d", "1w"],
+          "apply_to": "all"
+        }
+      ]
+    },
+    
+    "gap_filler": {
+      "enable_session_quality": true,
+      "max_retries": 5,
+      "retry_interval_seconds": 60
+    },
+    
+    "indicators": {
+      "session": [
+        {
+          "name": "sma",
+          "period": 20,
+          "interval": "5m",
+          "type": "trend",
+          "comment": "20-period SMA on 5-minute bars"
+        },
+        {
+          "name": "rsi",
+          "period": 14,
+          "interval": "5m",
+          "type": "momentum",
+          "comment": "14-period RSI on 5-minute bars"
+        }
+      ],
+      
+      "historical": [
+        {
+          "name": "high_low",
+          "period": 52,
+          "unit": "weeks",
+          "interval": "1w",
+          "type": "historical",
+          "comment": "52-WEEK HIGH/LOW - Uses unified high_low indicator on weekly bars"
+        },
+        {
+          "name": "high_low",
+          "period": 20,
+          "unit": "days",
+          "interval": "1d",
+          "type": "historical",
+          "comment": "20-day high/low for comparison"
+        },
+        {
+          "name": "avg_volume",
+          "period": 10,
+          "unit": "days",
+          "interval": "1d",
+          "type": "historical",
+          "comment": "10-day average volume"
+        }
+      ]
+    }
+  },
+  
+  "trading_config": {
+    "max_buying_power": 100000,
+    "max_per_trade": 10000,
+    "max_per_symbol": 20000,
+    "max_open_positions": 5
+  },
+  
+  "api_config": {
+    "data_api": "alpaca",
+    "trade_api": "alpaca",
+    "account_id": null
+  }
+}

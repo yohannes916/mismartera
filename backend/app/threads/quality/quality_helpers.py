@@ -101,6 +101,15 @@ def parse_interval_to_minutes(
         
         return trading_minutes
     
+    elif interval.endswith("w"):
+        # Weekly bars: 5 trading days * 390 minutes/day
+        try:
+            weeks = int(interval[:-1])
+            return float(weeks * 5 * 390)  # Approximate: 5 trading days per week
+        except ValueError:
+            logger.warning(f"Cannot parse interval: {interval}")
+            return None
+    
     else:
         # Unknown format - try to parse as plain number (assume minutes)
         try:

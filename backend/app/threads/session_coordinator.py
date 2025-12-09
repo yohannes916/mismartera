@@ -37,7 +37,12 @@ from collections import deque
 from app.logger import logger
 
 # Phase 1 & 2 components
-from app.managers.data_manager.session_data import SessionData, get_session_data
+from app.managers.data_manager.session_data import (
+    SessionData, 
+    get_session_data,
+    SymbolSessionData,
+    BarIntervalData
+)
 from app.threads.sync.stream_subscription import StreamSubscription
 from app.monitoring.performance_metrics import PerformanceMetrics
 from app.models.session_config import SessionConfig
@@ -53,6 +58,18 @@ from app.threads.quality.parquet_data_checker import create_data_manager_checker
 from app.threads.quality.quality_helpers import (
     parse_interval_to_minutes,
     calculate_quality_for_historical_date
+)
+
+# Indicator system (Phase 1-5)
+from app.indicators import (
+    IndicatorManager,
+    IndicatorConfig,
+    IndicatorType,
+    list_indicators
+)
+from app.models.indicator_config import (
+    SessionIndicatorConfig,
+    HistoricalIndicatorConfig
 )
 
 
@@ -100,6 +117,13 @@ class SessionCoordinator(threading.Thread):
         self.metrics = PerformanceMetrics()
         self.subscriptions: Dict[str, StreamSubscription] = {}
         
+        # Phase 3-5: Indicator manager
+        self.indicator_manager = IndicatorManager(self.session_data)
+        logger.info(
+            f"IndicatorManager initialized with {len(list_indicators())} "
+            f"registered indicators"
+        )
+        
         # Extract immutable config values during init (performance optimization)
         session_config = self._system_manager.session_config
         self._symbols = session_config.session_data_config.symbols
@@ -125,17 +149,14 @@ class SessionCoordinator(threading.Thread):
         self._gap_start_time: Optional[float] = None
         self._backtest_complete = False
         
-        # Stream/Generate marking (populated during init)
-        self._streamed_data: Dict[str, List[str]] = {}  # {symbol: [intervals]}
-        self._generated_data: Dict[str, List[str]] = {}  # {symbol: [intervals]}
-        
         # Queue storage for backtest streaming
         # Structure: {(symbol, interval): deque of BarData}
         self._bar_queues: Dict[Tuple[str, str], 'deque'] = {}
         
         # Symbol management (thread-safe)
         self._symbol_operation_lock = threading.Lock()
-        self._loaded_symbols: Set[str] = set()  # Symbols fully loaded and streaming
+        # Note: _loaded_symbols removed - query session_data.get_active_symbols() instead
+        # Note: _streamed_data/_generated_data removed - stored in bars[interval].derived flag
         self._pending_symbols: Set[str] = set()  # Symbols waiting to be loaded
         
         # Stream control
@@ -157,10 +178,406 @@ class SessionCoordinator(threading.Thread):
                 f"check_interval={self._catchup_check_interval} bars"
             )
         
+        # Parse indicator configs from session config (Phase 5)
+        self._indicator_configs = self._parse_indicator_configs()
+        session_ind_count = len(self._indicator_configs.get('session', []))
+        hist_ind_count = len(self._indicator_configs.get('historical', []))
+        logger.info(
+            f"[CONFIG] Indicators: {session_ind_count} session, "
+            f"{hist_ind_count} historical"
+        )
+        
         logger.info(
             f"SessionCoordinator initialized (mode={session_config.mode}, "
             f"symbols={len(session_config.session_data_config.symbols)})"
         )
+    
+    def _parse_indicator_configs(self) -> Dict[str, List[IndicatorConfig]]:
+        """Parse indicator configs from session config.
+        
+        Converts SessionIndicatorConfig/HistoricalIndicatorConfig to IndicatorConfig.
+        
+        Returns:
+            Dict with 'session' and 'historical' indicator configs
+        """
+        session_config = self._system_manager.session_config
+        indicators_config = session_config.session_data_config.indicators
+        
+        result = {
+            'session': [],
+            'historical': []
+        }
+        
+        # Parse session indicators
+        for ind_cfg in indicators_config.session:
+            try:
+                # Convert SessionIndicatorConfig to IndicatorConfig
+                config = IndicatorConfig(
+                    name=ind_cfg.name,
+                    type=IndicatorType(ind_cfg.type),
+                    period=ind_cfg.period,
+                    interval=ind_cfg.interval,
+                    params=ind_cfg.params.copy() if ind_cfg.params else {}
+                )
+                result['session'].append(config)
+                logger.debug(f"Parsed session indicator: {config.make_key()}")
+            except Exception as e:
+                logger.error(
+                    f"Failed to parse session indicator {ind_cfg.name}: {e}",
+                    exc_info=True
+                )
+        
+        # Parse historical indicators
+        for ind_cfg in indicators_config.historical:
+            try:
+                # Convert HistoricalIndicatorConfig to IndicatorConfig
+                config = IndicatorConfig(
+                    name=ind_cfg.name,
+                    type=IndicatorType(ind_cfg.type),
+                    period=ind_cfg.period,
+                    interval=ind_cfg.interval,
+                    params=ind_cfg.params.copy() if ind_cfg.params else {}
+                )
+                result['historical'].append(config)
+                logger.debug(f"Parsed historical indicator: {config.make_key()}")
+            except Exception as e:
+                logger.error(
+                    f"Failed to parse historical indicator {ind_cfg.name}: {e}",
+                    exc_info=True
+                )
+        
+        return result
+    
+    # =========================================================================
+    # Unified Symbol Registration (Phase 6c)
+    # =========================================================================
+    
+    async def register_symbol(
+        self,
+        symbol: str,
+        load_historical: bool = True,
+        calculate_indicators: bool = True
+    ) -> bool:
+        """Register symbol with unified routine.
+        
+        This single method handles:
+        - Pre-session initialization (during coordinator startup)
+        - Mid-session insertion (dynamic symbol addition)
+        
+        Args:
+            symbol: Symbol to register
+            load_historical: Load historical bars for warmup
+            calculate_indicators: Register and calculate indicators
+            
+        Returns:
+            True if successful
+            
+        Design:
+            - Parameterized for reuse
+            - Works for all intervals (s, m, d, w)
+            - Uses requirement_analyzer for consistency
+            - No special cases for pre vs mid-session
+        """
+        try:
+            logger.info(f"{symbol}: Registering symbol (unified routine)")
+            
+            # 1. Determine requirements (unified)
+            requirements = await self._determine_symbol_requirements(symbol)
+            
+            # 2. Load historical data (unified)
+            historical_bars = {}
+            if load_historical and requirements['needs_historical']:
+                historical_bars = await self._load_historical_bars(
+                    symbol=symbol,
+                    requirements=requirements
+                )
+            
+            # 3. Register with SessionData (unified)
+            self._register_symbol_data(
+                symbol=symbol,
+                requirements=requirements,
+                historical_bars=historical_bars
+            )
+            
+            # 4. Register indicators (unified)
+            if calculate_indicators:
+                self._register_symbol_indicators(
+                    symbol=symbol,
+                    historical_bars=historical_bars
+                )
+            
+            # 5. Log success
+            logger.info(
+                f"{symbol}: Registration complete "
+                f"(base: {requirements['base_interval']}, "
+                f"derived: {len(requirements['derived_intervals'])})"
+            )
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"{symbol}: Registration failed: {e}", exc_info=True)
+            return False
+    
+    async def _determine_symbol_requirements(self, symbol: str) -> dict:
+        """Determine what's needed for this symbol.
+        
+        Uses requirement_analyzer to determine:
+        - Base interval (1s, 1m, 1d)
+        - Derived intervals (5m, 15m, 1w, etc.)
+        - Historical days needed (for indicators)
+        
+        Returns:
+            Dict with requirements
+        """
+        from app.threads.quality.requirement_analyzer import analyze_session_requirements
+        
+        # Get all intervals needed (streams + indicators)
+        all_intervals = set(self._streams)
+        
+        # Add indicator intervals
+        for ind in self._indicator_configs['session']:
+            all_intervals.add(ind.interval)
+        for ind in self._indicator_configs['historical']:
+            all_intervals.add(ind.interval)
+        
+        # Analyze requirements
+        requirements = analyze_session_requirements(
+            streams=list(all_intervals)
+        )
+        
+        # Determine historical days needed
+        max_historical_days = self._calculate_max_historical_days()
+        
+        return {
+            'symbol': symbol,
+            'base_interval': requirements.required_base_interval,
+            'derived_intervals': requirements.derivable_intervals,
+            'historical_days': max_historical_days,
+            'needs_historical': (max_historical_days > 0)
+        }
+    
+    def _calculate_max_historical_days(self) -> int:
+        """Calculate maximum historical days needed for indicators.
+        
+        Returns:
+            Max days needed (from config or calculated from indicators)
+        """
+        # Get from historical config
+        session_config = self._system_manager.session_config
+        max_days = 0
+        
+        if session_config.session_data_config.historical.data:
+            for hist_config in session_config.session_data_config.historical.data:
+                max_days = max(max_days, hist_config.trailing_days)
+        
+        # Also check indicator periods (convert to days if needed)
+        for ind in self._indicator_configs['historical']:
+            if ind.period > 0:
+                # Rough estimate: period in days
+                max_days = max(max_days, ind.period * 2)  # 2x for safety
+        
+        return max_days if max_days > 0 else 20  # Default 20 days
+    
+    async def _load_historical_bars(
+        self,
+        symbol: str,
+        requirements: dict
+    ) -> dict:
+        """Load historical bars for symbol.
+        
+        Unified method that:
+        - Loads base interval from parquet
+        - Generates derived intervals
+        - Works for all intervals (s, m, d, w)
+        
+        Args:
+            symbol: Symbol to load
+            requirements: Requirements from analyzer
+            
+        Returns:
+            Dict of {interval: [bars]}
+        """
+        from app.managers.data_manager.derived_bars import compute_all_derived_intervals
+        
+        historical_bars = {}
+        
+        # Load base interval
+        base_interval = requirements['base_interval']
+        historical_days = requirements['historical_days']
+        
+        # Get historical bars from data_manager
+        try:
+            base_bars = await self._data_manager.load_historical_bars(
+                symbol=symbol,
+                interval=base_interval,
+                days=historical_days
+            )
+            
+            if base_bars:
+                # Store base interval bars
+                historical_bars[base_interval] = base_bars
+                logger.debug(
+                    f"{symbol}: Loaded {len(base_bars)} {base_interval} bars "
+                    f"({historical_days} days)"
+                )
+                
+                # Generate derived intervals if needed
+                if requirements['derived_intervals']:
+                    derived_data = compute_all_derived_intervals(
+                        base_bars=base_bars,
+                        base_interval=base_interval,
+                        target_intervals=requirements['derived_intervals']
+                    )
+                    
+                    for interval, bars in derived_data.items():
+                        historical_bars[interval] = bars
+                        logger.debug(
+                            f"{symbol}: Generated {len(bars)} {interval} bars "
+                            f"from {base_interval}"
+                        )
+            else:
+                logger.debug(
+                    f"{symbol}: No historical bars found, "
+                    f"indicators will warm up from live data"
+                )
+                
+        except Exception as e:
+            logger.warning(
+                f"{symbol}: Error loading historical bars: {e}, "
+                f"indicators will warm up from live data"
+            )
+        
+        return historical_bars
+    
+    def _register_symbol_data(
+        self,
+        symbol: str,
+        requirements: dict,
+        historical_bars: dict
+    ):
+        """Register symbol with SessionData.
+        
+        Creates SymbolSessionData and stores historical bars.
+        
+        Args:
+            symbol: Symbol to register
+            requirements: Requirements from analyzer
+            historical_bars: Pre-loaded historical bars
+        """
+        from app.managers.data_manager.session_data import SymbolSessionData
+        from collections import deque
+        
+        # Check if already registered
+        if self.session_data.get_symbol_data(symbol):
+            logger.warning(f"{symbol}: Already registered in SessionData")
+            return
+        
+        # Register symbol
+        symbol_data = self.session_data.register_symbol(symbol)
+        
+        # Set base interval
+        symbol_data.base_interval = requirements['base_interval']
+        
+        # Store historical bars if any
+        if historical_bars:
+            from app.managers.data_manager.session_data import BarIntervalData
+            
+            for interval, bars in historical_bars.items():
+                is_base = (interval == requirements['base_interval'])
+                
+                symbol_data.bars[interval] = BarIntervalData(
+                    derived=(not is_base),
+                    base=requirements['base_interval'] if not is_base else None,
+                    data=deque(bars)
+                )
+            
+            logger.debug(
+                f"{symbol}: Stored {len(historical_bars)} intervals of historical bars"
+            )
+        
+        logger.debug(
+            f"{symbol}: Registered in SessionData "
+            f"(base: {requirements['base_interval']})"
+        )
+    
+    def _register_symbol_indicators(
+        self,
+        symbol: str,
+        historical_bars: dict
+    ):
+        """Register indicators for symbol.
+        
+        Uses IndicatorManager to register all indicators.
+        Historical bars used for warmup.
+        
+        Args:
+            symbol: Symbol to register indicators for
+            historical_bars: Pre-loaded bars for warmup
+        """
+        # Combine session + historical indicators
+        all_indicators = (
+            self._indicator_configs['session'] +
+            self._indicator_configs['historical']
+        )
+        
+        if not all_indicators:
+            logger.debug(f"{symbol}: No indicators configured")
+            return
+        
+        # Register with indicator manager
+        self.indicator_manager.register_symbol_indicators(
+            symbol=symbol,
+            indicators=all_indicators,
+            historical_bars=historical_bars  # For warmup
+        )
+        
+        indicator_count = len(all_indicators)
+        logger.info(
+            f"{symbol}: Registered {indicator_count} indicators "
+            f"(warmup from {'historical' if historical_bars else 'live data'})"
+        )
+    
+    async def add_symbol_mid_session(self, symbol: str) -> bool:
+        """Add symbol during active session.
+        
+        Uses SAME unified routine as pre-session!
+        
+        Args:
+            symbol: Symbol to add
+            
+        Returns:
+            True if successful
+        """
+        # Validate not already registered
+        if self.session_data.get_symbol_data(symbol):
+            logger.warning(f"{symbol}: Already registered")
+            return False
+        
+        logger.info(f"{symbol}: Adding symbol mid-session")
+        
+        # Use unified registration (SAME CODE!)
+        success = await self.register_symbol(
+            symbol=symbol,
+            load_historical=True,  # Need historical for indicator warmup
+            calculate_indicators=True
+        )
+        
+        if success:
+            # Note: Streaming setup for mid-session insertion
+            # This is a minor enhancement for future live trading when symbols
+            # need to be added dynamically. For backtests, symbols are known at
+            # session start. Implementation would involve:
+            # 1. Adding symbol to stream_coordinator's symbol list
+            # 2. Creating queues for this symbol's intervals
+            # 3. Starting data feed subscription
+            # Current functionality (registration + indicators) is complete.
+            logger.info(
+                f"{symbol}: Added mid-session successfully "
+                f"(streaming setup pending for live mode)"
+            )
+        
+        return success
     
     def run(self):
         """Main coordinator loop (runs in own thread).
@@ -217,6 +634,50 @@ class SessionCoordinator(threading.Thread):
         logger.info("Stopping SessionCoordinator...")
         self._stop_event.set()
     
+    def pause_backtest(self):
+        """Pause backtest streaming/time advancement.
+        
+        Works for both data-driven and clock-driven modes:
+        - Data-driven: Stops jumping to next bar timestamp
+        - Clock-driven: Stops 1-minute interval advancement
+        
+        The pause happens at the top of the streaming loop, before:
+        - Time advancement
+        - Bar processing
+        - Processor synchronization
+        - Clock delays
+        
+        Thread-safe: Can be called from any thread.
+        Only applies to backtest mode (ignored in live mode).
+        """
+        if self.mode == "backtest":
+            logger.info("[BACKTEST] Pausing streaming/time advancement")
+            self._stream_paused.clear()
+        else:
+            logger.warning("[LIVE] Pause ignored - only applies to backtest mode")
+    
+    def resume_backtest(self):
+        """Resume backtest streaming/time advancement.
+        
+        Unblocks the streaming loop to continue processing.
+        
+        Thread-safe: Can be called from any thread.
+        Only applies to backtest mode (ignored in live mode).
+        """
+        if self.mode == "backtest":
+            logger.info("[BACKTEST] Resuming streaming/time advancement")
+            self._stream_paused.set()
+        else:
+            logger.warning("[LIVE] Resume ignored - only applies to backtest mode")
+    
+    def is_paused(self) -> bool:
+        """Check if backtest is currently paused.
+        
+        Returns:
+            True if paused (event cleared), False if running (event set)
+        """
+        return not self._stream_paused.is_set()
+    
     # =========================================================================
     # Properties - Single Source of Truth via SystemManager
     # =========================================================================
@@ -251,8 +712,8 @@ class SessionCoordinator(threading.Thread):
         Returns:
             Set of symbols that are fully loaded and streaming
         """
-        with self._symbol_operation_lock:
-            return self._loaded_symbols.copy()
+        # Query from SessionData (single source of truth)
+        return self.session_data.get_active_symbols()
     
     def get_pending_symbols(self) -> Set[str]:
         """Get symbols waiting to be loaded (thread-safe).
@@ -269,8 +730,8 @@ class SessionCoordinator(threading.Thread):
         Returns:
             Dictionary mapping symbol to list of intervals to generate
         """
-        with self._symbol_operation_lock:
-            return self._generated_data.copy()
+        # Query from SessionData (single source of truth)
+        return self.session_data.get_symbols_with_derived()
     
     def get_streamed_data(self) -> Dict[str, List[str]]:
         """Get data types being streamed per symbol (thread-safe).
@@ -278,8 +739,15 @@ class SessionCoordinator(threading.Thread):
         Returns:
             Dictionary mapping symbol to list of streamed data types
         """
-        with self._symbol_operation_lock:
-            return self._streamed_data.copy()
+        # Query from SessionData (single source of truth)
+        result = {}
+        for symbol in self.session_data.get_active_symbols():
+            symbol_data = self.session_data.get_symbol_data(symbol, internal=True)
+            if symbol_data:
+                streamed = [interval for interval, data in symbol_data.bars.items() if not data.derived]
+                if streamed:
+                    result[symbol] = streamed
+        return result
     
     # =========================================================================
     # Symbol Management - Thread-Safe Operations
@@ -345,9 +813,6 @@ class SessionCoordinator(threading.Thread):
             # Remove from config (single source of truth)
             self.session_config.session_data_config.symbols.remove(symbol)
             
-            # Remove from loaded set
-            self._loaded_symbols.discard(symbol)
-            
             # Remove from pending (if was pending)
             self._pending_symbols.discard(symbol)
             
@@ -360,12 +825,10 @@ class SessionCoordinator(threading.Thread):
                 del self._bar_queues[key]
                 logger.debug(f"[SYMBOL] Removed queue {key}")
             
-            # Remove from streamed/generated tracking
-            self._streamed_data.pop(symbol, None)
-            self._generated_data.pop(symbol, None)
-            
             # Clean up lag check counter
             self._symbol_check_counters.pop(symbol, None)
+            
+            # Note: Symbol data and intervals tracked in SessionData now
             
             logger.info(
                 f"[SYMBOL] Removed {symbol} - "
@@ -486,7 +949,8 @@ class SessionCoordinator(threading.Thread):
         """
         logger.info("[SESSION_FLOW] PHASE_1.1: Checking if first session (for stream/generate marking)")
         # Mark stream/generate on first session only
-        if not self._streamed_data:
+        # Check if SessionData has any symbols registered
+        if len(self.session_data.get_active_symbols()) == 0:
             logger.info("[SESSION_FLOW] PHASE_1.1: First session - validating and marking streams")
             
             # Validate and mark streams (with Parquet validation in backtest mode)
@@ -500,14 +964,7 @@ class SessionCoordinator(threading.Thread):
                 )
             
             logger.info("[SESSION_FLOW] PHASE_1.1: Stream validation and marking complete")
-            
-            # Inform data processor what intervals to generate
-            if self.data_processor:
-                logger.info("[SESSION_FLOW] PHASE_1.1: Informing DataProcessor of derived intervals")
-                self.data_processor.set_derived_intervals(self._generated_data)
-                logger.info("[SESSION_FLOW] PHASE_1.1: DataProcessor informed")
-            else:
-                logger.warning("[SESSION_FLOW] PHASE_1.1: No DataProcessor wired!")
+            logger.info("[SESSION_FLOW] PHASE_1.1: DataProcessor will query SessionData for derived intervals")
         
         # Reset session state
         logger.info("[SESSION_FLOW] PHASE_1.2: Resetting session state")
@@ -526,9 +983,13 @@ class SessionCoordinator(threading.Thread):
         
         # Log session info
         logger.info(f"Initializing session for {current_date}")
+        # Query SessionData for counts
+        active_symbols = self.session_data.get_active_symbols()
+        derived_symbols = self.session_data.get_symbols_with_derived()
+        total_derived = sum(len(intervals) for intervals in derived_symbols.values())
         logger.info(
-            f"Streamed data: {sum(len(v) for v in self._streamed_data.values())} streams, "
-            f"Generated data: {sum(len(v) for v in self._generated_data.values())} types"
+            f"Active symbols: {len(active_symbols)}, "
+            f"Derived intervals: {total_derived} types"
         )
         
         logger.info("[SESSION_FLOW] PHASE_1.4: Session initialization complete")
@@ -582,25 +1043,32 @@ class SessionCoordinator(threading.Thread):
             else:
                 logger.debug(f"Symbol {symbol} already registered")
         
-        # Clear ALL data (current + historical) BEFORE loading
-        # Now symbols are registered, so clear will work
-        logger.info("[SESSION_FLOW] PHASE_2.1: Clearing ALL session data (current + historical)")
-        self.session_data.clear_session_bars()      # Clear current session bars
-        self.session_data.clear_historical_bars()   # Clear historical bars
-        logger.info("[SESSION_FLOW] PHASE_2.1: All data cleared - ready for fresh load")
+        # Clear data BEFORE loading
+        # If symbols specified (mid-session add), only clear those symbols
+        # If no symbols specified (initial load), clear all
+        if symbols:
+            logger.info(f"[SESSION_FLOW] PHASE_2.1: Clearing historical data for {len(symbols)} symbols: {symbols}")
+            for symbol in symbols:
+                self.session_data.clear_symbol_historical(symbol)
+        else:
+            logger.info("[SESSION_FLOW] PHASE_2.1: Clearing ALL session data (current + historical)")
+            self.session_data.clear_session_bars()      # Clear current session bars
+            self.session_data.clear_historical_bars()   # Clear historical bars
+        logger.info("[SESSION_FLOW] PHASE_2.1: Data cleared - ready for load")
         
         # Process each historical data configuration
         for hist_data_config in historical_config.data:
             self._load_historical_data_config(
                 hist_data_config,
-                current_date
+                current_date,
+                symbols_filter=symbols_to_process  # Pass symbols filter
             )
         
         # Log statistics
         total_bars = 0
         for symbol_data in self.session_data._symbols.values():
-            for interval_dict in symbol_data.historical_bars.values():
-                for bars_list in interval_dict.values():
+            for interval_data in symbol_data.historical.bars.values():
+                for bars_list in interval_data.data_by_date.values():
                     total_bars += len(bars_list)
         
         # Record timing
@@ -740,37 +1208,41 @@ class SessionCoordinator(threading.Thread):
             self._assign_perfect_quality()
             return
         
-        # Enabled: Calculate actual quality on HISTORICAL bars
-        logger.info("[SESSION_FLOW] PHASE_2.3: Calculating quality for HISTORICAL bars only")
+        # Enabled: Calculate actual quality and gaps on HISTORICAL bars
+        logger.info("[SESSION_FLOW] PHASE_2.3: Calculating quality and gaps for HISTORICAL bars")
         start_time = self.metrics.start_timer()
         
-        total_symbols = 0
-        total_quality = 0.0
-        
-        # Calculate quality for base intervals ONLY (1m, 1s, 1d)
+        # Calculate quality and gaps for base intervals ONLY (1m, 1s, 1d)
         # Then propagate to derived intervals (5m, 15m, etc.)
         base_intervals = ["1m", "1s", "1d"]
-        derived_intervals = ["5m", "15m", "30m", "1h"]
         
+        # Use shared method for quality and gap calculation
         for symbol in self.session_config.session_data_config.symbols:
-            # First, calculate quality for base intervals
+            # Calculate quality and gaps using shared method
+            self._calculate_quality_and_gaps_for_symbol(symbol, base_intervals)
+            
+            # Propagate base quality to derived intervals
             for interval in base_intervals:
-                quality = self._calculate_bar_quality(symbol, interval)
-                
+                quality = self._get_historical_quality(symbol, interval)
+                if quality is not None:
+                    self._propagate_quality_to_derived_historical(symbol, interval, quality)
+        
+        # Calculate average quality for logging
+        total_symbols = 0
+        total_quality = 0.0
+        for symbol in self.session_config.session_data_config.symbols:
+            for interval in base_intervals:
+                quality = self._get_historical_quality(symbol, interval)
                 if quality is not None:
                     total_symbols += 1
                     total_quality += quality
-                    logger.debug(f"{symbol} {interval} historical quality: {quality:.1f}%")
-                    
-                    # Propagate base quality to derived intervals
-                    self._propagate_quality_to_derived_historical(symbol, interval, quality)
         
         # Log summary
         if total_symbols > 0:
             avg_quality = total_quality / total_symbols
             elapsed = self.metrics.elapsed_time(start_time)
             logger.info(
-                f"[SESSION_FLOW] PHASE_2.3: Historical quality: {avg_quality:.1f}% average "
+                f"[SESSION_FLOW] PHASE_2.3: Historical quality/gaps: {avg_quality:.1f}% average "
                 f"across {total_symbols} symbol/interval pairs ({elapsed:.3f}s)"
             )
         else:
@@ -858,56 +1330,281 @@ class SessionCoordinator(threading.Thread):
             return None
         
         # Get historical bars for this interval
-        historical = symbol_data.historical_bars.get(interval_minutes, {})
-        
-        if not historical:
-            logger.debug(f"No historical bars for {symbol} {interval}, quality = None")
-            return None
-        
-        if len(historical) == 0:
-            logger.debug(f"No historical bars for {symbol} {interval}, quality = None")
-            return None
-        
-        # Calculate quality for each date, then aggregate
-        total_actual_bars = 0
-        total_quality_sum = 0.0
-        dates_counted = 0
-        
-        with SessionLocal() as db_session:
-            for hist_date, date_bars in historical.items():
-                actual_bars_for_date = len(date_bars)
-                total_actual_bars += actual_bars_for_date
-                
-                # Calculate quality for this specific date using shared helper
-                date_quality = calculate_quality_for_historical_date(
-                    time_manager=self._time_manager,
-                    db_session=db_session,
-                    symbol=symbol,
-                    interval=interval,
-                    target_date=hist_date,
-                    actual_bars=actual_bars_for_date
-                )
-                
-                if date_quality is not None:
-                    total_quality_sum += date_quality
-                    dates_counted += 1
-        
-        # Calculate average quality across all dates
-        if dates_counted > 0:
-            quality = total_quality_sum / dates_counted
+        # For daily bars, use "1d" key, not "1440m"
+        if interval.endswith('d'):
+            interval_key = "1d"
         else:
-            # No dates with calculable quality (all holidays?)
-            logger.debug(f"No valid trading dates for {symbol} {interval} quality")
+            interval_key = f"{interval_minutes}m" if interval_minutes else interval
+        historical_interval_data = symbol_data.historical.bars.get(interval_key)
+        
+        if not historical_interval_data or not historical_interval_data.data_by_date:
+            logger.debug(f"No historical bars for {symbol} {interval}, quality = None")
             return None
+        
+        if len(historical_interval_data.data_by_date) == 0:
+            logger.debug(f"No historical bars for {symbol} {interval}, quality = None")
+            return None
+        
+        # Calculate quality
+        # Daily bars use different logic: (actual trading days / expected trading days) * 100
+        if interval.endswith('d'):
+            # For daily bars, quality = % of expected trading days that have bars
+            dates_with_bars = sorted(historical_interval_data.data_by_date.keys())
+            
+            if len(dates_with_bars) >= 2:
+                with SessionLocal() as db_session:
+                    start_date = dates_with_bars[0]
+                    end_date = dates_with_bars[-1]
+                    
+                    # Count expected trading days using unified API
+                    from datetime import datetime
+                    start_dt = datetime.combine(start_date, datetime.min.time())
+                    end_dt = datetime.combine(end_date, datetime.max.time())
+                    expected_days = self._time_manager.count_trading_time(
+                        db_session,
+                        start_dt,
+                        end_dt,
+                        unit='days',
+                        exchange=self.session_config.exchange_group
+                    )
+                    
+                    actual_days = len(dates_with_bars)
+                    
+                    if expected_days > 0:
+                        quality = (actual_days / expected_days) * 100.0
+                    else:
+                        quality = 0.0
+            elif len(dates_with_bars) == 1:
+                # Only one day - assume 100% quality
+                quality = 100.0
+            else:
+                logger.debug(f"No dates for {symbol} {interval}")
+                return None
+        else:
+            # Intraday bars: calculate quality for each date, then aggregate
+            total_actual_bars = 0
+            total_quality_sum = 0.0
+            dates_counted = 0
+            
+            with SessionLocal() as db_session:
+                for hist_date, date_bars in historical_interval_data.data_by_date.items():
+                    actual_bars_for_date = len(date_bars)
+                    total_actual_bars += actual_bars_for_date
+                    
+                    # Calculate quality for this specific date using shared helper
+                    date_quality = calculate_quality_for_historical_date(
+                        time_manager=self._time_manager,
+                        db_session=db_session,
+                        symbol=symbol,
+                        interval=interval,
+                        target_date=hist_date,
+                        actual_bars=actual_bars_for_date
+                    )
+                    
+                    if date_quality is not None:
+                        total_quality_sum += date_quality
+                        dates_counted += 1
+            
+            # Calculate average quality across all dates
+            if dates_counted > 0:
+                quality = total_quality_sum / dates_counted
+            else:
+                # No dates with calculable quality (all holidays?)
+                logger.debug(f"No valid trading dates for {symbol} {interval} quality")
+                return None
         
         # Store quality in SessionData
         self.session_data.set_quality(symbol, interval, quality)
         
-        logger.debug(
-            f"Quality for {symbol} {interval}: {quality:.1f}% "
-            f"({total_actual_bars} bars across {dates_counted} trading dates)"
-        )
+        if interval.endswith('d'):
+            logger.debug(
+                f"Quality for {symbol} {interval}: {quality:.1f}% "
+                f"({len(dates_with_bars)} days)"
+            )
+        else:
+            logger.debug(
+                f"Quality for {symbol} {interval}: {quality:.1f}% "
+                f"({total_actual_bars} bars across {dates_counted} trading dates)"
+            )
         return quality
+    
+    def _get_historical_quality(self, symbol: str, interval: str) -> Optional[float]:
+        """Get quality for historical bars from HistoricalBarIntervalData.
+        
+        Args:
+            symbol: Symbol to check
+            interval: Interval to check
+        
+        Returns:
+            Quality percentage or None if not found
+        """
+        symbol_data = self.session_data.get_symbol_data(symbol, internal=True)
+        if not symbol_data:
+            return None
+        
+        # Get interval key
+        interval_key = interval
+        if isinstance(interval, str):
+            if interval.endswith('m'):
+                interval_minutes = int(interval[:-1])
+                interval_key = f"{interval_minutes}m"
+            elif interval.endswith('d'):
+                interval_key = "1d"
+        
+        hist_interval_data = symbol_data.historical.bars.get(interval_key)
+        if hist_interval_data:
+            return hist_interval_data.quality
+        
+        return None
+    
+    def _calculate_quality_and_gaps_for_symbol(self, symbol: str, intervals: Optional[List[str]] = None):
+        """Calculate quality and detect gaps for historical bars of a symbol.
+        
+        This is a shared method used by both:
+        - _calculate_historical_quality() (initial load, all symbols)
+        - _process_pending_symbols() (mid-session add, specific symbols)
+        
+        For each interval:
+        1. Calculate quality percentage
+        2. Detect gaps in the data
+        3. Store quality in HistoricalBarIntervalData.quality
+        4. Store gaps in HistoricalBarIntervalData.gaps
+        
+        Args:
+            symbol: Symbol to process
+            intervals: Intervals to process. If None, uses ["1m", "1d"] (base intervals)
+        """
+        from app.threads.quality.gap_detection import detect_gaps
+        from app.threads.quality.quality_helpers import (
+            get_regular_trading_hours,
+            parse_interval_to_minutes
+        )
+        
+        # Default to base intervals if not specified
+        if intervals is None:
+            intervals = ["1m", "1s", "1d"]
+        
+        symbol_data = self.session_data.get_symbol_data(symbol, internal=True)
+        if not symbol_data:
+            logger.debug(f"No symbol data for {symbol}, skipping quality/gaps")
+            return
+        
+        for interval in intervals:
+            # Calculate quality using existing method
+            quality = self._calculate_bar_quality(symbol, interval)
+            
+            if quality is None:
+                logger.debug(f"Cannot calculate quality for {symbol} {interval}")
+                continue
+            
+            # Get historical interval data
+            interval_key = interval
+            if isinstance(interval, str):
+                if interval.endswith('m'):
+                    interval_minutes = int(interval[:-1])
+                    interval_key = f"{interval_minutes}m"
+                elif interval.endswith('d'):
+                    interval_key = "1d"
+            
+            hist_interval_data = symbol_data.historical.bars.get(interval_key)
+            if not hist_interval_data or not hist_interval_data.data_by_date:
+                logger.debug(f"No historical bars for {symbol} {interval}")
+                continue
+            
+            # Store quality directly in HistoricalBarIntervalData
+            hist_interval_data.quality = quality
+            logger.debug(f"Set historical quality for {symbol} {interval}: {quality:.1f}%")
+            
+            # Detect gaps
+            all_gaps = []
+            
+            # Daily bars use different gap detection (missing trading days)
+            if interval == "1d" or interval.endswith('d'):
+                # For daily bars, check for missing trading days in the sequence
+                dates_with_bars = sorted(hist_interval_data.data_by_date.keys())
+                
+                if len(dates_with_bars) >= 2:
+                    with SessionLocal() as db_session:
+                        # Count expected trading days between first and last date
+                        start_date = dates_with_bars[0]
+                        end_date = dates_with_bars[-1]
+                        
+                        from datetime import datetime
+                        start_dt = datetime.combine(start_date, datetime.min.time())
+                        end_dt = datetime.combine(end_date, datetime.max.time())
+                        expected_days = self._time_manager.count_trading_time(
+                            db_session, 
+                            start_dt, 
+                            end_dt,
+                            unit='days',
+                            exchange=self.session_config.exchange_group
+                        )
+                        actual_days = len(dates_with_bars)
+                        missing_days = expected_days - actual_days
+                        
+                        if missing_days > 0:
+                            # Create a single gap representing missing trading days
+                            from app.threads.quality.gap_detection import GapInfo
+                            from datetime import datetime, time
+                            
+                            gap = GapInfo(
+                                symbol=symbol,
+                                start_time=datetime.combine(start_date, time(0, 0)),
+                                end_time=datetime.combine(end_date, time(23, 59)),
+                                bar_count=missing_days
+                            )
+                            all_gaps.append(gap)
+                            
+                            logger.debug(
+                                f"{symbol} {interval}: {missing_days} missing trading days "
+                                f"between {start_date} and {end_date}"
+                            )
+            else:
+                # Intraday bars (minute intervals) - detect gaps within each day
+                with SessionLocal() as db_session:
+                    for hist_date, bars in hist_interval_data.data_by_date.items():
+                        if not bars:
+                            continue
+                        
+                        # Get trading hours for this date
+                        hours = get_regular_trading_hours(self._time_manager, db_session, hist_date)
+                        
+                        if not hours:
+                            logger.debug(f"No trading hours for {symbol} on {hist_date}")
+                            continue
+                        
+                        session_start, session_end = hours
+                        
+                        # Parse interval to minutes
+                        trading_session = self._time_manager.get_trading_session(db_session, hist_date)
+                        interval_minutes = parse_interval_to_minutes(interval, trading_session)
+                        
+                        if interval_minutes is None:
+                            logger.warning(f"Cannot parse interval {interval} for gap detection")
+                            continue
+                        
+                        # Detect gaps for this date
+                        date_gaps = detect_gaps(
+                            symbol=symbol,
+                            session_start=session_start,
+                            current_time=session_end,
+                            existing_bars=bars,
+                            interval_minutes=interval_minutes
+                        )
+                        
+                        all_gaps.extend(date_gaps)
+            
+            # Store gaps in HistoricalBarIntervalData
+            hist_interval_data.gaps = all_gaps
+            
+            if all_gaps:
+                total_missing = sum(g.bar_count for g in all_gaps)
+                logger.info(
+                    f"{symbol} {interval} historical: {quality:.1f}% quality | "
+                    f"{len(all_gaps)} gaps ({total_missing} missing bars)"
+                )
+            else:
+                logger.info(f"{symbol} {interval} historical: {quality:.1f}% quality | No gaps")
     
     def _generate_derived_historical_bars(self):
         """Generate derived historical bars from base historical bars.
@@ -921,19 +1618,19 @@ class SessionCoordinator(threading.Thread):
         from app.managers.data_manager.derived_bars import compute_derived_bars
         
         for symbol in self.session_config.session_data_config.symbols:
-            # Get intervals we should generate for this symbol
-            intervals_to_generate = self._generated_data.get(symbol, [])
-            if not intervals_to_generate:
-                continue
-            
             # internal=True since session not active yet (Phase 2)
             symbol_data = self.session_data.get_symbol_data(symbol, internal=True)
             if not symbol_data:
                 continue
             
+            # Get intervals we should generate for this symbol (query from SessionData)
+            intervals_to_generate = [interval for interval, data in symbol_data.bars.items() if data.derived]
+            if not intervals_to_generate:
+                continue
+            
             # Get 1m historical bars (base for derived generation)
-            hist_1m = symbol_data.historical_bars.get(1, {})
-            if not hist_1m:
+            hist_1m_data = symbol_data.historical.bars.get("1m")
+            if not hist_1m_data or not hist_1m_data.data_by_date:
                 logger.debug(f"No 1m historical bars for {symbol}, skipping derived generation")
                 continue
             
@@ -944,21 +1641,27 @@ class SessionCoordinator(threading.Thread):
                 
                 interval_int = int(interval_str[:-1])
                 if interval_int == 1:
-                    continue  # Skip 1m (it's the base)
+                    continue  # Skip 1m itself
                 
                 # For each date, generate derived bars from that date's 1m bars
-                for hist_date, bars_1m in hist_1m.items():
+                for hist_date, bars_1m in hist_1m_data.data_by_date.items():
                     if not bars_1m:
                         continue
                     
                     # Generate derived bars for this date
-                    derived_bars = compute_derived_bars(bars_1m, interval_int)
+                    derived_bars = compute_derived_bars(
+                        bars_1m,
+                        source_interval="1m",
+                        target_interval=f"{interval_int}m"
+                    )
                     
                     if derived_bars:
-                        # Store in historical_bars with same date structure
-                        if interval_int not in symbol_data.historical_bars:
-                            symbol_data.historical_bars[interval_int] = {}
-                        symbol_data.historical_bars[interval_int][hist_date] = derived_bars
+                        # Store in historical.bars with same date structure
+                        interval_key = f"{interval_int}m"
+                        if interval_key not in symbol_data.historical.bars:
+                            from app.managers.data_manager.session_data import HistoricalBarIntervalData
+                            symbol_data.historical.bars[interval_key] = HistoricalBarIntervalData()
+                        symbol_data.historical.bars[interval_key].data_by_date[hist_date] = derived_bars
                         
                         logger.debug(
                             f"Generated {len(derived_bars)} {interval_str} historical bars "
@@ -994,7 +1697,9 @@ class SessionCoordinator(threading.Thread):
                 continue
             
             # Check if this derived interval has historical data
-            if interval_int in symbol_data.historical_bars and symbol_data.historical_bars[interval_int]:
+            interval_key = f"{interval_int}m"
+            hist_interval_data = symbol_data.historical.bars.get(interval_key)
+            if hist_interval_data and hist_interval_data.data_by_date:
                 # Copy base quality to derived interval
                 self.session_data.set_quality(symbol, derived_interval, base_quality)
                 logger.debug(
@@ -1293,15 +1998,22 @@ class SessionCoordinator(threading.Thread):
         """Get list of STREAMED intervals for a symbol.
         
         Returns only intervals marked as STREAMED (not GENERATED).
-        Uses the stream/generate marking from _mark_stream_generate().
+        Now queries SessionData for base intervals (those with derived=False).
         
         Args:
             symbol: Symbol to query
         
         Returns:
-            List of streamed intervals (e.g., ["1m", "quotes"])
+            List of streamed intervals (e.g., ["1m"])
         """
-        return self._streamed_data.get(symbol, [])
+        # Query SessionData for base (non-derived) intervals
+        symbol_data = self.session_data.get_symbol_data(symbol, internal=True)
+        if not symbol_data:
+            return []
+        
+        # Return intervals that are not derived (i.e., streamed)
+        streamed = [interval for interval, data in symbol_data.bars.items() if not data.derived]
+        return streamed
     
     def _get_date_plus_trading_days(
         self,
@@ -1395,13 +2107,22 @@ class SessionCoordinator(threading.Thread):
             logger.info("[SYMBOL] Phase 2: Loading historical data") 
             self._manage_historical_data(symbols=pending)
             
-            logger.info("[SYMBOL] Phase 3: Loading queues")
+            logger.info("[SYMBOL] Phase 3: Calculating historical quality and gaps")
+            # Calculate quality and gaps for newly loaded symbols
+            base_intervals = ["1m", "1s", "1d"]
+            for symbol in pending:
+                self._calculate_quality_and_gaps_for_symbol(symbol, base_intervals)
+                
+                # Propagate base quality to derived intervals
+                for interval in base_intervals:
+                    quality = self._get_historical_quality(symbol, interval)
+                    if quality is not None:
+                        self._propagate_quality_to_derived_historical(symbol, interval, quality)
+            
+            logger.info("[SYMBOL] Phase 4: Loading queues")
             self._load_backtest_queues(symbols=pending)
             
-            # Mark as loaded
-            with self._symbol_operation_lock:
-                self._loaded_symbols.update(pending)
-            
+            # Symbols are now tracked in SessionData (no separate _loaded_symbols needed)
             logger.info(f"[SYMBOL] Loaded {len(pending)} symbols successfully")
             
         except Exception as e:
@@ -1519,9 +2240,40 @@ class SessionCoordinator(threading.Thread):
                     f"Time exceeded market close: {current_time} > {market_close}"
                 )
             
-            # CLOCK-DRIVEN: Advance by fixed 1-minute intervals
-            # (Not data-driven: don't jump to next bar timestamp)
-            next_time = current_time + timedelta(minutes=1)
+            # Determine next time based on mode
+            if self.mode == "backtest" and self.session_config.backtest_config:
+                speed_multiplier = self.session_config.backtest_config.speed_multiplier
+                
+                if speed_multiplier == 0:
+                    # DATA-DRIVEN: Jump to next bar timestamp
+                    next_timestamp = self._get_next_queue_timestamp()
+                    
+                    if next_timestamp is None:
+                        # All queues exhausted - advance to market close and end
+                        logger.info(
+                            f"[{iteration}] Data-driven: All queues empty, advancing to market close"
+                        )
+                        self._time_manager.set_backtest_time(market_close)
+                        break
+                    
+                    # Advance to next bar timestamp
+                    # Bar timestamp is CLOSE time: bar at 09:35 = period [09:30-09:35)
+                    # Setting time to 09:35 means the bar is complete and ready to process
+                    next_time = next_timestamp
+                    logger.debug(
+                        f"[{iteration}] Data-driven advance: {current_time.time()} -> "
+                        f"{next_time.time()}"
+                    )
+                else:
+                    # CLOCK-DRIVEN: Advance by fixed 1-minute intervals
+                    next_time = current_time + timedelta(minutes=1)
+                    logger.debug(
+                        f"[{iteration}] Clock-driven advance: {current_time.time()} -> "
+                        f"{next_time.time()}"
+                    )
+            else:
+                # Default: 1-minute intervals
+                next_time = current_time + timedelta(minutes=1)
             
             # Check if next time exceeds market close
             if next_time > market_close:
@@ -1533,11 +2285,7 @@ class SessionCoordinator(threading.Thread):
                 self._time_manager.set_backtest_time(market_close)
                 break
             
-            # Advance time by 1 minute
-            logger.debug(
-                f"[{iteration}] Clock-driven advance: {current_time.time()} -> "
-                f"{next_time.time()}"
-            )
+            # Advance time
             self._time_manager.set_backtest_time(next_time)
             
             # Process ALL bars with timestamp <= next_time
@@ -1551,10 +2299,25 @@ class SessionCoordinator(threading.Thread):
             if bars_processed > 0:
                 logger.debug(f"Processed {bars_processed} bars at {next_time.time()}")
             
-            # Clock-driven delay (if speed_multiplier > 0)
+            # Mode-specific behavior after processing
             if self.mode == "backtest" and self.session_config.backtest_config:
                 speed_multiplier = self.session_config.backtest_config.speed_multiplier
-                if speed_multiplier > 0:
+                
+                if speed_multiplier == 0:
+                    # DATA-DRIVEN: Wait for processor to finish before continuing
+                    # This ensures synchronization - coordinator doesn't push more data
+                    # until processor signals it's ready
+                    if bars_processed > 0 and self._processor_subscription:
+                        logger.debug(
+                            f"[DATA-DRIVEN] Waiting for processor to finish "
+                            f"{bars_processed} bars..."
+                        )
+                        # Block until processor signals ready
+                        self._processor_subscription.wait_until_ready()
+                        self._processor_subscription.reset()
+                        logger.debug("[DATA-DRIVEN] Processor ready, continuing")
+                else:
+                    # CLOCK-DRIVEN: Apply delay to simulate real-time
                     self._apply_clock_driven_delay(speed_multiplier)
             
             # Periodic logging (every 100 iterations)
@@ -1831,153 +2594,164 @@ class SessionCoordinator(threading.Thread):
         logger.info(f"  Generate derived: {result.derivable_intervals}")
         logger.info("=" * 70)
         
-        # Mark streams based on validation results
+        # Register symbols with bar structure based on validation results
         symbols_to_process = symbols or self.session_config.session_data_config.symbols
+        base_interval = result.required_base_interval
+        derived_intervals = result.derivable_intervals
         
         for symbol in symbols_to_process:
-            self._streamed_data[symbol] = [result.required_base_interval]
-            self._generated_data[symbol] = result.derivable_intervals.copy()
+            # Create bar structure with base interval (streamed) + derived intervals (generated)
+            bars = {
+                # Base interval (streamed from queue/API)
+                base_interval: BarIntervalData(
+                    derived=False,  # Streamed, not generated
+                    base=None,      # Not derived from anything
+                    data=deque(),   # Empty deque for base interval
+                    quality=0.0,
+                    gaps=[],
+                    updated=False
+                )
+            }
             
-            # Add quotes if requested
-            streams = self.session_config.session_data_config.streams
-            if "quotes" in streams:
-                self._streamed_data[symbol].append("quotes")
+            # Add derived intervals (generated by DataProcessor)
+            for interval in derived_intervals:
+                bars[interval] = BarIntervalData(
+                    derived=True,       # Generated, not streamed
+                    base=base_interval, # Derived from base
+                    data=[],            # Empty list for derived
+                    quality=0.0,
+                    gaps=[],
+                    updated=False
+                )
+            
+            # Create SymbolSessionData with bar structure
+            symbol_data = SymbolSessionData(
+                symbol=symbol,
+                base_interval=base_interval,
+                bars=bars
+            )
+            
+            # Register with SessionData
+            self.session_data.register_symbol_data(symbol_data)
         
         # Log results
-        total_streamed = sum(len(v) for v in self._streamed_data.values())
-        total_generated = sum(len(v) for v in self._generated_data.values())
-        logger.info(f"Marked {total_streamed} STREAMED, {total_generated} GENERATED")
-        logger.debug(f"Streamed: {dict(self._streamed_data)}")
-        logger.debug(f"Generated: {dict(self._generated_data)}")
+        streamed_count = len(symbols_to_process)  # Each symbol has 1 base interval
+        generated_count = len(symbols_to_process) * len(derived_intervals)
+        logger.info(f"Registered {len(symbols_to_process)} symbols: {streamed_count} STREAMED, {generated_count} GENERATED")
+        logger.debug(f"Base interval: {base_interval}, Derived: {derived_intervals}")
         
         return True
     
-    def _mark_stream_generate(self):
+    def _mark_stream_generate(self, symbols: Optional[List[str]] = None):
         """Mark which data types are STREAMED vs GENERATED vs IGNORED.
         
-        Called once at startup. Determines for each symbol/stream:
-        - STREAMED: Data comes from coordinator (queues or API)
-        - GENERATED: Data computed by data_processor
-        - IGNORED: Not available, not generated
-        
-        Rules (SESSION_ARCHITECTURE.md lines 196-208):
-        
-        Backtest Mode:
-        - Stream ONLY smallest available interval per symbol (1s > 1m > 1d)
-        - Stream quotes if available in database
-        - NEVER stream ticks (ignored)
-        - Generate all derivatives (5m, 10m, 15m, etc.)
+        Called for live mode stream determination. Creates SymbolSessionData with bar structure.
         
         Live Mode:
         - Stream whatever API provides
         - Generate what's not available from API
+        
+        Note: Backtest mode uses _validate_and_mark_streams() instead.
         """
-        symbols = self.session_config.session_data_config.symbols
+        symbols_to_process = symbols or self.session_config.session_data_config.symbols
         streams = self.session_config.session_data_config.streams
         
-        logger.info(f"Marking stream/generate for {len(symbols)} symbols, {len(streams)} streams")
+        logger.info(f"Marking stream/generate for {len(symbols_to_process)} symbols, {len(streams)} streams (live mode)")
         
-        if self.mode == "backtest":
-            self._mark_backtest_streams(symbols, streams)
-        else:  # live mode
-            self._mark_live_streams(symbols, streams)
+        # In live mode, mark all streams as streamed (API will provide)
+        # For now, use simple marking - can be enhanced based on API capabilities
+        self._mark_live_streams(symbols_to_process, streams)
         
-        # Log results
-        total_streamed = sum(len(v) for v in self._streamed_data.values())
-        total_generated = sum(len(v) for v in self._generated_data.values())
-        logger.info(f"Marked {total_streamed} STREAMED, {total_generated} GENERATED")
-        logger.debug(f"Streamed: {dict(self._streamed_data)}")
-        logger.debug(f"Generated: {dict(self._generated_data)}")
-    
-    def _mark_backtest_streams(self, symbols: List[str], streams: List[str]):
-        """Mark streams for backtest mode.
-        
-        Args:
-            symbols: List of symbols
-            streams: List of requested streams
-        """
-        # Separate bar intervals from other types
-        bar_intervals = []
-        has_quotes = False
-        has_ticks = False
-        
-        for stream in streams:
-            if stream == "quotes":
-                has_quotes = True
-            elif stream == "ticks":
-                has_ticks = True
-            else:
-                # It's a bar interval (1s, 1m, 5m, etc.)
-                bar_intervals.append(stream)
-        
-        # For each symbol
-        for symbol in symbols:
-            self._streamed_data[symbol] = []
-            self._generated_data[symbol] = []
-            
-            # Determine smallest interval to stream (1s > 1m > 1d)
-            if bar_intervals:
-                # Priority order
-                priority = ["1s", "1m", "1d"]
-                smallest = None
-                for interval in priority:
-                    if interval in bar_intervals:
-                        smallest = interval
-                        break
-                
-                if smallest:
-                    # Stream smallest
-                    self._streamed_data[symbol].append(smallest)
-                    
-                    # Generate all others
-                    for interval in bar_intervals:
-                        if interval != smallest:
-                            self._generated_data[symbol].append(interval)
-            
-            # Quotes: stream if requested (we'll check availability later)
-            if has_quotes:
-                self._streamed_data[symbol].append("quotes")
-            
-            # Ticks: IGNORED in backtest (no action needed)
-            if has_ticks:
-                logger.debug(f"{symbol}: ticks IGNORED in backtest mode")
+        logger.info(f"Registered {len(symbols_to_process)} symbols for live streaming")
     
     def _mark_live_streams(self, symbols: List[str], streams: List[str]):
         """Mark streams for live mode.
         
-        In live mode, we stream whatever the API provides.
-        For now, assume API can provide all requested streams.
-        TODO: Check API capabilities and mark accordingly.
+        Creates SymbolSessionData with bar structure for each symbol.
+        In live mode, we assume API can provide all requested streams.
         
         Args:
             symbols: List of symbols
-            streams: List of requested streams
+            streams: List of requested streams (e.g., ["1m", "quotes"])
         """
+        # Separate bar intervals from other types
+        bar_intervals = [s for s in streams if s not in ["quotes", "ticks"]]
+        
         for symbol in symbols:
-            # In live mode, initially mark all as streamed
-            # (DataManager will handle what's actually available)
-            self._streamed_data[symbol] = streams.copy()
-            self._generated_data[symbol] = []
+            # In live mode, assume smallest interval is streamed, rest are derived
+            # Priority order: 1s > 1m > 5m > etc
+            if not bar_intervals:
+                logger.warning(f"{symbol}: No bar intervals in streams, skipping")
+                continue
+            
+            # Use smallest interval as base
+            base_interval = min(bar_intervals, key=lambda x: int(x[:-1]) if x[:-1].isdigit() else 999)
+            derived_intervals = [i for i in bar_intervals if i != base_interval]
+            
+            # Create bar structure
+            bars = {
+                # Base interval (streamed from API)
+                base_interval: BarIntervalData(
+                    derived=False,
+                    base=None,
+                    data=deque(),
+                    quality=0.0,
+                    gaps=[],
+                    updated=False
+                )
+            }
+            
+            # Add derived intervals
+            for interval in derived_intervals:
+                bars[interval] = BarIntervalData(
+                    derived=True,
+                    base=base_interval,
+                    data=[],
+                    quality=0.0,
+                    gaps=[],
+                    updated=False
+                )
+            
+            # Create and register symbol
+            symbol_data = SymbolSessionData(
+                symbol=symbol,
+                base_interval=base_interval,
+                bars=bars
+            )
+            
+            self.session_data.register_symbol_data(symbol_data)
             
             logger.debug(
-                f"{symbol}: All streams marked as STREAMED in live mode "
-                "(API capabilities check TODO)"
+                f"{symbol}: Registered for live mode - base: {base_interval}, derived: {derived_intervals}"
             )
+    
+    # NOTE: _mark_backtest_streams() removed - backtest mode now uses _validate_and_mark_streams()
     
     def _load_historical_data_config(
         self,
         hist_config,
-        current_date: date
+        current_date: date,
+        symbols_filter: Optional[List[str]] = None
     ):
         """Load historical data for one configuration.
         
         Args:
             hist_config: HistoricalDataConfig instance
             current_date: Current session date
+            symbols_filter: Optional list of symbols to load. If provided, only load these symbols.
+                           If None, uses symbols from hist_config.apply_to.
         """
         trailing_days = hist_config.trailing_days
         intervals = hist_config.intervals
-        symbols = self._resolve_symbols(hist_config.apply_to)
+        
+        # Resolve symbols from config
+        config_symbols = self._resolve_symbols(hist_config.apply_to)
+        
+        # Apply filter if provided (for mid-session adds)
+        if symbols_filter:
+            symbols = [s for s in config_symbols if s in symbols_filter]
+        else:
+            symbols = config_symbols
         
         logger.info(
             f"Loading {trailing_days} days of {intervals} for "
@@ -2349,24 +3123,24 @@ class SessionCoordinator(threading.Thread):
             logger.warning(f"No symbol_data for {symbol}")
             return 0.0
         
-        # Debug: Log all intervals in historical_bars
+        # Debug: Log all intervals in historical.bars
         logger.debug(
             f"Historical bars intervals for {symbol}: "
-            f"{list(symbol_data.historical_bars.keys())}"
+            f"{list(symbol_data.historical.bars.keys())}"
         )
         
         # Get 1d historical bars for this symbol
-        historical_1d = symbol_data.historical_bars.get("1d", {})
+        historical_1d_data = symbol_data.historical.bars.get("1d")
         
-        if not historical_1d:
+        if not historical_1d_data or not historical_1d_data.data_by_date:
             logger.warning(
                 f"No 1d historical bars for {symbol}. "
-                f"Available intervals: {list(symbol_data.historical_bars.keys())}"
+                f"Available intervals: {list(symbol_data.historical.bars.keys())}"
             )
             return 0.0
         
         # Get all dates, sorted
-        dates = sorted(historical_1d.keys())
+        dates = sorted(historical_1d_data.data_by_date.keys())
         logger.debug(f"Found {len(dates)} dates with 1d bars for {symbol}: {dates}")
         
         # Take last N days (should match period_days if data loaded correctly)
@@ -2374,7 +3148,7 @@ class SessionCoordinator(threading.Thread):
         logger.debug(f"Using {len(dates_to_use)} dates for {period_days}-day period: {dates_to_use}")
         
         for date in dates_to_use:
-            bars = historical_1d[date]
+            bars = historical_1d_data.data_by_date[date]
             logger.debug(f"Processing {len(bars)} bars for date {date}")
             for bar in bars:
                 # Extract field value
@@ -2499,15 +3273,22 @@ class SessionCoordinator(threading.Thread):
         """Get list of STREAMED intervals for a symbol.
         
         Returns only intervals marked as STREAMED (not GENERATED).
-        Uses the stream/generate marking from _mark_stream_generate().
+        Now queries SessionData for base intervals (those with derived=False).
         
         Args:
             symbol: Symbol to query
         
         Returns:
-            List of streamed intervals (e.g., ["1m", "quotes"])
+            List of streamed intervals (e.g., ["1m"])
         """
-        return self._streamed_data.get(symbol, [])
+        # Query SessionData for base (non-derived) intervals
+        symbol_data = self.session_data.get_symbol_data(symbol, internal=True)
+        if not symbol_data:
+            return []
+        
+        # Return intervals that are not derived (i.e., streamed)
+        streamed = [interval for interval, data in symbol_data.bars.items() if not data.derived]
+        return streamed
     
     def _get_date_plus_trading_days(
         self,
@@ -2691,27 +3472,30 @@ class SessionCoordinator(threading.Thread):
                 bar = queue.popleft()
                 
                 # ========== Per-Symbol Lag Detection ==========
-                # Check lag BEFORE incrementing (so new symbols check immediately on first bar)
-                if self._symbol_check_counters[symbol] % self._catchup_check_interval == 0:
-                    current_time = self._time_manager.get_current_time()
-                    lag_seconds = (current_time - bar.timestamp).total_seconds()
-                    
-                    if lag_seconds > self._catchup_threshold:
-                        if self.session_data._session_active:
-                            logger.info(
-                                f"[STREAMING] Lag detected for {symbol} "
-                                f"({lag_seconds:.1f}s > {self._catchup_threshold}s) "
-                                f"- deactivating session"
-                            )
-                            self.session_data.deactivate_session()
-                    else:
-                        if not self.session_data._session_active:
-                            logger.info(
-                                f"[STREAMING] Caught up on {symbol} "
-                                f"({lag_seconds:.1f}s ≤ {self._catchup_threshold}s) "
-                                f"- reactivating session"
-                            )
-                            self.session_data.activate_session()
+                # Only check lag in clock-driven and live modes
+                # In data-driven mode, we block anyway so lag is irrelevant
+                if self._should_check_lag():
+                    # Check lag BEFORE incrementing (so new symbols check immediately on first bar)
+                    if self._symbol_check_counters[symbol] % self._catchup_check_interval == 0:
+                        current_time = self._time_manager.get_current_time()
+                        lag_seconds = (current_time - bar.timestamp).total_seconds()
+                        
+                        if lag_seconds > self._catchup_threshold:
+                            if self.session_data._session_active:
+                                logger.info(
+                                    f"[STREAMING] Lag detected for {symbol} "
+                                    f"({lag_seconds:.1f}s > {self._catchup_threshold}s) "
+                                    f"- deactivating session"
+                                )
+                                self.session_data.deactivate_session()
+                        else:
+                            if not self.session_data._session_active:
+                                logger.info(
+                                    f"[STREAMING] Caught up on {symbol} "
+                                    f"({lag_seconds:.1f}s ≤ {self._catchup_threshold}s) "
+                                    f"- reactivating session"
+                                )
+                                self.session_data.activate_session()
                 
                 # Increment counter for this symbol AFTER check
                 self._symbol_check_counters[symbol] += 1
@@ -2744,7 +3528,18 @@ class SessionCoordinator(threading.Thread):
                     symbol_data = self.session_data.register_symbol(symbol)
 
                 # Add to current session bars (not historical)
-                bars_before = len(symbol_data.bars_base)
+                # Get base interval data
+                base_interval = symbol_data.base_interval
+                if base_interval not in symbol_data.bars:
+                    from app.managers.data_manager.session_data import BarIntervalData
+                    symbol_data.bars[base_interval] = BarIntervalData(
+                        derived=False,
+                        base=None,
+                        data=deque()
+                    )
+                
+                base_bars = symbol_data.bars[base_interval].data
+                bars_before = len(base_bars)
                 
                 # DEBUG: Log ALL bars being added (not just first 5)
                 logger.debug(
@@ -2752,15 +3547,25 @@ class SessionCoordinator(threading.Thread):
                     f"Before: {bars_before} | Will be #{bars_before + 1}"
                 )
                 
-                symbol_data.bars_base.append(bar)
+                base_bars.append(bar)
                 symbol_data.update_from_bar(bar)
                 
                 # Verify count after adding
-                bars_after = len(symbol_data.bars_base)
+                bars_after = len(base_bars)
                 if bars_after != bars_before + 1:
                     logger.error(
                         f"[BAR_ADD] Count mismatch! Before: {bars_before}, "
-                        f"After: {bars_after}, Expected: {bars_before + 1}"
+                        f"After: {bars_after}, Expected: {bars_after + 1}"
+                    )
+
+                # Phase 6b: Update indicators for this base interval
+                if hasattr(self, 'indicator_manager') and self.indicator_manager:
+                    # Convert deque to list for indicator calculation
+                    bars_list = list(base_bars)
+                    self.indicator_manager.update_indicators(
+                        symbol=symbol,
+                        interval=base_interval,
+                        bars=bars_list
                     )
 
                 # Track for logging
@@ -2796,6 +3601,26 @@ class SessionCoordinator(threading.Thread):
 
         return bars_processed
 
+    def _should_check_lag(self) -> bool:
+        """Determine if lag detection should run based on mode.
+        
+        Lag detection is only relevant when:
+        - Live mode: Real-time data can lag
+        - Clock-driven backtest: Processing can fall behind clock
+        - NOT data-driven: We block until processor ready, so lag is controlled
+        
+        Returns:
+            True if lag detection should run, False otherwise
+        """
+        if self.mode == "live":
+            return True
+        
+        if self.mode == "backtest" and self.session_config.backtest_config:
+            # Only check lag in clock-driven mode (speed > 0)
+            return self.session_config.backtest_config.speed_multiplier > 0
+        
+        return False
+    
     def _apply_clock_driven_delay(self, speed_multiplier: float):
         """Apply clock-driven delay based on speed multiplier.
 

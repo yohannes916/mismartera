@@ -162,7 +162,7 @@ class SchwabClient:
             logger.success("Successfully obtained access token")
             return token_data
     
-    async def refresh_access_token(self) -> Dict[str, Any]:
+    def refresh_access_token(self) -> Dict[str, Any]:
         """
         Refresh access token using refresh token.
         
@@ -190,8 +190,8 @@ class SchwabClient:
             "refresh_token": self.refresh_token,
         }
         
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(token_url, headers=headers, data=data)
+        with httpx.Client(timeout=30.0) as client:
+            response = client.post(token_url, headers=headers, data=data)
             
             if response.status_code != 200:
                 logger.error(f"Token refresh failed: {response.status_code} {response.text}")
@@ -212,7 +212,7 @@ class SchwabClient:
             logger.success("Successfully refreshed access token")
             return token_data
     
-    async def get_valid_access_token(self) -> str:
+    def get_valid_access_token(self) -> str:
         """
         Get a valid access token, refreshing if necessary.
         
@@ -235,7 +235,7 @@ class SchwabClient:
             time_until_expiry = (self.token_expires_at - datetime.now()).total_seconds()
             if time_until_expiry < 300:  # Less than 5 minutes
                 logger.info("Access token expired or expiring soon, refreshing...")
-                await self.refresh_access_token()
+                self.refresh_access_token()
         
         return self.access_token
     

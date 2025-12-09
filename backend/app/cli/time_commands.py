@@ -255,9 +255,11 @@ def trading_days_command(start_str: str, end_str: str, exchange: str = "NYSE"):
         end_date = date.fromisoformat(end_str)
         
         with SessionLocal() as session:
-            # Count trading days
-            count = time_mgr.count_trading_days(
-                session, start_date, end_date, exchange=exchange
+            # Count trading days using unified API
+            start_dt = datetime.combine(start_date, datetime.min.time())
+            end_dt = datetime.combine(end_date, datetime.max.time())
+            count = time_mgr.count_trading_time(
+                session, start_dt, end_dt, unit='days', exchange=exchange
             )
             
             # Get list of trading dates

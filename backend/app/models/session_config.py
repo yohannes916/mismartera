@@ -21,6 +21,13 @@ from datetime import datetime
 # Logging
 from app.logger import logger
 
+# Indicator configurations
+from app.models.indicator_config import (
+    SessionIndicatorConfig,
+    HistoricalIndicatorConfig,
+    IndicatorsConfig
+)
+
 
 # =============================================================================
 # Backtest Configuration
@@ -103,12 +110,17 @@ class HistoricalDataConfig:
         if not self.intervals:
             raise ValueError("intervals cannot be empty")
         
-        valid_intervals = ["1s", "1m", "5m", "10m", "15m", "30m", "1h", "1d"]
+        # Use requirement analyzer for validation (supports s, m, d, w)
+        from app.threads.quality.requirement_analyzer import parse_interval
+        
         for interval in self.intervals:
-            if interval not in valid_intervals:
+            try:
+                parse_interval(interval)
+            except ValueError as e:
                 raise ValueError(
-                    f"Invalid interval '{interval}'. "
-                    f"Must be one of: {valid_intervals}"
+                    f"Invalid interval '{interval}': {e}. "
+                    f"Supported: seconds (1s, 5s), minutes (1m, 5m, 15m), "
+                    f"days (1d), weeks (1w). NO hourly support."
                 )
         
         # Validate apply_to
@@ -140,11 +152,11 @@ class HistoricalConfig:
     Attributes:
         enable_quality: Calculate quality for historical bars (default: true)
         data: List of historical data configurations
-        indicators: Historical indicator configurations
+        indicators: DEPRECATED - use IndicatorsConfig in SessionDataConfig instead
     """
     enable_quality: bool = True
     data: List[HistoricalDataConfig] = field(default_factory=list)
-    indicators: Dict[str, Any] = field(default_factory=dict)
+    indicators: Dict[str, Any] = field(default_factory=dict)  # DEPRECATED
     
     def validate(self, available_symbols: List[str]) -> None:
         """Validate historical configuration.
@@ -156,24 +168,13 @@ class HistoricalConfig:
         for data_config in self.data:
             data_config.validate(available_symbols)
         
-        # Validate indicators (basic validation, full validation in indicator code)
-        for indicator_name, indicator_config in self.indicators.items():
-            if not isinstance(indicator_config, dict):
-                raise ValueError(
-                    f"Indicator '{indicator_name}' config must be a dictionary"
-                )
-            
-            if "type" not in indicator_config:
-                raise ValueError(
-                    f"Indicator '{indicator_name}' missing required field 'type'"
-                )
-            
-            valid_types = ["trailing_average", "trailing_max", "trailing_min"]
-            if indicator_config["type"] not in valid_types:
-                raise ValueError(
-                    f"Indicator '{indicator_name}' has invalid type "
-                    f"'{indicator_config['type']}'. Must be one of: {valid_types}"
-                )
+        # Warn if using old indicators format
+        if self.indicators:
+            logger.warning(
+                "historical.indicators is DEPRECATED. "
+                "Use session_data_config.indicators instead with new format. "
+                "See docs/INDICATOR_REFERENCE.md"
+            )
 
 
 @dataclass
@@ -238,12 +239,14 @@ class SessionDataConfig:
         streaming: Streaming behavior configuration
         historical: Historical data and indicators configuration
         gap_filler: Gap filler configuration (DataQualityManager)
+        indicators: Indicator configurations (session and historical) - NEW!
     """
     symbols: List[str]
     streams: List[str]
     streaming: StreamingConfig = field(default_factory=StreamingConfig)
     historical: HistoricalConfig = field(default_factory=HistoricalConfig)
     gap_filler: GapFillerConfig = field(default_factory=GapFillerConfig)
+    indicators: IndicatorsConfig = field(default_factory=IndicatorsConfig)
     
     def validate(self) -> None:
         """Validate session data configuration."""
@@ -263,21 +266,31 @@ class SessionDataConfig:
         if not self.streams:
             raise ValueError("streams list cannot be empty")
         
-        valid_streams = [
-            "1s", "1m", "5m", "10m", "15m", "30m", "1h", "1d",
-            "ticks", "quotes"
-        ]
+        # Use requirement analyzer for validation (supports s, m, d, w, quotes)
+        from app.threads.quality.requirement_analyzer import parse_interval
+        
         for stream in self.streams:
-            if stream not in valid_streams:
+            # Allow "ticks" and "quotes" special cases
+            if stream.lower() in ["ticks", "tick"]:
                 raise ValueError(
-                    f"Invalid stream '{stream}'. "
-                    f"Must be one of: {valid_streams}"
+                    "Ticks are not supported. "
+                    "Use 'quotes' for quote data or bar intervals (1s, 1m, etc.)"
+                )
+            
+            try:
+                parse_interval(stream)
+            except ValueError as e:
+                raise ValueError(
+                    f"Invalid stream '{stream}': {e}. "
+                    f"Supported: seconds (1s, 5s), minutes (1m, 5m, 15m), "
+                    f"days (1d), weeks (1w), or 'quotes'. NO hourly support."
                 )
         
         # Validate sub-configs
         self.streaming.validate()
         self.historical.validate(self.symbols)
         self.gap_filler.validate()
+        self.indicators.validate()
 
 
 # =============================================================================

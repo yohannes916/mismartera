@@ -88,7 +88,8 @@ class DataProcessor(threading.Thread):
         self,
         session_data: SessionData,
         system_manager,
-        metrics: PerformanceMetrics
+        metrics: PerformanceMetrics,
+        indicator_manager=None
     ):
         """Initialize data processor.
         
@@ -96,12 +97,14 @@ class DataProcessor(threading.Thread):
             session_data: Reference to SessionData for zero-copy access
             system_manager: Reference to SystemManager (single source of truth)
             metrics: Performance metrics tracker
+            indicator_manager: Reference to IndicatorManager (Phase 6)
         """
         super().__init__(name="DataProcessor", daemon=True)
         
         self.session_data = session_data
         self._system_manager = system_manager
         self.metrics = metrics
+        self.indicator_manager = indicator_manager  # Phase 6
         
         # Get TimeManager reference
         self._time_manager = system_manager.get_time_manager()
@@ -122,9 +125,8 @@ class DataProcessor(threading.Thread):
         # Subscription for waiting on analysis engine (Phase 7)
         self._analysis_subscription: Optional[StreamSubscription] = None
         
-        # Derived intervals (populated from coordinator markings)
-        # Maps symbol -> list of intervals to generate (e.g., {'AAPL': ['5m', '15m']})
-        self._derived_intervals: Dict[str, List[str]] = {}
+        # Note: Derived intervals now queried from SessionData (no separate tracking)
+        # Query session_data.get_symbols_with_derived() to find work
         self._realtime_indicators = []  # TODO: From config when indicator config added
         
         # Auto-computation flag (always enabled for now)
@@ -222,19 +224,17 @@ class DataProcessor(threading.Thread):
         self._notifications_paused.set()  # Set = active
     
     def set_derived_intervals(self, generated_data: Dict[str, List[str]]):
-        """Set derived intervals from coordinator's GENERATED markings.
+        """DEPRECATED: Derived intervals now queried from SessionData.
         
-        Called by SessionCoordinator after it determines what data is GENERATED.
+        This method is kept for backward compatibility but does nothing.
+        DataProcessor queries session_data.get_symbols_with_derived() instead.
         
         Args:
-            generated_data: Map of symbol -> list of intervals to generate
-                           (e.g., {'AAPL': ['5m', '15m'], 'RIVN': ['5m', '15m']})
+            generated_data: Map of symbol -> list of intervals (IGNORED)
         """
-        self._derived_intervals = generated_data.copy()
-        total_intervals = sum(len(v) for v in generated_data.values())
-        logger.info(
-            f"DataProcessor will generate {total_intervals} intervals "
-            f"across {len(generated_data)} symbols: {dict(generated_data)}"
+        logger.debug(
+            "[DEPRECATED] set_derived_intervals() called but ignored. "
+            "DataProcessor queries SessionData directly."
         )
     
     def notify_data_available(self, symbol: str, interval: str, timestamp: datetime):
@@ -330,17 +330,27 @@ class DataProcessor(threading.Thread):
                 # 3. Calculate real-time indicators
                 self._calculate_realtime_indicators(symbol, interval)
                 
-                # 4. Signal ready to coordinator (mode-aware)
-                self._signal_ready_to_coordinator()
-                
-                # 5. Notify analysis engine (only if session is active)
+                # 4. Notify analysis engine (only if session is active)
                 # Check session_active to prevent notifications during lag/catchup
                 if self.session_data._session_active:
                     self._notify_analysis_engine(symbol, interval)
+                    
+                    # In data-driven mode, wait for analysis engine to finish
+                    # before signaling ready to coordinator
+                    if self._should_wait_for_analysis():
+                        logger.debug("[DATA-DRIVEN] Waiting for analysis engine...")
+                        if self._analysis_subscription:
+                            self._analysis_subscription.wait_until_ready()
+                            self._analysis_subscription.reset()
+                        logger.debug("[DATA-DRIVEN] Analysis engine ready")
                 else:
                     logger.debug(
                         f"[PROCESSOR] Skipping notification (session inactive): {symbol} {interval}"
                     )
+                
+                # 5. Signal ready to coordinator (mode-aware)
+                # Only after analysis engine finishes (in data-driven mode)
+                self._signal_ready_to_coordinator()
                 
                 # 6. Record timing and metrics
                 elapsed = self.metrics.elapsed_time(start_time)
@@ -377,25 +387,35 @@ class DataProcessor(threading.Thread):
         Args:
             symbol: Symbol to generate derived bars for
         """
-        if not self._auto_compute_derived or not self._derived_intervals:
+        if not self._auto_compute_derived:
             return
         
         try:
-            # Get intervals for this symbol
-            symbol_intervals = self._derived_intervals.get(symbol, [])
+            # Get symbol data (includes bar structure)
+            symbol_data = self.session_data.get_symbol_data(symbol, internal=True)
+            if not symbol_data:
+                return
+            
+            # Get derived intervals for this symbol from bar structure
+            symbol_intervals = [
+                interval for interval, interval_data in symbol_data.bars.items()
+                if interval_data.derived
+            ]
+            
             if not symbol_intervals:
                 return
             
-            # 1. Read 1m bars from session_data (ZERO-COPY: direct reference)
-            # Use internal=True to bypass session_active check (processor needs data even during catchup)
-            bars_1m_ref = self.session_data.get_bars_ref(symbol, 1, internal=True)
+            # 1. Read base bars from session_data (ZERO-COPY: direct reference)
+            # Use base_interval from symbol data
+            base_interval = symbol_data.base_interval
+            base_interval_data = symbol_data.bars.get(base_interval)
             
-            if not bars_1m_ref:
-                logger.debug(f"No 1m bars available for {symbol}")
+            if not base_interval_data or not base_interval_data.data:
+                logger.debug(f"No {base_interval} bars available for {symbol}")
                 return
             
             # Convert to list only for processing (small overhead, required for compute_derived_bars)
-            bars_1m = list(bars_1m_ref)
+            bars_base = list(base_interval_data.data)
             
             # 2. Progressive computation: Process intervals in ascending order
             # This ensures we compute 5m as soon as 5 bars exist, 15m when 15 exist, etc.
@@ -410,47 +430,62 @@ class DataProcessor(threading.Thread):
             
             for interval in sorted_intervals:
                 # Check if we have enough bars for this interval
-                if len(bars_1m) < interval:
+                if len(bars_base) < interval:
                     logger.debug(
                         f"Skipping {interval}m bars for {symbol}: "
-                        f"only {len(bars_1m)} of {interval} 1m bars available"
+                        f"only {len(bars_base)} of {interval} {base_interval} bars available"
                     )
                     continue
                 
                 # 3. Compute derived bars for this interval
-                derived_bars = compute_derived_bars(bars_1m, interval)
+                derived_bars = compute_derived_bars(
+                    bars_base,
+                    source_interval="1m",
+                    target_interval=f"{interval}m"
+                )
                 
                 if not derived_bars:
                     continue
                 
-                # 4. Get existing derived bars (ZERO-COPY: direct reference)
-                # Use internal=True to bypass session_active check
-                existing_derived_ref = self.session_data.get_bars_ref(symbol, interval, internal=True)
+                # 4. Get existing derived bars from bar structure
+                interval_str = f"{interval}m"
+                interval_data = symbol_data.bars.get(interval_str)
+                
+                if not interval_data:
+                    logger.warning(f"No interval data for {interval_str} on {symbol}")
+                    continue
                 
                 # 5. Add only new bars (skip duplicates)
                 new_bar_count = 0
                 for derived_bar in derived_bars:
-                    # Check if bar already exists (iterate over reference, no copy)
+                    # Check if bar already exists
                     exists = any(
                         bar.timestamp == derived_bar.timestamp
-                        for bar in existing_derived_ref
+                        for bar in interval_data.data
                     )
                     
                     if not exists:
-                        # Add to derived bars container (not bars_base)
-                        # Use internal=True to bypass session_active check
-                        symbol_data = self.session_data.get_symbol_data(symbol, internal=True)
-                        if symbol_data:
-                            if interval not in symbol_data.bars_derived:
-                                symbol_data.bars_derived[interval] = []
-                            symbol_data.bars_derived[interval].append(derived_bar)
-                            new_bar_count += 1
+                        # Append to derived bars (list)
+                        interval_data.data.append(derived_bar)
+                        new_bar_count += 1
                 
+                # Set updated flag if new bars were added
                 if new_bar_count > 0:
+                    interval_data.updated = True
                     logger.debug(
                         f"Generated {new_bar_count} new {interval}m bars for {symbol} "
                         f"(total {len(derived_bars)})"
                     )
+                    
+                    # Phase 6b: Update indicators for this derived interval
+                    if self.indicator_manager:
+                        # Get all bars for this interval
+                        all_bars = list(interval_data.data)
+                        self.indicator_manager.update_indicators(
+                            symbol=symbol,
+                            interval=interval_str,
+                            bars=all_bars
+                        )
             
         except Exception as e:
             logger.error(
@@ -516,6 +551,26 @@ class DataProcessor(threading.Thread):
     # Synchronization
     # =========================================================================
     
+    def _should_wait_for_analysis(self) -> bool:
+        """Determine if we should wait for analysis engine based on mode.
+        
+        In data-driven mode, we wait for the entire chain:
+        Coordinator → Processor → Analysis Engine → (all subscribers)
+        
+        In clock-driven/live, we don't block - analysis runs async.
+        
+        Returns:
+            True if should wait for analysis engine, False otherwise
+        """
+        if self.mode == "live":
+            return False
+        
+        if self.mode == "backtest" and self.session_config.backtest_config:
+            # Wait only in data-driven mode (speed = 0)
+            return self.session_config.backtest_config.speed_multiplier == 0
+        
+        return False
+    
     def _signal_ready_to_coordinator(self):
         """Signal ready to coordinator (mode-aware).
         
@@ -572,14 +627,21 @@ class DataProcessor(threading.Thread):
             return
         
         try:
-            # Notify about derived bars (if 1m bar triggered generation)
-            if interval == "1m" and self._derived_intervals:
-                for derived_interval in self._derived_intervals:
+            # Notify about derived bars (if base interval bar triggered generation)
+            symbol_data = self.session_data.get_symbol_data(symbol, internal=True)
+            if symbol_data and interval == symbol_data.base_interval:
+                # Get derived intervals for this symbol
+                derived_intervals = [
+                    iv for iv, iv_data in symbol_data.bars.items()
+                    if iv_data.derived
+                ]
+                
+                for derived_interval in derived_intervals:
                     self._analysis_engine_queue.put(
-                        (symbol, f"{derived_interval}m", "bars")
+                        (symbol, derived_interval, "bars")
                     )
                     logger.debug(
-                        f"Notified analysis engine: {symbol} {derived_interval}m bars"
+                        f"Notified analysis engine: {symbol} {derived_interval} bars"
                     )
             
             # Notify about indicators (if configured)
@@ -634,6 +696,5 @@ class DataProcessor(threading.Thread):
                 "is_alive": self.is_alive(),
                 "daemon": self.daemon
             },
-            "_running": self._running,
-            "_derived_intervals": dict(self._derived_intervals)
+            "_running": self._running
         }

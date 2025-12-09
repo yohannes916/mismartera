@@ -2,18 +2,38 @@
 
 Handles storage and retrieval of market data in Parquet format.
 
-New Structure (multi-exchange support):
+Unified Structure (multi-exchange support + ANY interval):
   data/parquet/<exchange_group>/
-    ├── bars/1s/<SYMBOL>/<YEAR>/<MONTH>.parquet
-    ├── bars/1m/<SYMBOL>/<YEAR>/<MONTH>.parquet
-    ├── bars/1d/<SYMBOL>/<YEAR>.parquet
-    └── quotes/<SYMBOL>/<YEAR>/<MONTH>/<DAY>.parquet
+    ├── bars/<interval>/<SYMBOL>/<YEAR>/<MONTH>/<DAY>.parquet  (daily files for 1s, 1m)
+    ├── bars/<interval>/<SYMBOL>/<YEAR>.parquet                (yearly files for 1d, 1w)
+    └── quotes/<SYMBOL>/<YEAR>/<MONTH>/<DAY>.parquet           (daily files)
 
-TIMEZONE BEHAVIOR:
-- Internal storage: All timestamps in UTC
-- Input: Dates assumed to be in system timezone (system_manager.timezone)
-- Output: Timestamps returned in system timezone by default
-- UTC day boundaries: Handled transparently for ET extended hours
+Storage Strategy (automatic):
+  - Sub-daily intervals (1s, 1m, Ns, Nm) → Daily files (session-aligned)
+  - Daily+ intervals (1d, 1w, Nd, Nw) → Yearly files
+
+Examples:
+  - 1s   → bars/1s/AAPL/2025/07/15.parquet (daily - 1 file per trading day)
+  - 1m   → bars/1m/AAPL/2025/07/15.parquet (daily - 1 file per trading day)
+  - 60m  → bars/60m/AAPL/2025/12/31.parquet (daily - use minutes NOT hours)
+  - 1d   → bars/1d/AAPL/2025.parquet (yearly - 1 file per year)
+  - 1w   → bars/1w/AAPL/2025.parquet (yearly - 1 file per year)
+
+Rationale for daily files (seconds/minutes):
+  - Perfect alignment with session-based processing
+  - Faster single-day access (~500KB vs ~15MB)
+  - Cleaner incremental updates (append new day)
+  - Better gap management (missing file = missing day)
+  - Memory efficient for high-frequency data
+
+Note: Hourly intervals (1h, 2h) are NOT supported. Use minute intervals (60m, 120m).
+
+TIMEZONE ARCHITECTURE:
+- Storage: Timestamps are timezone-aware in EXCHANGE TIMEZONE
+- Exchange group implies timezone (US_EQUITY = America/New_York)
+- Files grouped by exchange timezone day (not UTC)
+- NO conversion on read/write - data stored and returned as-is
+- Rest of system works exclusively in exchange timezone
 """
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
@@ -31,6 +51,7 @@ from app.managers.data_manager.symbol_exchange_mapping import (
     get_symbol_exchange,
     register_symbol
 )
+from app.managers.data_manager.interval_storage import IntervalStorageStrategy
 
 
 class ParquetStorage:
@@ -45,6 +66,10 @@ class ParquetStorage:
         """
         self.base_path = Path(base_path or "data/parquet")
         self.exchange_group = exchange_group
+        
+        # Initialize unified storage strategy
+        self.storage_strategy = IntervalStorageStrategy(self.base_path, exchange_group)
+        
         logger.info(f"Parquet storage initialized: base={self.base_path}, group={exchange_group}")
     
     def _get_system_timezone(self) -> str:
@@ -52,219 +77,22 @@ class ParquetStorage:
         from app.managers.system_manager import get_system_manager
         
         sys_mgr = get_system_manager()
+        if sys_mgr.timezone is None:
+            logger.warning("SystemManager timezone not initialized, using default: America/New_York")
+            return "America/New_York"
         return sys_mgr.timezone
     
-    def _convert_dates_to_utc(
-        self,
-        start_date: date,
-        end_date: date,
-        source_timezone: Optional[str] = None
-    ) -> Tuple[datetime, datetime]:
-        """
-        Convert dates from source timezone to UTC datetime range.
-        
-        For trading days, includes pre-market to post-market hours to ensure
-        complete data retrieval (handles UTC day boundaries).
-        
-        Args:
-            start_date: Start date in source timezone
-            end_date: End date in source timezone
-            source_timezone: Timezone of dates (uses system default if None)
-        
-        Returns:
-            (utc_start, utc_end) - UTC datetime range
-        """
-        if source_timezone is None:
-            source_timezone = self._get_system_timezone()
-        
-        from app.managers.system_manager import get_system_manager
-        from app.models.database import SessionLocal
-        
-        sys_mgr = get_system_manager()
-        time_mgr = sys_mgr.get_time_manager()
-        
-        try:
-            with SessionLocal() as session:
-                # Get trading session to determine hours
-                trading_session = time_mgr.get_trading_session(session, start_date)
-                
-                if trading_session and not trading_session.is_holiday and trading_session.is_trading_day:
-                    # Use pre-market to post-market for complete coverage
-                    start_time = trading_session.pre_market_open or trading_session.regular_open
-                    end_time = trading_session.post_market_close or trading_session.regular_close
-                    
-                    logger.info(
-                        f"[TIMEZONE] Using trading session hours for {start_date}: "
-                        f"{start_time} - {end_time} (includes pre/post market)"
-                    )
-                    
-                    # Ensure we have valid time objects
-                    if start_time is None or end_time is None:
-                        start_time = time_type(0, 0)
-                        end_time = time_type(23, 59, 59)
-                        logger.warning(f"[TIMEZONE] Trading session had null times, using full day")
-                else:
-                    # Fallback: full day for non-trading days
-                    start_time = time_type(0, 0)
-                    end_time = time_type(23, 59, 59)
-        except Exception as e:
-            logger.warning(f"Could not get trading session, using full day: {e}")
-            start_time = time_type(0, 0)
-            end_time = time_type(23, 59, 59)
-        
-        # CRITICAL: Ensure we have date objects, not datetime
-        # session_coordinator might pass datetime objects instead of dates
-        if isinstance(start_date, datetime):
-            logger.warning(f"start_date is datetime, extracting date part: {start_date}")
-            start_date = start_date.date()
-        if isinstance(end_date, datetime):
-            logger.warning(f"end_date is datetime, extracting date part: {end_date}")
-            end_date = end_date.date()
-        
-        # Combine dates with times in source timezone
-        source_tz = ZoneInfo(source_timezone)
-        start_dt = datetime.combine(start_date, start_time)
-        end_dt = datetime.combine(end_date, end_time)
-        
-        start_aware = start_dt.replace(tzinfo=source_tz)
-        end_aware = end_dt.replace(tzinfo=source_tz)
-        
-        # Convert to UTC
-        utc_start = start_aware.astimezone(ZoneInfo("UTC"))
-        utc_end = end_aware.astimezone(ZoneInfo("UTC"))
-        
-        # Log the conversion
-        logger.info(
-            f"[TIMEZONE] Query range: {start_date} {start_time} - {end_date} {end_time} ({source_timezone})"
-        )
-        logger.info(
-            f"[TIMEZONE] UTC range: {utc_start} - {utc_end}"
-        )
-        
-        logger.debug(
-            f"Date conversion: {start_date} - {end_date} ({source_timezone}) → "
-            f"{utc_start} - {utc_end} (UTC)"
-        )
-        
-        return utc_start, utc_end
-    
-    def _read_utc_partitions(
-        self,
-        data_type: str,
-        symbol: str,
-        utc_start: datetime,
-        utc_end: datetime
-    ) -> pd.DataFrame:
-        """
-        Read bars spanning multiple UTC day partitions.
-        
-        Handles the case where an ET trading day spans two UTC days
-        (e.g., extended hours: 4 AM ET July 2 = 8 AM UTC July 2,
-                             8 PM ET July 2 = 12 AM UTC July 3).
-        
-        Args:
-            data_type: '1s', '1m', or '1d'
-            symbol: Stock symbol
-            utc_start: Start datetime in UTC
-            utc_end: End datetime in UTC
-        
-        Returns:
-            DataFrame with bars in UTC timezone
-        """
-        symbol = symbol.upper()
-        frames = []
-        
-        # Determine all UTC days that need to be read
-        current_date = utc_start.date()
-        end_date = utc_end.date()
-        
-        # CRITICAL: Track files already read to avoid reading same monthly file multiple times
-        # when UTC range spans multiple days in same month
-        files_read = set()
-        
-        while current_date <= end_date:
-            # Get partition file for this UTC day
-            file_path = self.get_file_path(
-                data_type,
-                symbol,
-                current_date.year,
-                current_date.month if data_type in ['1s', '1m'] else None
-            )
-            
-            # Skip if we already read this file (monthly files contain multiple days)
-            if file_path and file_path in files_read:
-                logger.debug(f"Skipping already-read file: {file_path.name}")
-                current_date += timedelta(days=1)
-                continue
-            
-            if file_path and file_path.exists():
-                files_read.add(file_path)
-                try:
-                    df_partition = pd.read_parquet(file_path)
-                    
-                    if not df_partition.empty:
-                        # CRITICAL: Make timestamps timezone-aware for comparison
-                        # Parquet stores as naive UTC, must convert for proper filtering
-                        if df_partition['timestamp'].dt.tz is None:
-                            df_partition['timestamp'] = pd.to_datetime(df_partition['timestamp'], utc=True)
-                        
-                        bars_before_filter = len(df_partition)
-                        
-                        # Filter to requested UTC time range
-                        df_partition = df_partition[
-                            (df_partition['timestamp'] >= utc_start) &
-                            (df_partition['timestamp'] <= utc_end)
-                        ]
-                        
-                        bars_after_filter = len(df_partition)
-                        
-                        if bars_before_filter != bars_after_filter:
-                            logger.info(
-                                f"[UTC_FILTER] {file_path.name}: {bars_before_filter} → {bars_after_filter} bars "
-                                f"(filtered {bars_before_filter - bars_after_filter} outside UTC range)"
-                            )
-                        
-                        if not df_partition.empty:
-                            frames.append(df_partition)
-                            logger.debug(f"Read {len(df_partition)} bars from {file_path.name}")
-                except Exception as e:
-                    logger.error(f"Error reading partition {file_path}: {e}")
-            
-            current_date += timedelta(days=1)
-        
-        if not frames:
-            return pd.DataFrame()
-        
-        # Combine all partitions and sort
-        df = pd.concat(frames, ignore_index=True)
-        df = df.sort_values('timestamp').reset_index(drop=True)
-        
-        # Check for duplicate timestamps (should not happen with file deduplication, but verify)
-        duplicates = df[df.duplicated(subset=['timestamp'], keep=False)]
-        if len(duplicates) > 0:
-            logger.error(
-                f"[UTC_COMBINE] UNEXPECTED: Found {len(duplicates)} bars with duplicate timestamps "
-                f"(unique timestamps: {df['timestamp'].nunique()}, total bars: {len(df)}) - this should not happen!"
-            )
-            
-            # Drop duplicates as safety measure
-            bars_before_dedup = len(df)
-            df = df.drop_duplicates(subset=['timestamp'], keep='first').reset_index(drop=True)
-            bars_dropped = bars_before_dedup - len(df)
-            
-            logger.warning(
-                f"[UTC_COMBINE] Dropped {bars_dropped} duplicate bars as safety measure "
-                f"(kept {len(df)} unique bars)"
-            )
-        
-        logger.info(f"[UTC_COMBINE] Combined {len(frames)} partitions into {len(df)} bars (UTC range: {utc_start.date()} to {utc_end.date()})")
-        return df
+    # OLD UTC CONVERSION METHODS REMOVED
+    # Storage now uses exchange timezone, no UTC conversion needed
+    # See EXCHANGE_TIMEZONE_STORAGE.md for details
     
     def _ensure_symbol_directory(self, data_type: str, symbol: str, year: int, month: Optional[int] = None) -> Path:
-        """Create and return directory path for a symbol's data
+        """Create and return directory path for a symbol's data.
+        
+        Uses unified storage strategy for bar intervals.
         
         Args:
-            data_type: One of '1s', '1m', '1d', 'quotes'
+            data_type: Interval string (e.g., '1s', '1m', '1h', '1d', '1w') or 'quotes'
             symbol: Stock symbol
             year: Year
             month: Month (only for quotes daily files)
@@ -274,22 +102,16 @@ class ParquetStorage:
         """
         symbol = symbol.upper()
         
-        if data_type in ['1s', '1m']:
-            # bars/<interval>/<SYMBOL>/<YEAR>/
-            dir_path = self.base_path / self.exchange_group / "bars" / data_type / symbol / str(year)
-        elif data_type == '1d':
-            # bars/1d/<SYMBOL>/
-            dir_path = self.base_path / self.exchange_group / "bars" / "1d" / symbol
-        elif data_type == 'quotes':
+        if data_type == 'quotes':
             # quotes/<SYMBOL>/<YEAR>/<MONTH>/
             if month is None:
                 raise ValueError("Month required for quotes directory")
             dir_path = self.base_path / self.exchange_group / "quotes" / symbol / str(year) / f"{month:02d}"
+            dir_path.mkdir(parents=True, exist_ok=True)
+            return dir_path
         else:
-            raise ValueError(f"Invalid data_type: {data_type}")
-        
-        dir_path.mkdir(parents=True, exist_ok=True)
-        return dir_path
+            # Bar intervals: use unified storage strategy
+            return self.storage_strategy.get_directory_path(data_type, symbol, year, month)
     
     def get_file_path(
         self,
@@ -301,15 +123,17 @@ class ParquetStorage:
     ) -> Path:
         """Get file path for a given data type and time period.
         
-        New structure:
-          - bars: <exchange_group>/bars/<interval>/<SYMBOL>/<YEAR>/<MONTH>.parquet
+        Uses unified storage strategy for ANY bar interval.
+        
+        Structure:
+          - bars: <exchange_group>/bars/<interval>/<SYMBOL>/<YEAR>/[<MONTH>.parquet or <YEAR>.parquet]
           - quotes: <exchange_group>/quotes/<SYMBOL>/<YEAR>/<MONTH>/<DAY>.parquet
         
         Args:
-            data_type: One of '1s', '1m', '1d', 'quotes'
+            data_type: Interval string (e.g., '1s', '1m', '1h', '1d', '1w') or 'quotes'
             symbol: Stock symbol (e.g., 'AAPL')
             year: Year
-            month: Month (1-12). Required for 1s/1m bars and quotes
+            month: Month (1-12). Required for sub-daily intervals and quotes
             day: Day (1-31). Required for quotes (daily files)
             
         Returns:
@@ -317,36 +141,24 @@ class ParquetStorage:
         """
         symbol = symbol.upper()
         
-        if data_type in ['1s', '1m']:
-            # bars/<interval>/<SYMBOL>/<YEAR>/<MONTH>.parquet
-            if month is None:
-                raise ValueError(f"Month required for {data_type} bars")
-            dir_path = self._ensure_symbol_directory(data_type, symbol, year)
-            filename = f"{month:02d}.parquet"
-            return dir_path / filename
-        
-        elif data_type == '1d':
-            # bars/1d/<SYMBOL>/<YEAR>.parquet
-            dir_path = self._ensure_symbol_directory(data_type, symbol, year)
-            filename = f"{year}.parquet"
-            return dir_path / filename
-        
-        elif data_type == 'quotes':
+        if data_type == 'quotes':
             # quotes/<SYMBOL>/<YEAR>/<MONTH>/<DAY>.parquet (daily files)
             if month is None or day is None:
                 raise ValueError("Month and day required for quotes (daily files)")
             dir_path = self._ensure_symbol_directory(data_type, symbol, year, month)
             filename = f"{day:02d}.parquet"
             return dir_path / filename
-        
         else:
-            raise ValueError(f"Invalid data_type: {data_type}. Must be 1s, 1m, 1d, or quotes")
+            # Bar intervals: use unified storage strategy
+            return self.storage_strategy.get_file_path(data_type, symbol, year, month, day)
     
     def aggregate_ticks_to_1s(self, ticks: List[Dict]) -> List[Dict]:
         """Aggregate trade ticks to 1-second bars.
         
+        Uses unified bar aggregation framework.
+        
         Args:
-            ticks: List of tick dicts with timestamp, price, size
+            ticks: List of tick dicts with timestamp, symbol, close, volume
             
         Returns:
             List of 1s bar dicts
@@ -356,32 +168,27 @@ class ParquetStorage:
         
         logger.info(f"Aggregating {len(ticks)} ticks to 1s bars...")
         
-        # Group by second
-        by_second = defaultdict(list)
+        # Use unified framework
+        from app.managers.data_manager.bar_aggregation import (
+            BarAggregator,
+            AggregationMode
+        )
         
-        for tick in ticks:
-            ts = tick['timestamp']
-            # Round down to second (remove microseconds)
-            second_key = ts.replace(microsecond=0)
-            by_second[second_key].append(tick)
+        aggregator = BarAggregator(
+            source_interval="tick",
+            target_interval="1s",
+            time_manager=None,  # Not needed for TIME_WINDOW mode
+            mode=AggregationMode.TIME_WINDOW
+        )
         
-        # Build 1s bars
-        bars_1s = []
-        for second, ticks_in_second in sorted(by_second.items()):
-            prices = [t['close'] for t in ticks_in_second]  # ticks have 'close' as price
-            volumes = [t['volume'] for t in ticks_in_second]
-            
-            bar = {
-                'symbol': ticks_in_second[0]['symbol'],
-                'timestamp': second,
-                'open': ticks_in_second[0]['close'],  # First tick price
-                'high': max(prices),
-                'low': min(prices),
-                'close': ticks_in_second[-1]['close'],  # Last tick price
-                'volume': sum(volumes),
-                'trade_count': len(ticks_in_second),
-            }
-            bars_1s.append(bar)
+        bars = aggregator.aggregate(
+            ticks,
+            require_complete=False,  # Allow any number of ticks
+            check_continuity=False   # Ticks can be sparse
+        )
+        
+        # Convert BarData objects back to dicts
+        bars_1s = [bar.dict() for bar in bars]
         
         logger.info(f"Created {len(bars_1s)} 1s bars from {len(ticks)} ticks")
         return bars_1s
@@ -440,11 +247,13 @@ class ParquetStorage:
     ) -> Tuple[int, Path]:
         """Write bars to Parquet file(s).
         
-        Automatically splits by month.
+        Automatically splits by granularity:
+        - Sub-daily intervals (1s, 1m): One file per day
+        - Daily+ intervals (1d, 1w): One file per year
         
         Args:
             bars: List of bar dicts
-            data_type: '1s', '1m', or '1d'
+            data_type: Interval string (e.g., '1s', '1m', '60m', '1d', '1w')
             symbol: Stock symbol
             compression: Compression codec (zstd, snappy, gzip, none)
             append: If True, append to existing file (reads, merges, writes)
@@ -461,38 +270,59 @@ class ParquetStorage:
         # Convert to DataFrame
         df = pd.DataFrame(bars)
         
-        # Ensure timestamp is datetime
-        # If timezone-aware, convert to UTC; if naive, assume already UTC
+        # Ensure timestamp is datetime and in exchange timezone
+        # Exchange group implies timezone (US_EQUITY = America/New_York)
+        # Data is stored timezone-aware but in exchange timezone (NO conversion)
+        exchange_tz = self._get_system_timezone()
+        
         df['timestamp'] = pd.to_datetime(df['timestamp'])
         if df['timestamp'].dt.tz is not None:
-            # Has timezone info, convert to UTC
-            df['timestamp'] = df['timestamp'].dt.tz_convert('UTC')
+            # Has timezone info, ensure it's in exchange timezone
+            df['timestamp'] = df['timestamp'].dt.tz_convert(exchange_tz)
         else:
-            # Naive timestamp, assume it's already UTC and mark it
-            df['timestamp'] = df['timestamp'].dt.tz_localize('UTC')
+            # Naive timestamp, assume it's already in exchange timezone
+            df['timestamp'] = df['timestamp'].dt.tz_localize(exchange_tz)
         
         # Sort by timestamp
         df = df.sort_values('timestamp')
         
-        # Group by year-month (extract directly to avoid timezone warning)
+        # Determine granularity using storage strategy
+        from app.managers.data_manager.interval_storage import FileGranularity
+        
+        granularity = self.storage_strategy.get_file_granularity(data_type)
+        
+        # Extract date components directly (already in exchange timezone)
+        # No conversion needed - timestamps are stored in exchange timezone
+        # July 15 ET trading day → bars/1s/AAPL/2025/07/15.parquet
         df['year'] = df['timestamp'].dt.year
         df['month'] = df['timestamp'].dt.month
-        grouped = df.groupby(['year', 'month']) if data_type != '1d' else df.groupby(['year'])
+        df['day'] = df['timestamp'].dt.day
+        
+        # Group based on granularity
+        if granularity == FileGranularity.DAILY:
+            # Sub-daily intervals: one file per day
+            grouped = df.groupby(['year', 'month', 'day'])
+        else:
+            # Daily+ intervals: one file per year
+            grouped = df.groupby(['year'])
         
         total_written = 0
         files_written = []
         
         for group_key, group_df in grouped:
-            if data_type == '1d':
-                year = group_key
+            if granularity == FileGranularity.YEARLY:
+                # group_key is a tuple when grouping by single column: (2024,)
+                year = group_key[0] if isinstance(group_key, tuple) else group_key
                 month = None
+                day = None
             else:
-                year, month = group_key
+                # DAILY granularity
+                year, month, day = group_key
             
-            file_path = self.get_file_path(data_type, symbol, year, month)
+            file_path = self.get_file_path(data_type, symbol, year, month, day)
             
             # Drop helper columns
-            group_df = group_df.drop(columns=['year', 'month'])
+            group_df = group_df.drop(columns=['year', 'month', 'day'])
             
             # Handle append mode
             if append and file_path.exists():
@@ -552,13 +382,24 @@ class ParquetStorage:
         # Convert to DataFrame
         df = pd.DataFrame(quotes)
         
-        # Ensure timestamp is datetime with UTC timezone
-        df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
+        # Ensure timestamp is datetime and in exchange timezone
+        # Exchange group implies timezone (US_EQUITY = America/New_York)
+        # Data is stored timezone-aware but in exchange timezone (NO conversion)
+        exchange_tz = self._get_system_timezone()
+        
+        df['timestamp'] = pd.to_datetime(df['timestamp'])
+        if df['timestamp'].dt.tz is not None:
+            # Has timezone info, ensure it's in exchange timezone
+            df['timestamp'] = df['timestamp'].dt.tz_convert(exchange_tz)
+        else:
+            # Naive timestamp, assume it's already in exchange timezone
+            df['timestamp'] = df['timestamp'].dt.tz_localize(exchange_tz)
         
         # Sort by timestamp
         df = df.sort_values('timestamp')
         
-        # Group by year-month-day (daily files)
+        # Extract date components directly (already in exchange timezone)
+        # No conversion needed - timestamps are stored in exchange timezone
         df['year'] = df['timestamp'].dt.year
         df['month'] = df['timestamp'].dt.month
         df['day'] = df['timestamp'].dt.day
@@ -614,33 +455,27 @@ class ParquetStorage:
         """Read bars from Parquet file(s).
         
         TIMEZONE BEHAVIOR:
-        - Input dates assumed to be in system timezone (system_manager.timezone)
-        - Output timestamps returned in system timezone by default
-        - Internal storage is UTC (transparent to caller)
-        - Handles UTC day boundaries for ET extended hours automatically
+        - Storage: Timestamps are timezone-aware in exchange timezone
+        - Exchange group implies timezone (US_EQUITY = America/New_York)
+        - Returns: Data returned as-is (no conversion) in exchange timezone
+        - Input dates: Assumed to be in exchange timezone
         
         Args:
-            data_type: '1s', '1m', or '1d'
+            data_type: Interval string (e.g., '1s', '1m', '60m', '1d', '1w')
             symbol: Stock symbol
-            start_date: Optional start date in system timezone
-            end_date: Optional end date in system timezone
-            request_timezone: Optional override for output timezone
-                            If None, uses system_manager.timezone
+            start_date: Optional start date in exchange timezone
+            end_date: Optional end date in exchange timezone
+            request_timezone: DEPRECATED - data always returned in exchange timezone
             regular_hours_only: If True, filter to regular trading hours only
                                (09:30-16:00 ET). Default False keeps all hours.
         
         Returns:
-            DataFrame with bars in request_timezone (or system timezone)
+            DataFrame with bars in exchange timezone (timezone-aware)
         
         Examples:
-            # Standard usage (system timezone)
+            # Standard usage
             df = storage.read_bars("1m", "AAPL", date(2025, 7, 2), date(2025, 7, 2))
-            # df['timestamp'] is in ET (system timezone)
-            
-            # Advanced: Get ET data in UTC
-            df = storage.read_bars("1m", "AAPL", date(2025, 7, 2), date(2025, 7, 2),
-                                  request_timezone="UTC")
-            # df['timestamp'] is in UTC
+            # df['timestamp'] is timezone-aware in ET (America/New_York)
         """
         symbol = symbol.upper()
         
@@ -675,27 +510,46 @@ class ParquetStorage:
             result = result.sort_values('timestamp').reset_index(drop=True)
             
         else:
-            # Read specific date range with UTC day boundary handling
-            # Convert input dates (system timezone) to UTC range
-            utc_start, utc_end = self._convert_dates_to_utc(
-                start_date, end_date, request_timezone
+            # Read specific date range
+            # Files are organized by exchange timezone day, so this is straightforward
+            start_dt = datetime.combine(start_date, datetime.min.time())
+            end_dt = datetime.combine(end_date, datetime.max.time())
+            
+            logger.info(f"[read_bars] Querying {data_type} for {symbol}: {start_dt} to {end_dt}")
+            
+            files = self._get_files_for_date_range(
+                data_type, symbol,
+                start_dt,
+                end_dt
             )
             
-            # Read from UTC partitions (may span multiple days!)
-            result = self._read_utc_partitions(data_type, symbol, utc_start, utc_end)
+            logger.info(f"[read_bars] Found {len(files)} files for {symbol} {data_type}: {files}")
+            
+            if not files:
+                logger.warning(f"No files found for {symbol} {data_type} in date range {start_date} to {end_date}")
+                return pd.DataFrame()
+            
+            # Read and concatenate files
+            dfs = []
+            for file_path in files:
+                try:
+                    df = pd.read_parquet(file_path)
+                    dfs.append(df)
+                except Exception as e:
+                    logger.error(f"Error reading {file_path}: {e}")
+            
+            if not dfs:
+                return pd.DataFrame()
+            
+            result = pd.concat(dfs, ignore_index=True)
+            result = result.sort_values('timestamp').reset_index(drop=True)
         
         if result.empty:
             logger.warning(f"No bars found for {symbol} {data_type}")
             return result
         
-        # Convert output to request timezone
-        if 'timestamp' in result.columns:
-            # Ensure timestamps are timezone-aware UTC
-            if result['timestamp'].dt.tz is None:
-                result['timestamp'] = pd.to_datetime(result['timestamp'], utc=True)
-            
-            # Convert to request timezone
-            result['timestamp'] = result['timestamp'].dt.tz_convert(request_timezone)
+        # Data is already in exchange timezone - no conversion needed
+        # Timestamps are timezone-aware as stored in parquet
         
         # Filter to regular trading hours if requested
         if regular_hours_only and not result.empty and start_date is not None:
@@ -819,20 +673,37 @@ class ParquetStorage:
             result = pd.concat(dfs, ignore_index=True)
             result = result.sort_values('timestamp').reset_index(drop=True)
         else:
-            # Read specific date range with UTC day boundary handling
-            utc_start, utc_end = self._convert_dates_to_utc(
-                start_date, end_date, request_timezone
+            # Read specific date range
+            # Quotes organized by exchange timezone day
+            files = self._get_files_for_date_range(
+                'quotes', symbol,
+                datetime.combine(start_date, datetime.min.time()),
+                datetime.combine(end_date, datetime.max.time())
             )
-            result = self._read_utc_partitions('quotes', symbol, utc_start, utc_end)
+            
+            if not files:
+                logger.warning(f"No quote files found for {symbol} in date range")
+                return pd.DataFrame()
+            
+            dfs = []
+            for file_path in files:
+                try:
+                    df = pd.read_parquet(file_path)
+                    dfs.append(df)
+                except Exception as e:
+                    logger.error(f"Error reading {file_path}: {e}")
+            
+            if not dfs:
+                return pd.DataFrame()
+            
+            result = pd.concat(dfs, ignore_index=True)
+            result = result.sort_values('timestamp').reset_index(drop=True)
         
         if result.empty:
             return result
         
-        # Convert output to request timezone
-        if 'timestamp' in result.columns:
-            if result['timestamp'].dt.tz is None:
-                result['timestamp'] = pd.to_datetime(result['timestamp'], utc=True)
-            result['timestamp'] = result['timestamp'].dt.tz_convert(request_timezone)
+        # Data already in exchange timezone - no conversion needed
+        # Timestamps are timezone-aware as stored in parquet
         
         logger.info(f"Loaded {len(result)} quotes for {symbol}")
         return result
@@ -846,8 +717,10 @@ class ParquetStorage:
     ) -> List[Path]:
         """Get list of files covering a date range.
         
-        For quotes (daily files), iterates through each day.
-        For bars, iterates through each month (1s, 1m) or year (1d).
+        For quotes: iterates through each day (daily files).
+        For bars: uses storage strategy to determine granularity:
+          - Sub-daily (1s, 1m): iterates through each day
+          - Daily+ (1d, 1w): iterates through each year
         """
         if start_date is None or end_date is None:
             # Fallback to all files (handled by caller)
@@ -872,27 +745,46 @@ class ParquetStorage:
                 
                 current += timedelta(days=1)
         else:
-            # Bars: iterate by month (1s, 1m) or year (1d)
-            current = start_date.replace(day=1)
-            end = end_date.replace(day=1)
+            # Bars: use storage strategy to determine granularity
+            from app.managers.data_manager.interval_storage import FileGranularity
+            from datetime import timedelta
             
-            while current <= end:
-                year = current.year
-                month = current.month if data_type != '1d' else None
+            granularity = self.storage_strategy.get_file_granularity(data_type)
+            
+            if granularity == FileGranularity.DAILY:
+                # Daily files: iterate through each day
+                current = start_date.replace(hour=0, minute=0, second=0, microsecond=0)
+                end = end_date.replace(hour=0, minute=0, second=0, microsecond=0)
                 
-                file_path = self.get_file_path(data_type, symbol, year, month)
-                if file_path.exists():
-                    files.append(file_path)
+                while current <= end:
+                    year = current.year
+                    month = current.month
+                    day = current.day
+                    
+                    file_path = self.get_file_path(data_type, symbol, year, month, day)
+                    if file_path.exists():
+                        files.append(file_path)
+                    
+                    current += timedelta(days=1)
+            else:
+                # Yearly files: iterate through years
+                current = start_date.replace(month=1, day=1)
+                end = end_date.replace(month=1, day=1)
                 
-                # Move to next month (or year for daily)
-                if data_type == '1d':
+                logger.info(f"[_get_files] YEARLY granularity for {data_type}, iterating {current.year} to {end.year}")
+                
+                while current <= end:
+                    year = current.year
+                    
+                    file_path = self.get_file_path(data_type, symbol, year, None, None)
+                    logger.info(f"[_get_files] Checking {file_path}, exists={file_path.exists()}")
+                    
+                    if file_path.exists():
+                        files.append(file_path)
+                    
                     current = current.replace(year=current.year + 1)
-                else:
-                    if current.month == 12:
-                        current = current.replace(year=current.year + 1, month=1)
-                    else:
-                        current = current.replace(month=current.month + 1)
         
+        logger.info(f"[_get_files] Returning {len(files)} files for {symbol} {data_type}")
         return files
     
     def get_available_symbols(self, data_type: str = '1m') -> List[str]:
@@ -920,6 +812,43 @@ class ParquetStorage:
                 symbols.add(symbol_dir.name)
         
         return sorted(symbols)
+    
+    def get_available_intervals(self, symbol: str) -> List[str]:
+        """Get list of available bar intervals for a symbol.
+        
+        Args:
+            symbol: Stock symbol
+            
+        Returns:
+            List of interval strings (e.g., ['1s', '1m', '1d'])
+        """
+        # Scan bars directory for intervals
+        bars_dir = self.base_path / self.exchange_group / "bars"
+        
+        if not bars_dir.exists():
+            return []
+        
+        intervals = set()
+        
+        # Check each interval directory
+        for interval_dir in bars_dir.glob("*"):
+            if interval_dir.is_dir():
+                # Check if this interval has data for the symbol
+                symbol_dir = interval_dir / symbol.upper()
+                if symbol_dir.exists() and symbol_dir.is_dir():
+                    # Check if there are any parquet files
+                    has_data = any(symbol_dir.rglob("*.parquet"))
+                    if has_data:
+                        intervals.add(interval_dir.name)
+        
+        # Also check for quotes
+        quotes_dir = self.base_path / self.exchange_group / "quotes" / symbol.upper()
+        if quotes_dir.exists() and quotes_dir.is_dir():
+            has_quotes = any(quotes_dir.rglob("*.parquet"))
+            if has_quotes:
+                intervals.add("quotes")
+        
+        return sorted(intervals)
     
     def get_date_range(self, data_type: str, symbol: str) -> Tuple[Optional[datetime], Optional[datetime]]:
         """Get earliest and latest dates available for a symbol.
