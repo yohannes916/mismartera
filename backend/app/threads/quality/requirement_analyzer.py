@@ -12,12 +12,15 @@ Requirements Covered:
     75-77: Configuration validation
 """
 
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, TYPE_CHECKING
 from dataclasses import dataclass, field
 from enum import Enum
 import re
 
 from app.logger import logger
+
+if TYPE_CHECKING:
+    from app.indicators import IndicatorConfig
 
 
 # =============================================================================
@@ -97,6 +100,24 @@ class SessionRequirements:
         
         # Add implicit requirements
         self.all_requirements.extend(self.implicit_intervals)
+
+
+@dataclass
+class IndicatorRequirements:
+    """Bar requirements for a single indicator.
+    
+    Attributes:
+        indicator_key: Unique indicator key (e.g., "sma_20_1d")
+        required_intervals: List of intervals needed (e.g., ["1m", "1d"])
+        historical_bars: Number of bars needed for warmup
+        historical_days: Estimated calendar days to cover historical_bars
+        reason: Human-readable explanation
+    """
+    indicator_key: str
+    required_intervals: List[str]
+    historical_bars: int
+    historical_days: int
+    reason: str
 
 
 # =============================================================================
@@ -195,8 +216,8 @@ def determine_required_base(interval: str) -> str:
     Rules (Req 9-11):
         - Sub-second (5s, 10s, etc.) → requires 1s (only valid source)
         - Minute (5m, 15m, 60m, etc.) → requires 1m (preferred, not 1s)
-        - Day (1d, 5d, etc.) → requires 1m (aggregation from 1m)
-        - Week (1w, 2w, etc.) → requires 1d (aggregation from 1d)
+        - Day (5d, 10d, etc.) → requires 1d (aggregation from 1d)
+        - Week (2w, 4w, etc.) → requires 1w (aggregation from 1w)
         
     Examples:
         >>> determine_required_base("5s")
@@ -206,7 +227,7 @@ def determine_required_base(interval: str) -> str:
         "1m"
         
         >>> determine_required_base("1d")
-        "1m"
+        "1d"
     """
     info = parse_interval(interval)
     
@@ -226,13 +247,13 @@ def determine_required_base(interval: str) -> str:
     if info.type == IntervalType.MINUTE:
         return "1m"
     
-    # Rule 3 (Req 11): Day intervals require 1m (for aggregation)
+    # Rule 3 (Req 11): Multi-day intervals require 1d (for aggregation)
     if info.type == IntervalType.DAY:
-        return "1m"
-    
-    # Rule 4: Week intervals require 1d (aggregate daily bars to weekly)
-    if info.type == IntervalType.WEEK:
         return "1d"
+    
+    # Rule 4: Multi-week intervals require 1w (aggregate weekly bars)
+    if info.type == IntervalType.WEEK:
+        return "1w"
     
     raise ValueError(f"Cannot determine base interval for: {interval}")
 
@@ -436,3 +457,245 @@ def validate_configuration(streams: List[str], mode: str) -> None:
             parse_interval(stream)
         except ValueError as e:
             raise ValueError(f"Invalid stream configuration: {e}")
+
+
+# =============================================================================
+# Indicator Auto-Provisioning
+# =============================================================================
+
+def analyze_indicator_requirements(
+    indicator_config: "IndicatorConfig",
+    system_manager,  # SystemManager singleton
+    warmup_multiplier: float = 2.0,
+    from_date = None,  # Reference date (defaults to current)
+    exchange: str = "NYSE"
+) -> IndicatorRequirements:
+    """Analyze bar requirements for an indicator (auto-provisioning).
+    
+    Determines what intervals and historical data are needed to compute
+    an indicator. Used by scanners to automatically provision required bars.
+    
+    **USES TIMEMANAGER**: All calendar calculations use TimeManager APIs
+    (accessed via SystemManager) to account for holidays, weekends, early
+    closes, and exchange-specific market hours.
+    
+    Args:
+        indicator_config: Indicator configuration
+        system_manager: SystemManager singleton (provides TimeManager access)
+        warmup_multiplier: Extra buffer for warmup (default 2.0)
+            - 2.0 means request 2x the warmup bars
+            - Accounts for holidays, gaps, data quality issues
+        from_date: Reference date to calculate back from (defaults to current)
+        exchange: Exchange identifier (default: "NYSE")
+    
+    Returns:
+        IndicatorRequirements with intervals and historical needs
+        
+    Examples:
+        >>> config = IndicatorConfig(name="sma", period=20, interval="1d")
+        >>> reqs = analyze_indicator_requirements(config, warmup_multiplier=2.0)
+        >>> reqs.required_intervals
+        ["1d"]  # Only needs daily bars (1d is a base interval)
+        >>> reqs.historical_bars
+        40  # 20 * 2.0
+        
+        >>> config = IndicatorConfig(name="sma", period=20, interval="5m")
+        >>> reqs = analyze_indicator_requirements(config, warmup_multiplier=2.0)
+        >>> reqs.required_intervals
+        ["1m", "5m"]  # Needs 1m base + 5m derived
+        >>> reqs.historical_bars
+        40
+        
+    Algorithm:
+        1. Parse indicator's interval
+        2. Determine if it needs a base interval (e.g., 5m needs 1m)
+        3. Calculate bars needed: indicator.warmup_bars() * warmup_multiplier
+        4. Estimate calendar days to cover those bars
+        5. Return requirements
+    """
+    from app.indicators import IndicatorConfig  # Import here to avoid circular dependency
+    from datetime import date, datetime, timedelta
+    
+    interval = indicator_config.interval
+    indicator_key = indicator_config.make_key()
+    
+    # Get TimeManager from SystemManager
+    time_manager = system_manager.get_time_manager()
+    
+    # Get reference date (current date if not specified)
+    if from_date is None:
+        current_time = time_manager.get_current_time()
+        from_date = current_time.date()
+    
+    # Parse the indicator's interval
+    interval_info = parse_interval(interval)
+    
+    # Determine required intervals
+    required_intervals = [interval]  # Always need the indicator's interval
+    
+    # Check if we need a base interval too
+    if not interval_info.is_base:
+        base_interval = determine_required_base(interval)
+        if base_interval and base_interval not in required_intervals:
+            required_intervals.insert(0, base_interval)  # Base comes first
+    
+    # Calculate bars needed
+    warmup_bars = indicator_config.warmup_bars()
+    historical_bars_needed = int(warmup_bars * warmup_multiplier)
+    
+    # Use TimeManager to calculate calendar days needed
+    # This accounts for actual holidays, weekends, early closes
+    historical_days = _estimate_calendar_days_via_timemanager(
+        time_manager=time_manager,
+        interval_info=interval_info,
+        bars_needed=historical_bars_needed,
+        from_date=from_date,
+        exchange=exchange
+    )
+    
+    # Generate reason
+    reason = (
+        f"{indicator_config.name.upper()}({indicator_config.period}) on {interval} "
+        f"needs {warmup_bars} bars for warmup, "
+        f"requesting {historical_bars_needed} bars ({warmup_multiplier}x buffer) "
+        f"= ~{historical_days} calendar days"
+    )
+    
+    return IndicatorRequirements(
+        indicator_key=indicator_key,
+        required_intervals=required_intervals,
+        historical_bars=historical_bars_needed,
+        historical_days=historical_days,
+        reason=reason
+    )
+
+
+def _estimate_calendar_days_via_timemanager(
+    time_manager,
+    interval_info: IntervalInfo,
+    bars_needed: int,
+    from_date,
+    exchange: str
+) -> int:
+    """Calculate calendar days needed to get N bars using TimeManager.
+    
+    **USES TIMEMANAGER**: All date calculations use TimeManager APIs to
+    account for actual holidays, weekends, early closes, and market hours.
+    
+    This is the CORRECT way to estimate - no hardcoded assumptions!
+    
+    Creates its own database session as needed for TimeManager queries.
+    
+    Args:
+        time_manager: TimeManager instance
+        interval_info: Parsed interval information
+        bars_needed: Number of bars needed
+        from_date: Reference date to calculate back from
+        exchange: Exchange identifier
+        
+    Returns:
+        Calendar days needed (exact, not estimated)
+        
+    Algorithm:
+        1. For daily/weekly: Walk back N trading days/weeks using TimeManager
+        2. For intraday: Calculate trading days needed, then walk back
+        3. Return actual calendar days between start and end dates
+    """
+    from datetime import datetime, timedelta
+    from app.models.database import SessionLocal
+    
+    # Create database session for TimeManager queries
+    with SessionLocal() as session:
+        # For daily intervals: Walk back N trading days
+        if interval_info.type == IntervalType.DAY:
+            # How many trading days do we need?
+            trading_days_needed = bars_needed * (interval_info.seconds // 86400)
+            
+            # Walk back using TimeManager (accounts for holidays/weekends)
+            start_date = time_manager.get_previous_trading_date(
+                session=session,
+                from_date=from_date,
+                n=int(trading_days_needed),
+                exchange=exchange
+            )
+            
+            if start_date is None:
+                # Fallback if we can't walk back (shouldn't happen)
+                logger.warning(f"Could not walk back {trading_days_needed} trading days from {from_date}")
+                return int(trading_days_needed * 1.5)  # Conservative estimate
+            
+            # Calculate actual calendar days
+            calendar_days = (from_date - start_date).days
+            return max(1, calendar_days)
+        
+        # For weekly intervals: Walk back N trading weeks
+        elif interval_info.type == IntervalType.WEEK:
+            # How many trading weeks do we need?
+            trading_weeks_needed = bars_needed * (interval_info.seconds // 604800)
+            trading_days_needed = int(trading_weeks_needed * 5)  # ~5 trading days per week
+            
+            # Walk back using TimeManager
+            start_date = time_manager.get_previous_trading_date(
+                session=session,
+                from_date=from_date,
+                n=trading_days_needed,
+                exchange=exchange
+            )
+            
+            if start_date is None:
+                logger.warning(f"Could not walk back {trading_days_needed} trading days from {from_date}")
+                return int(trading_weeks_needed * 7)
+            
+            calendar_days = (from_date - start_date).days
+            return max(7, calendar_days)
+        
+        # For intraday intervals: Calculate trading days needed based on market hours
+        elif interval_info.type in [IntervalType.SECOND, IntervalType.MINUTE]:
+            # Get trading session to know actual market hours
+            trading_session = time_manager.get_trading_session(
+                session=session,
+                date=from_date,
+                exchange=exchange
+            )
+            
+            if trading_session and trading_session.is_trading_day:
+                # Calculate seconds per trading day
+                open_time = trading_session.regular_open
+                close_time = trading_session.regular_close
+                hours = (datetime.combine(from_date, close_time) - 
+                        datetime.combine(from_date, open_time)).seconds
+                seconds_per_trading_day = hours
+                
+                # How many bars fit in one trading day?
+                bars_per_day = seconds_per_trading_day / interval_info.seconds
+                
+                # How many trading days?
+                trading_days_needed = bars_needed / bars_per_day
+                
+                # Round up and add buffer
+                trading_days_needed = int(trading_days_needed) + 1
+            else:
+                # Fallback: assume 6.5 hour trading day = 390 minutes
+                trading_day_seconds = 390 * 60
+                bars_per_day = trading_day_seconds / interval_info.seconds
+                trading_days_needed = int(bars_needed / bars_per_day) + 1
+            
+            # Walk back using TimeManager
+            start_date = time_manager.get_previous_trading_date(
+                session=session,
+                from_date=from_date,
+                n=trading_days_needed,
+                exchange=exchange
+            )
+            
+            if start_date is None:
+                logger.warning(f"Could not walk back {trading_days_needed} trading days from {from_date}")
+                return max(1, int(trading_days_needed * 1.5))
+            
+            calendar_days = (from_date - start_date).days
+            return max(1, calendar_days)
+            
+        else:
+            # Fallback for unknown types
+            logger.warning(f"Unknown interval type: {interval_info.type}")
+            return max(1, bars_needed)

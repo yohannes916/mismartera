@@ -28,6 +28,9 @@ from app.models.indicator_config import (
     IndicatorsConfig
 )
 
+# Strategy configurations
+from app.models.strategy_config import StrategyConfig
+
 
 # =============================================================================
 # Backtest Configuration
@@ -229,6 +232,85 @@ class StreamingConfig:
             raise ValueError("catchup_check_interval must be between 1 and 100")
 
 
+# =============================================================================
+# Scanner Framework Configuration
+# =============================================================================
+
+@dataclass
+class ScannerSchedule:
+    """Scanner schedule configuration for regular session scans.
+    
+    Attributes:
+        start: Start time (HH:MM format, e.g., "09:35")
+        end: End time (HH:MM format, e.g., "15:55")
+        interval: Scan interval (e.g., "5m", "15m")
+    """
+    start: str
+    end: str
+    interval: str
+    
+    def validate(self) -> None:
+        """Validate scanner schedule."""
+        from datetime import datetime
+        
+        # Validate time format
+        try:
+            datetime.strptime(self.start, "%H:%M")
+        except ValueError:
+            raise ValueError(f"Invalid start time format: {self.start}. Expected HH:MM")
+        
+        try:
+            datetime.strptime(self.end, "%H:%M")
+        except ValueError:
+            raise ValueError(f"Invalid end time format: {self.end}. Expected HH:MM")
+        
+        # Validate interval format
+        from app.threads.quality.requirement_analyzer import parse_interval
+        try:
+            parse_interval(self.interval)
+        except ValueError as e:
+            raise ValueError(f"Invalid interval '{self.interval}': {e}")
+
+
+@dataclass
+class ScannerConfig:
+    """Scanner configuration.
+    
+    Attributes:
+        module: Python module path (e.g., "scanners.gap_scanner")
+        enabled: Whether scanner is enabled
+        pre_session: Whether to run before session starts
+        regular_session: List of schedules for regular session scans
+        config: Scanner-specific configuration (e.g., {"universe": "data/universes/sp500.txt"})
+    """
+    module: str
+    enabled: bool = True
+    pre_session: bool = False
+    regular_session: Optional[List[ScannerSchedule]] = None
+    config: Dict[str, Any] = field(default_factory=dict)
+    
+    def validate(self) -> None:
+        """Validate scanner configuration."""
+        if not self.module:
+            raise ValueError("Scanner module path is required")
+        
+        # Module path validation (basic check)
+        if not all(part.isidentifier() for part in self.module.split('.')):
+            raise ValueError(f"Invalid module path: {self.module}")
+        
+        # Must have at least one schedule type
+        if not self.pre_session and not self.regular_session:
+            raise ValueError(
+                f"Scanner '{self.module}' must have at least one schedule type "
+                "(pre_session or regular_session)"
+            )
+        
+        # Validate regular session schedules
+        if self.regular_session:
+            for schedule in self.regular_session:
+                schedule.validate()
+
+
 @dataclass
 class SessionDataConfig:
     """Session data configuration.
@@ -240,6 +322,8 @@ class SessionDataConfig:
         historical: Historical data and indicators configuration
         gap_filler: Gap filler configuration (DataQualityManager)
         indicators: Indicator configurations (session and historical) - NEW!
+        scanners: Scanner configurations - NEW!
+        strategies: Strategy configurations - NEW!
     """
     symbols: List[str]
     streams: List[str]
@@ -247,6 +331,8 @@ class SessionDataConfig:
     historical: HistoricalConfig = field(default_factory=HistoricalConfig)
     gap_filler: GapFillerConfig = field(default_factory=GapFillerConfig)
     indicators: IndicatorsConfig = field(default_factory=IndicatorsConfig)
+    scanners: List[ScannerConfig] = field(default_factory=list)
+    strategies: List[StrategyConfig] = field(default_factory=list)
     
     def validate(self) -> None:
         """Validate session data configuration."""
@@ -291,6 +377,15 @@ class SessionDataConfig:
         self.historical.validate(self.symbols)
         self.gap_filler.validate()
         self.indicators.validate()
+        
+        # Validate scanners
+        for scanner in self.scanners:
+            scanner.validate()
+        
+        # Check for duplicate scanner modules
+        scanner_modules = [s.module for s in self.scanners if s.enabled]
+        if len(scanner_modules) != len(set(scanner_modules)):
+            raise ValueError("Duplicate scanner modules found in scanners list")
 
 
 # =============================================================================
@@ -522,12 +617,74 @@ class SessionConfig:
             enable_session_quality=gf_data.get("enable_session_quality", True)
         )
         
+        # Parse indicators config (NEW format in session_data_config.indicators)
+        indicators_data = sd_data.get("indicators", {})
+        
+        # Parse session indicators
+        session_indicators = []
+        for ind_data in indicators_data.get("session", []):
+            session_indicators.append(
+                SessionIndicatorConfig(
+                    name=ind_data.get("name"),
+                    period=ind_data.get("period"),
+                    interval=ind_data.get("interval"),
+                    type=ind_data.get("type"),
+                    params=ind_data.get("params", {})
+                )
+            )
+        
+        # Parse historical indicators
+        historical_indicators = []
+        for ind_data in indicators_data.get("historical", []):
+            historical_indicators.append(
+                HistoricalIndicatorConfig(
+                    name=ind_data.get("name"),
+                    period=ind_data.get("period"),
+                    unit=ind_data.get("unit"),
+                    interval=ind_data.get("interval", "1d"),
+                    type=ind_data.get("type", "historical"),
+                    params=ind_data.get("params", {})
+                )
+            )
+        
+        indicators_config = IndicatorsConfig(
+            session=session_indicators,
+            historical=historical_indicators
+        )
+        
+        # Parse scanners (NEW)
+        scanners = []
+        scanners_data = sd_data.get("scanners", [])
+        for scanner_dict in scanners_data:
+            scanner_config = ScannerConfig(
+                module=scanner_dict["module"],
+                enabled=scanner_dict.get("enabled", True),
+                pre_session=scanner_dict.get("pre_session", False),
+                regular_session=scanner_dict.get("regular_session"),
+                config=scanner_dict.get("config", {})
+            )
+            scanners.append(scanner_config)
+        
+        # Parse strategies (NEW)
+        strategies = []
+        strategies_data = sd_data.get("strategies", [])
+        for strategy_dict in strategies_data:
+            strategy_config = StrategyConfig(
+                module=strategy_dict["module"],
+                enabled=strategy_dict.get("enabled", True),
+                config=strategy_dict.get("config", {})
+            )
+            strategies.append(strategy_config)
+        
         session_data_config = SessionDataConfig(
             symbols=symbols,
             streams=streams,
             streaming=streaming,
             historical=historical,
-            gap_filler=gap_filler
+            gap_filler=gap_filler,
+            indicators=indicators_config,
+            scanners=scanners,
+            strategies=strategies
         )
         
         # Parse trading config (required)
@@ -642,6 +799,29 @@ class SessionConfig:
                 "max_retries": self.session_data_config.gap_filler.max_retries,
                 "retry_interval_seconds": self.session_data_config.gap_filler.retry_interval_seconds,
                 "enable_session_quality": self.session_data_config.gap_filler.enable_session_quality
+            },
+            "indicators": {
+                "session": [
+                    {
+                        "name": ind.name,
+                        "period": ind.period,
+                        "interval": ind.interval,
+                        "type": ind.type,
+                        "params": ind.params
+                    }
+                    for ind in self.session_data_config.indicators.session
+                ],
+                "historical": [
+                    {
+                        "name": ind.name,
+                        "period": ind.period,
+                        "unit": ind.unit,
+                        "interval": ind.interval,
+                        "type": ind.type,
+                        "params": ind.params
+                    }
+                    for ind in self.session_data_config.indicators.historical
+                ]
             }
         }
         

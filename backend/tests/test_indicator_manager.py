@@ -8,6 +8,7 @@ from app.indicators import (
     IndicatorManager,
     IndicatorConfig,
     IndicatorType,
+    IndicatorData,
     get_indicator_value,
     is_indicator_ready,
 )
@@ -49,7 +50,7 @@ class TestIndicatorManager:
         manager = IndicatorManager(session_data)
         
         assert manager.session_data == session_data
-        assert manager._symbol_indicators == {}
+        # No internal trackers - everything lives in session_data
     
     def test_register_symbol_indicators(self):
         """Test registering indicators for a symbol."""
@@ -73,9 +74,15 @@ class TestIndicatorManager:
             historical_bars={}
         )
         
-        # Verify registration
-        assert "AAPL" in manager._symbol_indicators
-        assert len(manager._symbol_indicators["AAPL"]) == 3
+        # Verify registration - check session_data.indicators
+        symbol_data = session_data.get_symbol_data("AAPL", internal=True)
+        assert symbol_data is not None
+        assert len(symbol_data.indicators) == 3
+        
+        # Verify each indicator has embedded config
+        for ind_data in symbol_data.indicators.values():
+            assert ind_data.config is not None
+            assert ind_data.config.interval == "5m"
     
     def test_update_indicators_single(self):
         """Test updating indicators with new bars."""
@@ -227,8 +234,16 @@ class TestSessionDataAPI:
         session_data = SessionData()
         symbol_data = session_data.register_symbol("AAPL")
         
-        # Store indicator value
-        session_data.set_indicator_value("AAPL", "sma_20_5m", 150.5, True)
+        # Create indicator data directly in session_data (new pattern)
+        symbol_data = session_data.get_symbol_data("AAPL", internal=True)
+        symbol_data.indicators["sma_20_5m"] = IndicatorData(
+            name="sma",
+            type="session",
+            interval="5m",
+            current_value=150.5,
+            last_updated=datetime.now(),
+            valid=True
+        )
         
         # Retrieve
         value = get_indicator_value(session_data, "AAPL", "sma_20_5m")
@@ -239,9 +254,17 @@ class TestSessionDataAPI:
         session_data = SessionData()
         symbol_data = session_data.register_symbol("AAPL")
         
-        # Store multi-value indicator
+        # Create multi-value indicator data directly
         values = {"upper": 155.0, "middle": 150.0, "lower": 145.0}
-        session_data.set_indicator_value("AAPL", "bbands_20_5m", values, True)
+        symbol_data = session_data.get_symbol_data("AAPL", internal=True)
+        symbol_data.indicators["bbands_20_5m"] = IndicatorData(
+            name="bbands",
+            type="session",
+            interval="5m",
+            current_value=values,
+            last_updated=datetime.now(),
+            valid=True
+        )
         
         # Retrieve individual values
         upper = get_indicator_value(session_data, "AAPL", "bbands_20_5m", "upper")
@@ -260,12 +283,21 @@ class TestSessionDataAPI:
         # Not ready initially
         assert not is_indicator_ready(session_data, "AAPL", "sma_20_5m")
         
-        # Set as ready
-        session_data.set_indicator_value("AAPL", "sma_20_5m", 150.0, True)
+        # Create ready indicator
+        symbol_data = session_data.get_symbol_data("AAPL", internal=True)
+        symbol_data.indicators["sma_20_5m"] = IndicatorData(
+            name="sma",
+            type="session",
+            interval="5m",
+            current_value=150.0,
+            last_updated=datetime.now(),
+            valid=True
+        )
         assert is_indicator_ready(session_data, "AAPL", "sma_20_5m")
         
         # Set as not ready
-        session_data.set_indicator_value("AAPL", "sma_20_5m", None, False)
+        symbol_data.indicators["sma_20_5m"].valid = False
+        symbol_data.indicators["sma_20_5m"].current_value = None
         assert not is_indicator_ready(session_data, "AAPL", "sma_20_5m")
     
     def test_get_all_indicators(self):
@@ -273,13 +305,20 @@ class TestSessionDataAPI:
         session_data = SessionData()
         symbol_data = session_data.register_symbol("AAPL")
         
-        # Store multiple indicators
-        session_data.set_indicator_value("AAPL", "sma_20_5m", 150.0, True)
-        session_data.set_indicator_value("AAPL", "rsi_14_5m", 55.3, True)
-        session_data.set_indicator_value("AAPL", "ema_20_5m", 151.2, True)
+        # Create multiple indicators directly
+        symbol_data = session_data.get_symbol_data("AAPL", internal=True)
+        for key, value in [("sma_20_5m", 150.0), ("rsi_14_5m", 55.3), ("ema_20_5m", 151.2)]:
+            symbol_data.indicators[key] = IndicatorData(
+                name=key.split("_")[0],
+                type="session",
+                interval="5m",
+                current_value=value,
+                last_updated=datetime.now(),
+                valid=True
+            )
         
         # Get all
-        all_indicators = session_data.get_all_indicators("AAPL")
+        all_indicators = symbol_data.indicators
         
         assert "sma_20_5m" in all_indicators
         assert "rsi_14_5m" in all_indicators

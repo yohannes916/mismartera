@@ -419,15 +419,6 @@ def _show_coordinator_status(system_mgr):
         else:
             coord_table.add_row("Worker Thread", "[red]Stopped[/red]")
         
-        # Active streams
-        if hasattr(coordinator, '_active_streams'):
-            active_count = len(coordinator._active_streams)
-            coord_table.add_row("Active Streams", f"{active_count} streams")
-            
-            if active_count > 0:
-                for (symbol, stream_type), _ in list(coordinator._active_streams.items())[:5]:  # Show first 5
-                    coord_table.add_row(f"  └─ {symbol} ({stream_type.value})", "Active")
-        
         # Time advancement
         if system_mgr.is_running():
             coord_table.add_row("Time Advancement", "[green]Active (respects system state)[/green]")

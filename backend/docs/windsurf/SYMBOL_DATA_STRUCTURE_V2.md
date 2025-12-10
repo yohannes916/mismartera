@@ -395,11 +395,16 @@ def to_json(self, include_data: bool = True, max_bars: int = 100) -> dict:
         }
     }
     
-    # Ticks (count only)
+    # Ticks (count + latest)
     if self.ticks:
         result["session"]["data"]["ticks"] = {
             "count": len(self.ticks),
-            "last_updated": self.ticks[-1].timestamp.isoformat()
+            "latest": {
+                "timestamp": self.ticks[-1].timestamp.isoformat(),
+                "price": self.ticks[-1].price,
+                "size": self.ticks[-1].size,
+                "exchange": self.ticks[-1].exchange
+            }
         }
     
     # Quotes (count + latest, timestamp included in latest)

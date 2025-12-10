@@ -103,7 +103,11 @@ class IndicatorConfig:
 class IndicatorData:
     """Indicator values stored in SessionData.
     
+    Self-describing structure with embedded configuration and state.
     This is what gets stored in SymbolSessionData.indicators dict.
+    
+    Pattern: "Infer from data structures" - the structure IS the registration.
+    By storing config and state here, we eliminate the need for separate tracking.
     """
     name: str
     type: str  # "session" or "historical"
@@ -114,3 +118,7 @@ class IndicatorData:
     
     # Optional: Full history (for charting, analysis)
     historical_values: Optional[list] = None
+    
+    # Self-describing metadata (makes structure self-contained)
+    config: Optional['IndicatorConfig'] = None  # Configuration for calculation
+    state: Optional['IndicatorResult'] = None   # Last result for stateful indicators (EMA, OBV, VWAP)

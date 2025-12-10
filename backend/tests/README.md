@@ -27,13 +27,17 @@ tests/
 │   └── test_perfect.json       # Perfect data config (example only)
 ├── unit/                        # Unit tests (mocks only)
 │   ├── test_quality_helpers.py
-│   └── test_stream_determination.py  # Stream determination logic
+│   ├── test_stream_determination.py  # Stream determination logic
+│   ├── test_scanner_base.py    # Scanner base classes (NEW)
+│   └── test_scanner_manager.py # Scanner manager (NEW)
 ├── integration/                 # Integration tests (test DB)
 │   ├── test_quality_calculation_flow.py
 │   ├── test_quality_with_database.py
-│   └── test_stream_determination_with_db.py  # Stream determination + DB
-├── e2e/                         # End-to-end tests (placeholder)
-│   └── __init__.py
+│   ├── test_stream_determination_with_db.py  # Stream determination + DB
+│   └── test_scanner_integration.py  # Scanner with real components (NEW)
+├── e2e/                         # End-to-end tests
+│   ├── __init__.py
+│   └── test_scanner_e2e.py     # Full scanner lifecycle (NEW)
 ├── conftest.py                  # Pytest configuration
 └── README.md                    # This file
 ```
@@ -538,16 +542,71 @@ def test_stream_smallest_1s_when_available():
 
 ---
 
+## Scanner Framework Tests
+
+### Test Coverage
+
+**Unit Tests** (`tests/unit/`)
+- `test_scanner_base.py` - BaseScanner, ScanContext, ScanResult
+- `test_scanner_manager.py` - ScannerManager, state machine, lifecycle
+
+**Integration Tests** (`tests/integration/`)
+- `test_scanner_integration.py` - Scanner with real SessionData
+
+**E2E Tests** (`tests/e2e/`)
+- `test_scanner_e2e.py` - Complete scanner workflows
+
+### Running Scanner Tests
+
+```bash
+# All scanner tests
+pytest tests/ -k scanner -v
+
+# Unit tests only (fast)
+pytest tests/unit/test_scanner_*.py -v
+
+# Integration tests
+pytest tests/integration/test_scanner_integration.py -v
+
+# E2E tests (slow)
+pytest tests/e2e/test_scanner_e2e.py -v -m e2e
+```
+
+### Scanner Test Scenarios
+
+**Pre-Session Scanner**
+- Setup → Scan → Teardown (immediate)
+- Universe loading from file
+- Indicator provisioning
+- Symbol promotion
+- Symbol cleanup
+
+**Regular Session Scanner**
+- Setup → Session Start → Scheduled Scans → Teardown
+- Schedule parsing (HH:MM format)
+- Next scan time calculation
+- Multiple scan executions
+- End-of-session teardown
+
+**Error Handling**
+- Import failures
+- Setup failures
+- Scan exceptions
+- Missing universe files
+
+---
+
 ## References
 
 - **Architecture:** `backend/docs/SESSION_ARCHITECTURE.md`
 - **Time Manager:** `backend/docs/TIME_MANAGER.md`
 - **Quality Audit:** `backend/docs/QUALITY_CALCULATION_AUDIT.md`
+- **Scanner Framework:** `backend/SCANNER_FRAMEWORK_COMPLETE.md`
 - **Pytest Docs:** https://docs.pytest.org/
 
 ---
 
-**Last Updated:** December 1, 2025  
-**Test Count:** 133 tests (80 unit + 53 integration)  
-**Coverage:** ~97% for quality modules (quality_helpers, stream_determination, gap_filler)  
-**Execution Time:** ~1.7s (all tests)
+**Last Updated:** December 8, 2025  
+**Test Count:** 160+ tests (95+ unit + 60+ integration + 5+ e2e)  
+**Coverage:** ~97% for quality modules, ~95% for scanner framework  
+**Execution Time:** ~2.5s (all tests, excluding e2e)

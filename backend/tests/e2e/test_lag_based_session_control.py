@@ -21,7 +21,6 @@ from collections import defaultdict, deque
 from app.threads.session_coordinator import SessionCoordinator
 from app.managers.data_manager.session_data import SessionData
 from app.threads.data_processor import DataProcessor
-from app.models.bar_data import BarData
 
 
 @pytest.mark.slow
@@ -201,14 +200,12 @@ class TestSymbolAddRemoveFlow:
         """Create a minimal SessionCoordinator for testing."""
         coordinator = Mock()
         coordinator._symbol_operation_lock = Mock()
-        coordinator._symbol_operation_lock.__enter__ = Mock()
-        coordinator._symbol_operation_lock.__exit__ = Mock()
-        coordinator._loaded_symbols = set()
+        coordinator._symbol_operation_lock.__enter__ = Mock(return_value=None)
+        coordinator._symbol_operation_lock.__exit__ = Mock(return_value=None)
         coordinator._pending_symbols = set()
         coordinator._symbol_check_counters = defaultdict(int)
         coordinator._bar_queues = {}
-        coordinator._streamed_data = {}
-        coordinator._generated_data = {}
+        # Note: _loaded_symbols, _streamed_data, _generated_data removed - now tracked in SessionData
         coordinator.session_config = Mock()
         coordinator.session_config.session_data_config = Mock()
         coordinator.session_config.session_data_config.symbols = ["RIVN"]
@@ -235,12 +232,12 @@ class TestSymbolAddRemoveFlow:
         """Removing symbol should clean all state."""
         coordinator = mock_coordinator
         
-        # Setup: Add some state for RIVN
-        coordinator._loaded_symbols.add("RIVN")
+        # Setup: Add some state for symbol that will be removed  
         coordinator._symbol_check_counters["RIVN"] = 100
-        coordinator._streamed_data["RIVN"] = ["1m"]
-        coordinator._generated_data["RIVN"] = ["5m"]
-        coordinator._bar_queues[("RIVN", "1m")] = deque()
+        coordinator._bar_queues[("RIVN", "1m")] = deque([1, 2, 3])
+        
+        # Verify symbol exists in session_data
+        assert coordinator.session_data.get_symbol_data("RIVN") is not None
         
         # Bind remove_symbol method
         coordinator.remove_symbol = SessionCoordinator.remove_symbol.__get__(coordinator)
@@ -249,12 +246,11 @@ class TestSymbolAddRemoveFlow:
         result = coordinator.remove_symbol("RIVN")
         
         assert result is True
-        assert "RIVN" not in coordinator.session_config.session_data_config.symbols
-        assert "RIVN" not in coordinator._loaded_symbols
+        # Check internal state cleanup (lag counters and queues)
         assert "RIVN" not in coordinator._symbol_check_counters
-        assert "RIVN" not in coordinator._streamed_data
-        assert "RIVN" not in coordinator._generated_data
         assert ("RIVN", "1m") not in coordinator._bar_queues
+        # Check session_data cleanup
+        assert coordinator.session_data.get_symbol_data("RIVN") is None
 
 
 @pytest.mark.slow
@@ -306,15 +302,18 @@ class TestPollingPattern:
     def test_accessor_methods_return_copies(self):
         """Accessor methods should return copies, not direct references."""
         # Mock coordinator state
-        loaded = {"AAPL", "RIVN"}
         pending = {"TSLA"}
         
         coordinator = Mock()
         coordinator._symbol_operation_lock = Mock()
-        coordinator._symbol_operation_lock.__enter__ = Mock()
-        coordinator._symbol_operation_lock.__exit__ = Mock()
-        coordinator._loaded_symbols = loaded
+        coordinator._symbol_operation_lock.__enter__ = Mock(return_value=None)
+        coordinator._symbol_operation_lock.__exit__ = Mock(return_value=None)
         coordinator._pending_symbols = pending
+        
+        # Create real session_data with symbols (loaded symbols now tracked there)
+        coordinator.session_data = SessionData()
+        coordinator.session_data.register_symbol("AAPL")
+        coordinator.session_data.register_symbol("RIVN")
         
         # Bind accessor methods
         coordinator.get_loaded_symbols = SessionCoordinator.get_loaded_symbols.__get__(coordinator)
@@ -325,16 +324,18 @@ class TestPollingPattern:
         pending_copy = coordinator.get_pending_symbols()
         
         # Verify they're copies
-        assert loaded_copy == loaded
+        assert "AAPL" in loaded_copy
+        assert "RIVN" in loaded_copy
         assert pending_copy == pending
-        assert loaded_copy is not loaded
+        assert loaded_copy is not coordinator.session_data._symbols  # Different object
         assert pending_copy is not pending
         
         # Modify copies shouldn't affect originals
         loaded_copy.add("NEW")
         pending_copy.add("OTHER")
         
-        assert "NEW" not in coordinator._loaded_symbols
+        # Original session_data shouldn't have NEW
+        assert coordinator.session_data.get_symbol_data("NEW") is None
         assert "OTHER" not in coordinator._pending_symbols
     
     def test_polling_for_pending_symbols(self):

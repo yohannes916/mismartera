@@ -100,7 +100,8 @@ class TestRequirementAnalysis:
     
     def test_derivable_intervals_identified(self, mock_session_config, mock_time_manager):
         """Test derivable intervals are identified."""
-        mock_session_config.session_data_config.streams = ["1m", "5m", "1h"]
+        # Use 60m instead of 1h (hourly intervals not supported)
+        mock_session_config.session_data_config.streams = ["1m", "5m", "60m"]
         
         coordinator = StreamRequirementsCoordinator(
             mock_session_config,
@@ -111,7 +112,7 @@ class TestRequirementAnalysis:
         
         assert result.required_base_interval == "1m"
         assert "5m" in result.derivable_intervals
-        assert "1h" in result.derivable_intervals
+        assert "60m" in result.derivable_intervals
         assert "1m" not in result.derivable_intervals  # Not derivable, it's the base
 
 

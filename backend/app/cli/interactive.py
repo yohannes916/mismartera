@@ -369,19 +369,23 @@ class InteractiveCLI:
                 return
             
             # Collect unique commands to keep (filter out junk)
+            # Iterate BACKWARDS to keep most recent occurrence of each command
             commands_to_keep = []
             seen = set()
             
-            for i in range(1, history_length + 1):
+            for i in range(history_length, 0, -1):  # Iterate backwards (newest to oldest)
                 cmd = readline.get_history_item(i)
                 if cmd and cmd.strip():
                     cmd_stripped = cmd.strip()
                     # Skip single chars, yes/no, exit/quit, and duplicates
                     if (len(cmd_stripped) > 1 and 
-                        cmd_stripped not in ['yes', 'no', 'exit', 'quit'] and
+                        cmd_stripped not in ['yes', 'no', 'exit', 'quit', 'y', 'n'] and
                         cmd_stripped not in seen):
                         commands_to_keep.append(cmd_stripped)
                         seen.add(cmd_stripped)
+            
+            # Reverse to restore chronological order (oldest to newest)
+            commands_to_keep.reverse()
             
             # Clear readline history and rebuild with filtered commands
             readline.clear_history()

@@ -89,7 +89,8 @@ class DataProcessor(threading.Thread):
         session_data: SessionData,
         system_manager,
         metrics: PerformanceMetrics,
-        indicator_manager=None
+        indicator_manager=None,
+        strategy_manager=None
     ):
         """Initialize data processor.
         
@@ -98,6 +99,7 @@ class DataProcessor(threading.Thread):
             system_manager: Reference to SystemManager (single source of truth)
             metrics: Performance metrics tracker
             indicator_manager: Reference to IndicatorManager (Phase 6)
+            strategy_manager: Reference to StrategyManager for strategy notifications
         """
         super().__init__(name="DataProcessor", daemon=True)
         
@@ -125,9 +127,13 @@ class DataProcessor(threading.Thread):
         # Subscription for waiting on analysis engine (Phase 7)
         self._analysis_subscription: Optional[StreamSubscription] = None
         
+        # Strategy manager reference (NEW)
+        self._strategy_manager = strategy_manager
+        
         # Note: Derived intervals now queried from SessionData (no separate tracking)
         # Query session_data.get_symbols_with_derived() to find work
-        self._realtime_indicators = []  # TODO: From config when indicator config added
+        # Indicator calculation delegated to IndicatorManager (wired during init)
+        # Indicators also stored in SessionData.SymbolSessionData.indicators (no separate tracking)
         
         # Auto-computation flag (always enabled for now)
         self._auto_compute_derived = True
@@ -343,6 +349,18 @@ class DataProcessor(threading.Thread):
                             self._analysis_subscription.wait_until_ready()
                             self._analysis_subscription.reset()
                         logger.debug("[DATA-DRIVEN] Analysis engine ready")
+                    
+                    # 4b. Notify strategy manager (NEW)
+                    self._notify_strategy_manager(symbol, interval)
+                    
+                    # Wait for strategies in data-driven mode
+                    if self._should_wait_for_analysis():
+                        logger.debug("[DATA-DRIVEN] Waiting for strategies...")
+                        if self._strategy_manager:
+                            success = self._strategy_manager.wait_for_strategies(timeout=None)
+                            if not success:
+                                logger.warning("[DATA-DRIVEN] Strategy timeout")
+                        logger.debug("[DATA-DRIVEN] Strategies ready")
                 else:
                     logger.debug(
                         f"[PROCESSOR] Skipping notification (session inactive): {symbol} {interval}"
@@ -500,45 +518,43 @@ class DataProcessor(threading.Thread):
     def _calculate_realtime_indicators(self, symbol: str, interval: str):
         """Calculate real-time indicators for a symbol/interval.
         
-        NOTE: This only calculates indicators when NEW data arrives.
-        Historical indicators are calculated by session coordinator before
-        session starts.
+        This calculates indicators for the BASE interval (e.g., 1m) when new data arrives.
+        Indicators for DERIVED intervals (5m, 15m, etc.) are calculated in 
+        _generate_derived_bars() after bars are generated.
         
-        Real-time indicators include: RSI, SMA, EMA, MACD, Bollinger Bands, etc.
-        Configuration will come from session_config.realtime_indicators when
-        indicator config is added.
-        
-        Implementation Status: DEFERRED
-        Reason: Indicator configuration system not yet designed
-        Priority: Can be added after Phase 4 core functionality complete
+        Real-time indicators include: RSI, SMA, EMA, MACD, Bollinger Bands, VWAP, etc.
         
         Args:
             symbol: Symbol to calculate indicators for
-            interval: Interval to calculate indicators for
+            interval: Interval to calculate indicators for (e.g., "1m", "5m")
         """
-        if not self._realtime_indicators:
+        if not self.indicator_manager:
             return
         
         try:
-            # TODO: Implement when indicator configuration is designed
-            # Planned approach:
-            #   1. Read bars from session_data (zero-copy)
-            #   2. For each configured indicator:
-            #      - Calculate indicator value (RSI, SMA, EMA, etc.)
-            #      - Store result in session_data
-            #   3. Log computation
+            # Get bars for this interval from session_data
+            symbol_data = self.session_data.get_symbol_data(symbol, internal=True)
+            if not symbol_data:
+                return
             
-            # Example indicators:
-            # - RSI (Relative Strength Index)
-            # - SMA (Simple Moving Average)
-            # - EMA (Exponential Moving Average)
-            # - MACD (Moving Average Convergence Divergence)
-            # - Bollinger Bands
-            # - ATR (Average True Range)
+            # Get the interval data
+            interval_data = symbol_data.bars.get(interval)
+            if not interval_data or not interval_data.data:
+                return
+            
+            # Get all bars for this interval
+            all_bars = list(interval_data.data)
+            
+            # Update indicators for this interval
+            self.indicator_manager.update_indicators(
+                symbol=symbol,
+                interval=interval,
+                bars=all_bars
+            )
             
             logger.debug(
-                f"Real-time indicator calculation for {symbol} {interval} "
-                f"(deferred until indicator config designed)"
+                f"{symbol}: Updated indicators for {interval} "
+                f"({len(all_bars)} bars)"
             )
             
         except Exception as e:
@@ -644,9 +660,10 @@ class DataProcessor(threading.Thread):
                         f"Notified analysis engine: {symbol} {derived_interval} bars"
                     )
             
-            # Notify about indicators (if configured)
-            if self._realtime_indicators:
-                for indicator_name in self._realtime_indicators:
+            # Notify about indicators (query from SessionData, no separate tracking)
+            symbol_data = self.session_data.get_symbol_data(symbol, internal=True)
+            if symbol_data and symbol_data.indicators:
+                for indicator_name in symbol_data.indicators.keys():
                     self._analysis_engine_queue.put(
                         (symbol, indicator_name, "indicator")
                     )
@@ -657,6 +674,62 @@ class DataProcessor(threading.Thread):
         except Exception as e:
             logger.error(
                 f"Error notifying analysis engine: {e}",
+                exc_info=True
+            )
+    
+    # =========================================================================
+    # Strategy Manager Notification (NEW)
+    # =========================================================================
+    
+    def _notify_strategy_manager(self, symbol: str, interval: str):
+        """Notify strategy manager that data is available.
+        
+        Routes notifications only to strategies subscribed to (symbol, interval).
+        Strategies read data from SessionData (zero-copy).
+        
+        Args:
+            symbol: Symbol with new data
+            interval: Interval with new data
+        """
+        # Check if notifications are paused
+        if not self._notifications_paused.is_set():
+            logger.debug(
+                f"[PROCESSOR] Dropping strategy notification (paused): {symbol} {interval}"
+            )
+            return
+        
+        if not self._strategy_manager:
+            return
+        
+        try:
+            # Get symbol data
+            symbol_data = self.session_data.get_symbol_data(symbol, internal=True)
+            if not symbol_data:
+                return
+            
+            # Notify about base interval (1m bars)
+            if interval == symbol_data.base_interval:
+                self._strategy_manager.notify_strategies(symbol, interval, "bars")
+                logger.debug(f"Notified strategies: {symbol} {interval}")
+            
+            # Notify about derived intervals
+            if interval == symbol_data.base_interval:
+                derived_intervals = [
+                    iv for iv, iv_data in symbol_data.bars.items()
+                    if iv_data.derived
+                ]
+                
+                for derived_interval in derived_intervals:
+                    self._strategy_manager.notify_strategies(
+                        symbol, derived_interval, "bars"
+                    )
+                    logger.debug(
+                        f"Notified strategies: {symbol} {derived_interval} (derived)"
+                    )
+        
+        except Exception as e:
+            logger.error(
+                f"Error notifying strategy manager: {e}",
                 exc_info=True
             )
     

@@ -38,6 +38,10 @@ def pytest_configure(config):
         "markers",
         "db: Tests requiring database (test or production)"
     )
+    config.addinivalue_line(
+        "markers",
+        "e2e: End-to-end tests with full system workflows (slowest)"
+    )
 
 
 def pytest_collection_modifyitems(config, items):
@@ -50,6 +54,11 @@ def pytest_collection_modifyitems(config, items):
         # Auto-mark tests in integration/ directory
         if "integration" in str(item.fspath):
             item.add_marker(pytest.mark.integration)
+        
+        # Auto-mark tests in e2e/ directory
+        if "e2e" in str(item.fspath):
+            item.add_marker(pytest.mark.e2e)
+            item.add_marker(pytest.mark.slow)
         
         # Auto-mark tests that use test_db fixture
         if "test_db" in item.fixturenames:

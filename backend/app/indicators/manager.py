@@ -27,6 +27,12 @@ class IndicatorManager:
     - Real-time updates (on new bars)
     
     All indicators stored in SessionData for fast access by AnalysisEngine.
+    
+    Pattern: "Infer from data structures"
+    - No separate tracking of configs or state
+    - Everything stored in session_data.indicators with embedded metadata
+    - Registration creates self-describing structures
+    - Calculation scans structures to find what needs updating
     """
     
     def __init__(self, session_data):
@@ -36,18 +42,7 @@ class IndicatorManager:
             session_data: SessionData instance
         """
         self.session_data = session_data
-        
-        # State storage for stateful indicators (EMA, OBV, VWAP, etc.)
-        # Structure: {symbol: {interval: {indicator_key: last_result}}}
-        self._indicator_state: Dict[str, Dict[str, Dict[str, IndicatorResult]]] = defaultdict(
-            lambda: defaultdict(dict)
-        )
-        
-        # Registered indicators per symbol
-        # Structure: {symbol: {interval: [IndicatorConfig, ...]}}
-        self._registered_indicators: Dict[str, Dict[str, List[IndicatorConfig]]] = defaultdict(
-            lambda: defaultdict(list)
-        )
+        # No internal state! Everything lives in session_data structures
     
     def register_symbol_indicators(
         self,
@@ -56,6 +51,9 @@ class IndicatorManager:
         historical_bars: Optional[Dict[str, List[BarData]]] = None
     ):
         """Register indicators for a symbol.
+        
+        Registration = Creating self-describing structures in session_data.
+        Each IndicatorData contains its config and state - no separate tracking.
         
         This works for:
         - Pre-session: Register all symbols at start
@@ -68,24 +66,38 @@ class IndicatorManager:
         """
         logger.info(f"{symbol}: Registering {len(indicators)} indicators")
         
-        # Group indicators by interval
-        by_interval = defaultdict(list)
+        symbol_data = self.session_data.get_symbol_data(symbol, internal=True)
+        if not symbol_data:
+            logger.error(f"{symbol}: Cannot register indicators - symbol not found in session_data")
+            return
+        
+        # Create self-describing structures
         for config in indicators:
-            by_interval[config.interval].append(config)
-            self._registered_indicators[symbol][config.interval].append(config)
+            key = config.make_key()
+            
+            # Registration = Create structure with embedded config
+            symbol_data.indicators[key] = IndicatorData(
+                name=config.name,
+                type="session",
+                interval=config.interval,
+                current_value=None,
+                last_updated=None,
+                valid=False,
+                config=config,  # Store config in structure
+                state=None      # Store state in structure
+            )
+            
+            logger.debug(f"{symbol}: Registered indicator {key}")
         
         # If historical bars provided, calculate initial values (warmup)
         if historical_bars:
-            for interval, ind_configs in by_interval.items():
-                if interval in historical_bars:
-                    bars = historical_bars[interval]
+            for key, ind_data in symbol_data.indicators.items():
+                if ind_data.config and ind_data.interval in historical_bars:
+                    bars = historical_bars[ind_data.interval]
                     logger.debug(
-                        f"{symbol}: Calculating {len(ind_configs)} indicators "
-                        f"on {interval} ({len(bars)} bars)"
+                        f"{symbol}: Calculating {key} on {ind_data.interval} ({len(bars)} bars)"
                     )
-                    
-                    for config in ind_configs:
-                        self._calculate_and_store(symbol, config, bars)
+                    self._calculate_and_store(symbol, ind_data, bars)
         
         logger.info(f"{symbol}: Indicator registration complete")
     
@@ -97,6 +109,9 @@ class IndicatorManager:
     ):
         """Update indicators when new bar arrives.
         
+        Scans session_data to find which indicators need calculation.
+        No separate tracking - infer from data structures.
+        
         Called by:
         - DataProcessor (on new base interval bar)
         - Session Coordinator (on derived bar generation)
@@ -106,90 +121,66 @@ class IndicatorManager:
             interval: Bar interval (e.g., "5m")
             bars: All bars for this interval (enough for warmup)
         """
-        # Get registered indicators for this symbol/interval
-        indicators = self._registered_indicators.get(symbol, {}).get(interval, [])
+        symbol_data = self.session_data.get_symbol_data(symbol, internal=True)
+        if not symbol_data:
+            return
         
-        if not indicators:
-            return  # No indicators registered for this interval
+        # Infer which indicators need updating by scanning session_data
+        indicators_to_update = [
+            ind_data for ind_data in symbol_data.indicators.values()
+            if ind_data.interval == interval and ind_data.config is not None
+        ]
+        
+        if not indicators_to_update:
+            return
         
         logger.debug(
-            f"{symbol}: Updating {len(indicators)} indicators on {interval}"
+            f"{symbol}: Updating {len(indicators_to_update)} indicators on {interval}"
         )
         
-        for config in indicators:
-            self._calculate_and_store(symbol, config, bars)
+        for ind_data in indicators_to_update:
+            self._calculate_and_store(symbol, ind_data, bars)
     
     def _calculate_and_store(
         self,
         symbol: str,
-        config: IndicatorConfig,
+        ind_data: IndicatorData,
         bars: List[BarData]
     ):
-        """Calculate indicator and store in SessionData.
+        """Calculate indicator and update in place.
+        
+        All metadata (config, state) stored in the structure itself.
+        No separate tracking needed.
         
         Args:
             symbol: Stock symbol
-            config: Indicator configuration
+            ind_data: IndicatorData from session_data (has config and state)
             bars: Historical bars
         """
-        # Get previous result (for stateful indicators)
-        indicator_key = config.make_key()
-        previous_result = self._indicator_state[symbol][config.interval].get(indicator_key)
-        
-        # Calculate indicator
-        result = calculate_indicator(
-            bars=bars,
-            config=config,
-            symbol=symbol,
-            previous_result=previous_result
-        )
-        
-        # Store result for next iteration (stateful indicators)
-        self._indicator_state[symbol][config.interval][indicator_key] = result
-        
-        # Store in SessionData for AnalysisEngine access
-        self._store_in_session_data(symbol, config, result)
-    
-    def _store_in_session_data(
-        self,
-        symbol: str,
-        config: IndicatorConfig,
-        result: IndicatorResult
-    ):
-        """Store indicator result in SessionData.
-        
-        Args:
-            symbol: Stock symbol
-            config: Indicator configuration
-            result: Indicator calculation result
-        """
-        symbol_data = self.session_data.get_symbol_data(symbol)
-        if not symbol_data:
-            logger.error(f"{symbol}: Symbol data not found, cannot store indicator")
+        if ind_data.config is None:
+            logger.warning(f"{symbol}: Indicator missing config, skipping")
             return
         
-        # Create indicator data object
-        indicator_key = config.make_key()
-        indicator_data = IndicatorData(
-            name=config.name,
-            type=config.type.value,
-            interval=config.interval,
-            current_value=result.value,
-            last_updated=result.timestamp,
-            valid=result.valid
+        # Calculate indicator using embedded config and state
+        result = calculate_indicator(
+            bars=bars,
+            config=ind_data.config,
+            symbol=symbol,
+            previous_result=ind_data.state  # Use stored state
         )
         
-        # Store in SessionData
-        if not hasattr(symbol_data, 'indicators'):
-            symbol_data.indicators = {}
-        
-        symbol_data.indicators[indicator_key] = indicator_data
+        # Update in place (no separate storage)
+        ind_data.current_value = result.value
+        ind_data.last_updated = result.timestamp
+        ind_data.valid = result.valid
+        ind_data.state = result  # Store for next iteration
         
         if result.valid:
             logger.debug(
-                f"{symbol}: {indicator_key} = "
+                f"{symbol}: {ind_data.config.make_key()} = "
                 f"{result.value if not isinstance(result.value, dict) else 'dict'}"
             )
+    
     
     def get_indicator_configs(
         self,
@@ -198,6 +189,8 @@ class IndicatorManager:
     ) -> List[IndicatorConfig]:
         """Get registered indicator configs for a symbol.
         
+        Infers from session_data structures (no separate tracking).
+        
         Args:
             symbol: Stock symbol
             interval: Filter by interval (None = all)
@@ -205,31 +198,39 @@ class IndicatorManager:
         Returns:
             List of indicator configurations
         """
+        symbol_data = self.session_data.get_symbol_data(symbol, internal=True)
+        if not symbol_data:
+            return []
+        
+        # Infer configs from data structures
+        configs = [
+            ind_data.config 
+            for ind_data in symbol_data.indicators.values()
+            if ind_data.config is not None
+        ]
+        
+        # Filter by interval if specified
         if interval:
-            return self._registered_indicators.get(symbol, {}).get(interval, [])
-        else:
-            # All intervals
-            all_configs = []
-            for interval_configs in self._registered_indicators.get(symbol, {}).values():
-                all_configs.extend(interval_configs)
-            return all_configs
+            configs = [c for c in configs if c.interval == interval]
+        
+        return configs
     
     def remove_symbol(self, symbol: str):
         """Remove symbol and all its indicators.
         
+        Indicators are stored in session_data, so this is just cleanup if needed.
+        SessionData.remove_symbol() already handles the actual deletion.
+        
         Args:
             symbol: Stock symbol to remove
         """
-        if symbol in self._indicator_state:
-            del self._indicator_state[symbol]
-        
-        if symbol in self._registered_indicators:
-            del self._registered_indicators[symbol]
-        
-        logger.info(f"{symbol}: Removed from indicator manager")
+        # No internal state to clean up anymore!
+        logger.info(f"{symbol}: Indicator manager cleanup (no-op, managed by session_data)")
     
     def get_indicator_count(self, symbol: str) -> int:
         """Get total number of indicators for a symbol.
+        
+        Infers from session_data structures.
         
         Args:
             symbol: Stock symbol
@@ -237,9 +238,14 @@ class IndicatorManager:
         Returns:
             Total indicator count
         """
+        symbol_data = self.session_data.get_symbol_data(symbol, internal=True)
+        if not symbol_data:
+            return 0
+        
+        # Count indicators with configs
         return sum(
-            len(configs) 
-            for configs in self._registered_indicators.get(symbol, {}).values()
+            1 for ind_data in symbol_data.indicators.values()
+            if ind_data.config is not None
         )
 
 
@@ -260,7 +266,7 @@ def get_indicator(
     Returns:
         IndicatorData or None if not found
     """
-    symbol_data = session_data.get_symbol_data(symbol)
+    symbol_data = session_data.get_symbol_data(symbol, internal=True)
     if not symbol_data or not hasattr(symbol_data, 'indicators'):
         return None
     

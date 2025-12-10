@@ -1,0 +1,40 @@
+{
+  "session_name": "Simple MA Cross Strategy Test",
+  "mode": "backtest",
+  "backtest_config": {
+    "start_date": "2024-11-01",
+    "end_date": "2024-11-01",
+    "speed_multiplier": 0,
+    "use_clock_time": false
+  },
+  "session_data_config": {
+    "symbols": ["AAPL", "GOOGL"],
+    "streams": ["1m"],
+    "streaming": {
+      "data_upkeep": {
+        "enabled": true,
+        "derived_intervals": [5, 15],
+        "auto_compute_derived": true
+      }
+    },
+    "historical": {
+      "enabled": true,
+      "trailing_days": 30,
+      "intervals": ["5m"],
+      "auto_load": true
+    },
+    "strategies": [
+      {
+        "module": "strategies.examples.simple_ma_cross",
+        "enabled": true,
+        "config": {
+          "symbols": ["AAPL"],
+          "interval": "5m",
+          "fast_period": 10,
+          "slow_period": 20,
+          "min_quality": 95.0
+        }
+      }
+    ]
+  }
+}

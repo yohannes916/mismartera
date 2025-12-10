@@ -111,6 +111,7 @@ class SessionCoordinator(threading.Thread):
         self._system_manager = system_manager
         self._data_manager = data_manager
         self._time_manager = system_manager.get_time_manager()
+        self._scanner_manager = system_manager.get_scanner_manager()
         
         # Phase 1 & 2 components (NEW architecture)
         self.session_data = get_session_data()  # Use singleton
@@ -576,6 +577,12 @@ class SessionCoordinator(threading.Thread):
                 f"{symbol}: Added mid-session successfully "
                 f"(streaming setup pending for live mode)"
             )
+            
+            # Notify strategies of new symbol (NEW)
+            strategy_manager = self._system_manager.get_strategy_manager()
+            if strategy_manager:
+                logger.debug(f"{symbol}: Notifying strategies of new symbol")
+                strategy_manager.notify_symbol_added(symbol)
         
         return success
     
@@ -881,6 +888,15 @@ class SessionCoordinator(threading.Thread):
                 self._calculate_historical_quality()
                 self.metrics.record_session_gap(gap_start)
                 logger.info("[SESSION_FLOW] 3.b.2.PHASE_2: Complete")
+                
+                # Phase 2.5: Pre-Session Scanner Setup
+                logger.info("[SESSION_FLOW] 3.b.2.PHASE_2.5: Pre-Session Scanner Setup phase starting")
+                logger.info("Phase 2.5: Pre-Session Scanner Setup")
+                success = self._scanner_manager.setup_pre_session_scanners()
+                if not success:
+                    logger.error("[SESSION_FLOW] 3.b.2.PHASE_2.5: Scanner setup FAILED")
+                    raise RuntimeError("Pre-session scanner setup failed")
+                logger.info("[SESSION_FLOW] 3.b.2.PHASE_2.5: Complete")
                 
                 # Phase 3: Queue Loading
                 logger.info("[SESSION_FLOW] 3.b.2.PHASE_3: Queue Loading phase starting")
@@ -2071,6 +2087,11 @@ class SessionCoordinator(threading.Thread):
         self._session_active = True
         self._session_start_time = self.metrics.start_timer()
         self.session_data.set_session_active(True)
+        
+        # Notify scanner manager that session has started
+        self._scanner_manager.on_session_start()
+        logger.info("[SESSION_FLOW] PHASE_4.1a: Scanner manager notified of session start")
+        
         logger.info("Session activated")
         logger.info("[SESSION_FLOW] PHASE_4.1: Complete - Session active")
     
@@ -2217,6 +2238,9 @@ class SessionCoordinator(threading.Thread):
             if self.mode == "backtest":
                 self._process_pending_symbols()
             
+            # CHECK: Execute scheduled scans (Scanner Framework)
+            self._scanner_manager.check_and_execute_scans()
+            
             # CHECK: Wait if streaming is paused (Phase 4: Dynamic symbols)
             if self.mode == "backtest":
                 # Wait until resume signal (blocks until _stream_paused is set)
@@ -2361,6 +2385,11 @@ class SessionCoordinator(threading.Thread):
         # 1. Deactivate session
         self._session_active = False
         self.session_data.set_session_active(False)
+        
+        # Notify scanner manager that session has ended
+        self._scanner_manager.on_session_end()
+        logger.info("[SESSION_FLOW] PHASE_6.1a: Scanner manager notified of session end")
+        
         logger.info("Session deactivated")
         
         # 2. Record session metrics

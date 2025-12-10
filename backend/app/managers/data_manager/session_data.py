@@ -327,9 +327,32 @@ class SymbolSessionData:
                 "low": self.metrics.low,
                 "last_update": self.metrics.last_update.isoformat() if self.metrics.last_update else None
             },
-            "indicators": self.indicators.copy(),
+            "indicators": {},  # Will populate below
             "historical": {}
         }
+        
+        # Serialize indicators (IndicatorData objects to dict)
+        for key, indicator_data in self.indicators.items():
+            # Check if it's an IndicatorData object or plain value
+            if hasattr(indicator_data, 'current_value'):
+                # IndicatorData object - serialize properly
+                # Get indicator category from embedded config if available
+                indicator_type = indicator_data.type
+                if indicator_data.config and hasattr(indicator_data.config, 'type'):
+                    # Use indicator category (trend, momentum, etc.) from config
+                    indicator_type = indicator_data.config.type.value
+                
+                result["indicators"][key] = {
+                    "name": indicator_data.name,
+                    "type": indicator_type,
+                    "interval": indicator_data.interval,
+                    "value": indicator_data.current_value,
+                    "last_updated": indicator_data.last_updated.isoformat() if indicator_data.last_updated else None,
+                    "valid": indicator_data.valid
+                }
+            else:
+                # Plain value (backward compatibility)
+                result["indicators"][key] = indicator_data
         
         # === BARS (Self-Describing Structure) ===
         for interval, interval_data in self.bars.items():
@@ -530,21 +553,19 @@ class SessionData:
         """
         # Session configuration
         # NOTE: Do NOT store start_time/end_time here!
-        # Get trading hours from data_manager.get_trading_hours() instead.
-        # Single source of truth: data_manager queries trading calendar for
-        # accurate hours (accounts for holidays, early closes, etc.)
+        # Get trading hours from time manager instead.
+        # Single source of truth: time manager queries trading calendar for
+        # accurate hours (accounts for holidays, early closes, weekends, etc.)
         self.historical_bars_trailing_days: int = 0
         self.historical_bars_intervals: List[int] = []
         
         # Session state
-        self._session_active: bool = False  # Managed by coordinator thread
+        # Start active - lag detection will deactivate if needed
+        self._session_active: bool = True
         
         # Per-symbol data structures
         self._symbols: Dict[str, SymbolSessionData] = {}
         
-        # Active streams tracking: {(symbol, stream_type): True}
-        # stream_type: "bars", "ticks", "quotes"
-        self._active_streams: Dict[Tuple[str, str], bool] = {}
         # Event to signal upkeep thread when new data arrives
         self._data_arrival_event = threading.Event()
         
@@ -553,6 +574,12 @@ class SessionData:
         
         # Thread lock for concurrent access
         self._lock = threading.RLock()
+        
+        # Scanner framework support
+        self._config_symbols: Set[str] = set()  # Symbols from session_config
+        self._symbol_locks: Dict[str, str] = {}  # {symbol: reason}
+        self._indicator_manager: Optional[Any] = None  # Set by coordinator
+        self._session_coordinator: Optional[Any] = None  # Set by coordinator
         
         logger.info("SessionData initialized")
     
@@ -724,47 +751,39 @@ class SessionData:
     def is_stream_active(self, symbol: str, stream_type: str) -> bool:
         """Check if a stream is currently active for a symbol.
         
+        Infers stream state from actual data structures - no separate tracker needed.
+        A stream is active if the symbol exists and has data for that stream type.
+        
         Args:
             symbol: Stock symbol
             stream_type: "bars", "ticks", or "quotes"
             
         Returns:
-            True if stream is active, False otherwise
-        """
-        symbol = symbol.upper()
-        stream_key = (symbol, stream_type.lower())
-        return stream_key in self._active_streams
-    
-    def mark_stream_active(self, symbol: str, stream_type: str) -> None:
-        """Mark a stream as active for a symbol.
-        
-        Args:
-            symbol: Stock symbol
-            stream_type: "bars", "ticks", or "quotes"
+            True if stream is active (data structures exist), False otherwise
         """
         symbol = symbol.upper()
         stream_type = stream_type.lower()
         
         with self._lock:
-            stream_key = (symbol, stream_type)
-            self._active_streams[stream_key] = True
-            logger.info(f"Marked {stream_type} stream active for {symbol}")
+            if symbol not in self._symbols:
+                return False
+            
+            symbol_data = self._symbols[symbol]
+            
+            # Infer stream state from existence of data structures
+            if stream_type == "bars":
+                return len(symbol_data.bars) > 0
+            elif stream_type == "quotes":
+                return len(symbol_data.quotes) > 0
+            elif stream_type == "ticks":
+                return len(symbol_data.ticks) > 0
+            
+            return False
     
-    def mark_stream_inactive(self, symbol: str, stream_type: str) -> None:
-        """Mark a stream as inactive for a symbol.
-        
-        Args:
-            symbol: Stock symbol
-            stream_type: "bars", "ticks", or "quotes"
-        """
-        symbol = symbol.upper()
-        stream_type = stream_type.lower()
-        
-        with self._lock:
-            stream_key = (symbol, stream_type)
-            if stream_key in self._active_streams:
-                del self._active_streams[stream_key]
-                logger.info(f"Marked {stream_type} stream inactive for {symbol}")
+    # mark_stream_active() and mark_stream_inactive() removed
+    # Stream state is now inferred from data structures automatically
+    # When you add data → stream becomes active
+    # When you remove symbol/interval → stream becomes inactive
     
     def add_bar(self, symbol: str, bar: BarData) -> None:
         """Add a bar to session data (base interval: 1s or 1m).
@@ -1574,10 +1593,8 @@ class SessionData:
         """
         with self._lock:
             num_symbols = len(self._symbols)
-            num_streams = len(self._active_streams)
             self._symbols.clear()
-            self._active_streams.clear()  # Clear active streams tracking
-            logger.warning(f"⚠ Session data cleared! Removed {num_symbols} symbols, {num_streams} active streams")
+            logger.warning(f"⚠ Session data cleared! Removed {num_symbols} symbols")
             import traceback
             logger.debug(f"Clear called from:\n{''.join(traceback.format_stack()[-5:-1])}")
     
@@ -1604,14 +1621,6 @@ class SessionData:
             
             # Remove SymbolSessionData
             del self._symbols[symbol]
-            
-            # Remove from active streams
-            streams_to_remove = [
-                key for key in self._active_streams.keys() 
-                if key[0] == symbol
-            ]
-            for key in streams_to_remove:
-                del self._active_streams[key]
             
             logger.info(
                 f"[SESSION_DATA] Removed {symbol} "
@@ -2004,6 +2013,370 @@ class SessionData:
             interval_int = interval
         
         return self.get_all_bars_including_historical(symbol, interval_int)
+    
+    # ==================== SCANNER FRAMEWORK SUPPORT ====================
+    
+    def set_indicator_manager(self, indicator_manager: Any) -> None:
+        """Set indicator manager reference (called by coordinator).
+        
+        Args:
+            indicator_manager: IndicatorManager instance
+        """
+        self._indicator_manager = indicator_manager
+        logger.debug("IndicatorManager reference set in SessionData")
+    
+    def set_session_coordinator(self, coordinator: Any) -> None:
+        """Set session coordinator reference (called by coordinator).
+        
+        Args:
+            coordinator: SessionCoordinator instance
+        """
+        self._session_coordinator = coordinator
+        logger.debug("SessionCoordinator reference set in SessionData")
+    
+    def register_config_symbol(self, symbol: str) -> None:
+        """Register a symbol from session_config (not adhoc).
+        
+        Args:
+            symbol: Symbol from session_config
+        """
+        symbol = symbol.upper()
+        with self._lock:
+            self._config_symbols.add(symbol)
+            logger.debug(f"Registered config symbol: {symbol}")
+    
+    def get_config_symbols(self) -> Set[str]:
+        """Get set of symbols from session_config.
+        
+        Returns:
+            Set of config symbol names
+        """
+        with self._lock:
+            return self._config_symbols.copy()
+    
+    # ==================== ADHOC DATA APIS ====================
+    
+    def add_historical_bars(self, symbol: str, interval: str, days: int) -> bool:
+        """Add historical bars for a symbol (adhoc, lightweight).
+        
+        Provisions historical bars only (no streaming).
+        Used by scanners for lightweight data provisioning.
+        
+        Args:
+            symbol: Symbol to add bars for
+            interval: Bar interval (e.g., "1d", "5m")
+            days: Number of historical days to load
+        
+        Returns:
+            True if successful
+        """
+        symbol = symbol.upper()
+        
+        logger.info(f"[ADHOC] add_historical_bars({symbol}, {interval}, {days} days)")
+        
+        # Register symbol if not exists
+        with self._lock:
+            if symbol not in self._symbols:
+                self.register_symbol(symbol)
+        
+        # Load historical bars via session coordinator
+        if self._session_coordinator:
+            # Coordinator will load historical bars
+            logger.debug(f"Requesting historical bars for {symbol} {interval}")
+            # TODO: Call coordinator method to load historical bars
+            # self._session_coordinator.load_historical_bars(symbol, interval, days)
+        else:
+            logger.warning("SessionCoordinator not set, cannot load historical bars")
+        
+        return True
+    
+    def add_session_bars(self, symbol: str, interval: str) -> bool:
+        """Add session bars for a symbol (adhoc, streaming only).
+        
+        Provisions live streaming bars only (no historical).
+        Used by scanners for real-time data.
+        
+        Args:
+            symbol: Symbol to add bars for
+            interval: Bar interval (e.g., "1m", "5m")
+        
+        Returns:
+            True if successful
+        """
+        symbol = symbol.upper()
+        
+        logger.info(f"[ADHOC] add_session_bars({symbol}, {interval})")
+        
+        # Register symbol if not exists
+        with self._lock:
+            if symbol not in self._symbols:
+                self.register_symbol(symbol)
+        
+        # Start streaming via session coordinator
+        if self._session_coordinator:
+            logger.debug(f"Requesting session bars stream for {symbol} {interval}")
+            # TODO: Call coordinator method to start streaming
+            # self._session_coordinator.start_bar_stream(symbol, interval)
+        else:
+            logger.warning("SessionCoordinator not set, cannot start streaming")
+        
+        return True
+    
+    def add_indicator(
+        self,
+        symbol: str,
+        indicator_type: str,
+        config: dict
+    ) -> bool:
+        """Add indicator for a symbol (adhoc, automatic bar provisioning).
+        
+        Uses requirement_analyzer to automatically provision required bars
+        (historical + session). This is the UNIFIED routine used by both
+        session_config and adhoc scanner indicators.
+        
+        Args:
+            symbol: Symbol to add indicator for
+            indicator_type: Indicator name (e.g., "sma", "rsi")
+            config: Indicator configuration dict
+                {
+                    "period": 20,
+                    "interval": "1d",
+                    "type": "trend",
+                    "params": {}
+                }
+        
+        Returns:
+            True if successful, False if already exists
+        """
+        from app.indicators import IndicatorConfig, IndicatorType
+        
+        symbol = symbol.upper()
+        
+        logger.info(f"[ADHOC] add_indicator({symbol}, {indicator_type}, interval={config.get('interval')})")
+        
+        with self._lock:
+            # Register symbol if not exists
+            if symbol not in self._symbols:
+                self.register_symbol(symbol)
+            
+            symbol_data = self._symbols[symbol]
+            
+            # Create IndicatorConfig
+            indicator_config = IndicatorConfig(
+                name=indicator_type,
+                type=IndicatorType(config.get("type", "trend")),
+                period=config.get("period", 0),
+                interval=config["interval"],
+                params=config.get("params", {})
+            )
+            
+            key = indicator_config.make_key()
+            
+            # Check if already exists
+            if key in symbol_data.indicators:
+                logger.debug(f"{symbol}: Indicator {key} already exists")
+                return False
+            
+            # UNIFIED ROUTINE: Use requirement_analyzer to determine needed bars
+            logger.debug(f"Analyzing requirements for {key}...")
+            
+            # Get SystemManager from SessionCoordinator
+            if not self._session_coordinator:
+                logger.error("SessionCoordinator not set - cannot analyze indicator requirements")
+                return False
+            
+            system_manager = self._session_coordinator._system_manager
+            
+            # Analyze requirements (creates its own DB session internally)
+            from app.threads.quality.requirement_analyzer import analyze_indicator_requirements
+            requirements = analyze_indicator_requirements(
+                indicator_config=indicator_config,
+                system_manager=system_manager,
+                warmup_multiplier=2.0,  # 2x period for warmup
+                from_date=None,  # Use current date
+                exchange="NYSE"
+            )
+            
+            logger.info(
+                f"[ADHOC] Indicator {key} requires: "
+                f"intervals={requirements.required_intervals}, "
+                f"historical_bars={requirements.historical_bars}, "
+                f"historical_days={requirements.historical_days}"
+            )
+            logger.debug(f"[ADHOC] Reasoning: {requirements.reason}")
+            
+            # Provision required bars automatically
+            for required_interval in requirements.required_intervals:
+                # Add historical bars for warmup
+                if requirements.historical_days > 0:
+                    logger.debug(
+                        f"[ADHOC] Provisioning {requirements.historical_days} days "
+                        f"of {required_interval} bars for {symbol}"
+                    )
+                    self.add_historical_bars(
+                        symbol=symbol,
+                        interval=required_interval,
+                        days=requirements.historical_days
+                    )
+                
+                # Add session bars for real-time updates
+                logger.debug(f"[ADHOC] Provisioning {required_interval} session bars for {symbol}")
+                self.add_session_bars(
+                    symbol=symbol,
+                    interval=required_interval
+                )
+            
+            # Add metadata (invalid until calculated)
+            from app.indicators import IndicatorData
+            symbol_data.indicators[key] = IndicatorData(
+                name=indicator_type,
+                type=config.get("type", "trend"),
+                interval=config["interval"],
+                current_value=None,
+                last_updated=None,
+                valid=False
+            )
+            
+            # Register with IndicatorManager
+            if self._indicator_manager:
+                self._indicator_manager.register_symbol_indicators(
+                    symbol=symbol,
+                    indicators=[indicator_config],
+                    historical_bars=None  # Will calculate when bars available
+                )
+                logger.debug(f"Registered indicator {key} with IndicatorManager")
+            else:
+                logger.warning("IndicatorManager not set, indicator not registered")
+            
+            logger.success(
+                f"[ADHOC] Added indicator {key} for {symbol} "
+                f"(provisioned {len(requirements.required_intervals)} intervals, "
+                f"{requirements.historical_days} days historical)"
+            )
+            return True
+    
+    def add_symbol(self, symbol: str) -> bool:
+        """Add symbol as full strategy symbol (idempotent).
+        
+        Promotes a symbol to full strategy symbol with all streams,
+        indicators, and historical data from session_config.
+        
+        This is IDEMPOTENT - safe to call multiple times.
+        
+        Args:
+            symbol: Symbol to add
+        
+        Returns:
+            True if added, False if already exists as config symbol
+        """
+        symbol = symbol.upper()
+        
+        logger.info(f"[ADHOC] add_symbol({symbol})")
+        
+        with self._lock:
+            # Check if already a config symbol
+            if symbol in self._config_symbols:
+                logger.debug(f"{symbol} already exists as config symbol (idempotent)")
+                return False
+            
+            # Register as config symbol
+            self._config_symbols.add(symbol)
+        
+        # Add symbol via session coordinator (triggers full loading)
+        if self._session_coordinator:
+            logger.info(f"Calling coordinator to add {symbol} (full loading)...")
+            # TODO: Call coordinator method
+            # success = await self._session_coordinator.add_symbol_mid_session(symbol)
+            # return success
+            logger.warning("Session coordinator add_symbol_mid_session not called (TODO)")
+            return True
+        else:
+            logger.error("SessionCoordinator not set, cannot add symbol")
+            return False
+    
+    def lock_symbol(self, symbol: str, reason: str) -> bool:
+        """Lock symbol to prevent removal.
+        
+        Used by analysis engine when position is open.
+        
+        Args:
+            symbol: Symbol to lock
+            reason: Reason for lock (e.g., "open_position")
+        
+        Returns:
+            True if locked
+        """
+        symbol = symbol.upper()
+        
+        with self._lock:
+            self._symbol_locks[symbol] = reason
+            logger.debug(f"Locked {symbol}: {reason}")
+            return True
+    
+    def unlock_symbol(self, symbol: str) -> bool:
+        """Unlock symbol to allow removal.
+        
+        Args:
+            symbol: Symbol to unlock
+        
+        Returns:
+            True if unlocked, False if not locked
+        """
+        symbol = symbol.upper()
+        
+        with self._lock:
+            if symbol in self._symbol_locks:
+                reason = self._symbol_locks.pop(symbol)
+                logger.debug(f"Unlocked {symbol} (was: {reason})")
+                return True
+            return False
+    
+    def is_symbol_locked(self, symbol: str) -> bool:
+        """Check if symbol is locked.
+        
+        Args:
+            symbol: Symbol to check
+        
+        Returns:
+            True if locked
+        """
+        symbol = symbol.upper()
+        
+        with self._lock:
+            return symbol in self._symbol_locks
+    
+    # ==================== SYMBOL REMOVAL WITH LOCK PROTECTION ====================
+    
+    def remove_symbol_adhoc(self, symbol: str) -> bool:
+        """Remove symbol (adhoc, with lock protection).
+        
+        Only removes if symbol is NOT locked (no open positions).
+        Used by scanners in teardown to cleanup unused symbols.
+        
+        Args:
+            symbol: Symbol to remove
+        
+        Returns:
+            True if removed, False if locked or not found
+        """
+        symbol = symbol.upper()
+        
+        with self._lock:
+            # Check if locked
+            if symbol in self._symbol_locks:
+                reason = self._symbol_locks[symbol]
+                logger.warning(f"Cannot remove {symbol}: locked ({reason})")
+                return False
+            
+            # Check if config symbol
+            if symbol in self._config_symbols:
+                logger.warning(f"Cannot remove {symbol}: config symbol")
+                return False
+        
+        # Remove using existing method
+        return self.remove_symbol(symbol)
+    
+    # ==================== JSON EXPORT ====================
     
     def to_json(self, complete: bool = True) -> Tuple[dict, Optional[datetime]]:
         """Export session data to JSON format.

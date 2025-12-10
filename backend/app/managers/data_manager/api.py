@@ -391,7 +391,9 @@ class DataManager:
         symbols: List[str],
         interval: str = "1m",
     ) -> int:
-        """Start bar streams without consuming them (for system startup).
+        """DEPRECATED/BROKEN: This function uses non-existent backtest_stream_coordinator module.
+        
+        Functionality has been moved to SessionCoordinator. Use stream_bars() instead.
         
         This method blocks while fetching current day data, registers symbols,
         and starts streaming. Returns immediately after setup - streams run in
@@ -405,120 +407,9 @@ class DataManager:
         Returns:
             Number of streams successfully started
         """
-        from app.managers.data_manager.session_data import get_session_data
-        from app.managers.data_manager.backtest_stream_coordinator import get_coordinator, StreamType
-        
-        if not symbols:
-            return 0
-        
-        session_data = get_session_data()
-        symbols = [s.upper() for s in symbols]
-        
-        mode = self.system_manager.mode.value
-        if mode != "backtest":
-            logger.warning("start_bar_streams() only works in backtest mode")
-            return 0
-        
-        coordinator = get_coordinator(self.system_manager, self)
-        coordinator.start_worker()
-        
-        # VALIDATION: Only 1s or 1m bars can be streamed
-        # Derived intervals (5m, 15m, etc.) are computed by the upkeep thread
-        if interval not in ["1s", "1m"]:
-            raise ValueError(
-                f"Stream coordinator only supports 1s or 1m bars (requested: {interval}). "
-                f"Derived intervals (5m, 15m, etc.) are automatically computed by the data upkeep thread. "
-                f"Check your session configuration."
-            )
-        
-        now = self.get_current_time()
-        current_date = now.date()
-        
-        # Get trading session from TimeManager (proper way - use provided session)
-        time_mgr = self.system_manager.get_time_manager()
-        trading_session = time_mgr.get_trading_session(session, current_date)
-        
-        if not trading_session or trading_session.is_holiday:
-            logger.warning(f"No trading session for {current_date}")
-            return 0
-        
-        # Construct market open/close times in market timezone, then convert to UTC
-        import pytz
-        market_tz_str = time_mgr.get_market_timezone()
-        market_tz = pytz.timezone(market_tz_str)
-        
-        start_time_naive = datetime.combine(current_date, trading_session.regular_open)
-        end_time_naive = datetime.combine(current_date, trading_session.regular_close)
-        
-        start_time = market_tz.localize(start_time_naive).astimezone(timezone.utc)
-        end_time = market_tz.localize(end_time_naive).astimezone(timezone.utc)
-        
-        streams_started = 0
-        
-        for symbol in symbols:
-            # Check for duplicates
-            if session_data.is_stream_active(symbol, "bars"):
-                logger.warning(f"Bar stream for {symbol} already active")
-                continue
-            
-            if coordinator.is_stream_active(symbol, StreamType.BAR):
-                logger.warning(f"Bar stream for {symbol} already active in coordinator")
-                continue
-            
-            # Register with session_data
-            session_data.register_symbol(symbol)
-            session_data.mark_stream_active(symbol, "bars")
-            
-            # Register with coordinator
-            success, input_queue = coordinator.register_stream(symbol, StreamType.BAR)
-            if not success:
-                logger.error(f"Failed to register bar stream for {symbol}")
-                session_data.mark_stream_inactive(symbol, "bars")
-                continue
-            
-            # BLOCK and fetch current day from Parquet
-            logger.info(f"Fetching bars for {symbol} on {current_date}...")
-            df = parquet_storage.read_bars(
-                interval,
-                symbol,
-                start_date=start_time,
-                end_date=end_time
-            )
-            
-            if df.empty:
-                logger.warning(f"No bars found for {symbol} on {current_date}")
-                session_data.mark_stream_inactive(symbol, "bars")
-                continue
-            
-            # Convert DataFrame to list of objects for iteration
-            bars = df.to_dict('records')
-            logger.info(f"Fetched {len(bars)} bars for {symbol} on {current_date}")
-            
-            # Feed to coordinator (bars will be added to session_data by coordinator as time advances)
-            def bar_iterator():
-                for bar in bars:
-                    yield BarData(
-                        symbol=bar['symbol'],
-                        timestamp=bar['timestamp'],
-                        interval=interval,
-                        open=bar['open'],
-                        high=bar['high'],
-                        low=bar['low'],
-                        close=bar['close'],
-                        volume=bar['volume'],
-                    )
-            
-            coordinator.feed_stream(symbol, StreamType.BAR, bar_iterator())
-            logger.success(f"✓ Started bar stream for {symbol} ({len(bars)} bars)")
-            streams_started += 1
-        
-        # Activate session immediately if we started streams successfully
-        # (Upkeep thread will also activate, but this ensures immediate activation)
-        if streams_started > 0:
-            session_data.activate_session()
-            logger.info(f"✓ Session activated ({streams_started} streams started)")
-        
-        return streams_started
+        logger.error("start_bar_streams() is deprecated - use SessionCoordinator.register_symbol() instead")
+        logger.info("Streaming is managed automatically by SessionCoordinator during system start")
+        return 0
     
     def stream_bars(
         self,
@@ -566,108 +457,33 @@ class DataManager:
         mode = self.system_manager.mode.value
 
         if mode == "backtest":
-            # Backtest mode: fetch current market day only, upkeep thread handles future
-            coordinator = get_coordinator(self.system_manager, self)
+            # Backtest mode - delegate to SessionCoordinator
+            # Streaming is managed automatically by SessionCoordinator thread
+            session_coordinator = self.system_manager.get_session_coordinator()
+            if not session_coordinator:
+                logger.error("SessionCoordinator not initialized")
+                return
             
-            # Start worker thread if not already running
-            coordinator.start_worker()
-            
-            now = self.get_current_time()
-            current_date = now.date()
-            
-            # Determine end time: CURRENT DAY ONLY at market close + 1 minute buffer
-            # Get market hours from TimeManager
-            from app.models.database import SessionLocal
-            from datetime import timedelta
-            with SessionLocal() as db_session:
-                time_mgr = self.system_manager.get_time_manager()
-                trading_session = time_mgr.get_trading_session(db_session, current_date)
-                if trading_session:
-                    start_time = trading_session.get_regular_open_datetime()
-                    end_time = trading_session.get_regular_close_datetime()
-                    # Add 1-minute buffer to capture close-of-day data (e.g., 16:00 bar)
-                    end_time = end_time + timedelta(minutes=1)
-                else:
-                    logger.warning(f"No trading session for {current_date}, using defaults")
-                    # Fallback if no session found
-                    from zoneinfo import ZoneInfo
-                    timezone_str = self.system_manager.timezone or "America/New_York"
-                    system_tz = ZoneInfo(timezone_str)
-                    start_time = datetime.combine(current_date, time(9, 30), tzinfo=system_tz)
-                    end_time = datetime.combine(current_date, time(16, 1), tzinfo=system_tz)
-            
-            # Register and feed each symbol's stream (BLOCKS while fetching)
+            # Check if symbols are registered and streaming
             for symbol in symbols:
-                # 1. Check session_data first for duplicate stream
-                if session_data.is_stream_active(symbol, "bars"):
-                    logger.warning(f"Bar stream for {symbol} already active in session_data")
+                if not self.session_data.get_symbol_data(symbol):
+                    logger.warning(f"Symbol {symbol} not registered in session")
                     continue
                 
-                # 2. Check coordinator for duplicate stream
-                if coordinator.is_stream_active(symbol, StreamType.BAR):
-                    logger.warning(f"Bar stream for {symbol} already active in coordinator")
-                    continue
-                
-                # 3. Register symbol with session_data
-                session_data.register_symbol(symbol)
-                session_data.mark_stream_active(symbol, "bars")
-                
-                # 4. Register stream with coordinator
-                success, input_queue = coordinator.register_stream(symbol, StreamType.BAR)
-                if not success:
-                    logger.error(f"Failed to register bar stream for {symbol}")
-                    session_data.mark_stream_inactive(symbol, "bars")
-                    continue
-                
-                # 5. BLOCK and fetch current day only from Parquet
-                logger.info(f"Fetching bars for {symbol} on {current_date}...")
-                df = parquet_storage.read_bars(
-                    interval,
-                    symbol,
-                    start_date=start_time,
-                    end_date=end_time
-                )
-                
-                if df.empty:
-                    logger.warning(f"No bars found for {symbol} on {current_date}")
-                    session_data.mark_stream_inactive(symbol, "bars")
-                    continue
-                
-                # Convert DataFrame to list of dicts for iteration
-                bars = df.to_dict('records')
-                logger.info(f"Fetched {len(bars)} bars for {symbol} on {current_date}")
-                
-                # Feed data to coordinator (bars will be added to session_data by coordinator as time advances)
-                def bar_iterator():
-                    for bar in bars:
-                        if cancel_event.is_set():
-                            break
-                        yield BarData(
-                            symbol=bar['symbol'],
-                            timestamp=bar['timestamp'],
-                            interval=interval,
-                            open=bar['open'],
-                            high=bar['high'],
-                            low=bar['low'],
-                            close=bar['close'],
-                            volume=bar['volume'],
-                        )
-                
-                coordinator.feed_stream(symbol, StreamType.BAR, bar_iterator())
-                logger.success(f"✓ Started bar stream for {symbol} ({len(bars)} bars)")
+                # In backtest mode, streaming is managed by SessionCoordinator
+                # Data flows: DB → StreamCoordinator → DataProcessor → SessionData
+                # This API just returns current bars from session_data
+                try:
+                    bars = self.session_data.get_bars(symbol, interval, internal=True)
+                    if bars:
+                        for bar in bars:
+                            if cancel_event.is_set():
+                                break
+                            yield bar
+                except Exception as e:
+                    logger.error(f"Error accessing bars for {symbol}: {e}")
             
-            # All symbols started, now yield from merged stream if consumer wants to iterate
-            # NOTE: For system startup, we don't consume - streams run in coordinator worker thread
-            # The coordinator worker already adds bars to session_data, so we just yield them here
-            for data in coordinator.get_merged_stream():
-                if cancel_event.is_set():
-                    break
-                
-                yield data
-            
-            # Cleanup when stream ends
-            for symbol in symbols:
-                session_data.mark_stream_inactive(symbol, "bars")
+            # Cleanup
             self._bar_stream_cancel_tokens.pop(stream_id, None)
             return
 
@@ -903,79 +719,29 @@ class DataManager:
         mode = self.system_manager.mode.value
 
         if mode == "backtest":
-            # Backtest mode: use central coordinator to merge streams chronologically
-            # Both DataManager and coordinator use TimeManager for time synchronization
-            coordinator = get_coordinator(self.system_manager, self)
+            # Backtest mode - delegate to SessionCoordinator
+            session_coordinator = self.system_manager.get_session_coordinator()
+            if not session_coordinator:
+                logger.error("SessionCoordinator not initialized")
+                return
             
-            # Start worker thread if not already running
-            coordinator.start_worker()
-            
-            # Get backtest window from time_manager
-            time_mgr = self.system_manager.get_time_manager()
-            now = time_mgr.get_current_time()
-            
-            # Determine end time (end of backtest window at market close + 1 minute buffer)
-            if time_mgr.backtest_end_date is None:
-                logger.warning("backtest_end_date not set, using current date")
-                end_date = now
-            else:
-                # End at market close on backtest_end_date + 1 minute buffer
-                from app.models.database import SessionLocal
-                from datetime import timedelta
-                with SessionLocal() as db_session:
-                    trading_session = time_mgr.get_trading_session(db_session, time_mgr.backtest_end_date)
-                    if trading_session:
-                        end_date = trading_session.get_regular_close_datetime()
-                        # Add 1-minute buffer to capture close-of-day data
-                        end_date = end_date + timedelta(minutes=1)
-                    else:
-                        # Fallback
-                        from zoneinfo import ZoneInfo
-                        timezone_str = self.system_manager.timezone or "America/New_York"
-                        system_tz = ZoneInfo(timezone_str)
-                        end_date = datetime.combine(time_mgr.backtest_end_date, time(16, 1), tzinfo=system_tz)
-            
-            # Register and feed each symbol's stream
+            # Check if symbols are registered
             for symbol in symbols:
-                # Check if stream already active
-                if coordinator.is_stream_active(symbol, StreamType.QUOTE):
-                    logger.warning(
-                        f"Quote stream for {symbol} already active, skipping registration"
-                    )
+                if not self.session_data.get_symbol_data(symbol):
+                    logger.warning(f"Symbol {symbol} not registered in session")
                     continue
                 
-                # Register stream
-                success, input_queue = coordinator.register_stream(symbol, StreamType.QUOTE)
-                if not success:
-                    logger.error(f"Failed to register quote stream for {symbol}")
-                    continue
-                
-                # Feed data to coordinator
-                def feed_quotes(sym: str):
-                    """Feed quotes from DB to coordinator."""
-                    quotes = QuoteRepository.get_quotes_by_symbol(
-                        session,
-                        sym,
-                        start_date=now,
-                        end_date=end_date,
-                    )
-                    
-                    def quote_iterator():
-                        for q in quotes:
+                # In backtest mode, quote streaming managed by SessionCoordinator
+                # Return current quotes from session_data
+                try:
+                    symbol_data = self.session_data.get_symbol_data(symbol, internal=True)
+                    if symbol_data and symbol_data.quotes:
+                        for quote in symbol_data.quotes:
                             if cancel_event.is_set():
                                 break
-                            yield q
-                    
-                    coordinator.feed_stream(sym, StreamType.QUOTE, quote_iterator())
-                
-                # Feed quotes to stream
-                feed_quotes(symbol)
-            
-            # Yield from merged stream (quotes don't update session tracker volume/high/low)
-            for data in coordinator.get_merged_stream():
-                if cancel_event.is_set():
-                    break
-                yield data
+                            yield quote
+                except Exception as e:
+                    logger.error(f"Error accessing quotes for {symbol}: {e}")
             
             # Cleanup
             self._quote_stream_cancel_tokens.pop(stream_id, None)
@@ -1039,101 +805,29 @@ class DataManager:
         mode = self.system_manager.mode.value
 
         if mode == "backtest":
-            # Backtest mode: use central coordinator to merge streams chronologically
-            # Both DataManager and coordinator use TimeManager for time synchronization
-            coordinator = get_coordinator(self.system_manager, self)
+            # Backtest mode - delegate to SessionCoordinator
+            session_coordinator = self.system_manager.get_session_coordinator()
+            if not session_coordinator:
+                logger.error("SessionCoordinator not initialized")
+                return
             
-            # Start worker thread if not already running
-            coordinator.start_worker()
-            
-            # Get backtest window from time_manager
-            time_mgr = self.system_manager.get_time_manager()
-            now = time_mgr.get_current_time()
-            
-            # Determine end time (end of backtest window at market close + 1 minute buffer)
-            if time_mgr.backtest_end_date is None:
-                logger.warning("backtest_end_date not set, using current date")
-                end_date = now
-            else:
-                # End at market close on backtest_end_date + 1 minute buffer
-                from app.models.database import SessionLocal
-                from datetime import timedelta
-                with SessionLocal() as db_session:
-                    trading_session = time_mgr.get_trading_session(db_session, time_mgr.backtest_end_date)
-                    if trading_session:
-                        end_date = trading_session.get_regular_close_datetime()
-                        # Add 1-minute buffer to capture close-of-day data
-                        end_date = end_date + timedelta(minutes=1)
-                    else:
-                        # Fallback
-                        from zoneinfo import ZoneInfo
-                        timezone_str = self.system_manager.timezone or "America/New_York"
-                        system_tz = ZoneInfo(timezone_str)
-                        end_date = datetime.combine(time_mgr.backtest_end_date, time(16, 1), tzinfo=system_tz)
-            
-            # Register and feed each symbol's stream
+            # Check if symbols are registered
             for symbol in symbols:
-                # Check if stream already active
-                if coordinator.is_stream_active(symbol, StreamType.TICK):
-                    logger.warning(
-                        f"Tick stream for {symbol} already active, skipping registration"
-                    )
+                if not self.session_data.get_symbol_data(symbol):
+                    logger.warning(f"Symbol {symbol} not registered in session")
                     continue
                 
-                # Register stream
-                success, input_queue = coordinator.register_stream(symbol, StreamType.TICK)
-                if not success:
-                    logger.error(f"Failed to register tick stream for {symbol}")
-                    continue
-                
-                # Feed data to coordinator
-                def feed_ticks(sym: str):
-                    """Feed ticks from Parquet to coordinator."""
-                    df = parquet_storage.read_bars(
-                        '1s',  # Ticks stored as 1s bars
-                        sym,
-                        start_date=now,
-                        end_date=end_date
-                    )
-                    bars = df.to_dict('records') if not df.empty else []
-                    
-                    def tick_iterator():
-                        for bar in bars:
+                # In backtest mode, tick streaming managed by SessionCoordinator
+                # Return current ticks from session_data
+                try:
+                    symbol_data = self.session_data.get_symbol_data(symbol, internal=True)
+                    if symbol_data and symbol_data.ticks:
+                        for tick in symbol_data.ticks:
                             if cancel_event.is_set():
                                 break
-                            yield TickData(
-                                symbol=bar['symbol'],
-                                timestamp=bar['timestamp'],
-                                price=bar['close'],
-                                size=bar['volume'],
-                            )
-                    
-                    coordinator.feed_stream(sym, StreamType.TICK, tick_iterator())
-                
-                # Feed ticks to stream
-                feed_ticks(symbol)
-            
-            # Yield from merged stream (ticks stored as bars, can update session tracker)
-            from app.managers.data_manager.session_tracker import get_session_tracker
-            tracker = get_session_tracker()
-            
-            for data in coordinator.get_merged_stream():
-                if cancel_event.is_set():
-                    break
-                
-                # Update session tracker with tick/bar data
-                if hasattr(data, 'high') and hasattr(data, 'low') and hasattr(data, 'volume'):
-                    session_date = data.timestamp.date()
-                    tracker.update_session(
-                        symbol=data.symbol,
-                        session_date=session_date,
-                        bar_high=data.high,
-                        bar_low=data.low,
-                        bar_volume=data.volume,
-                        timestamp=data.timestamp
-                    )
-                
-                yield data
+                            yield tick
+                except Exception as e:
+                    logger.error(f"Error accessing ticks for {symbol}: {e}")
             
             # Cleanup
             self._tick_stream_cancel_tokens.pop(stream_id, None)

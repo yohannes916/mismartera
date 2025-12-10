@@ -1,0 +1,60 @@
+{
+  "session_name": "Scanner Framework Test",
+  "mode": "backtest",
+  "exchange_group": "US_EQUITY",
+  "asset_class": "EQUITY",
+  "backtest_config": {
+    "start_date": "2024-01-02",
+    "end_date": "2024-01-02",
+    "speed_multiplier": 0.0
+  },
+  "session_data_config": {
+    "symbols": [
+      "AAPL",
+      "MSFT"
+    ],
+    "streams": [
+      "1m"
+    ],
+    "streaming": {
+      "catchup_threshold_seconds": 60,
+      "catchup_check_interval": 10
+    },
+    "historical": {
+      "enable_quality": true,
+      "data": [
+        {
+          "trailing_days": 20,
+          "intervals": ["1d"],
+          "apply_to": "all"
+        }
+      ]
+    },
+    "gap_filler": {
+      "enable_session_quality": true,
+      "max_retries": 5,
+      "retry_interval_seconds": 60
+    },
+    "indicators": {
+      "session": [],
+      "historical": []
+    },
+    "scanners": [
+      {
+        "module": "scanners.examples.gap_scanner_complete",
+        "enabled": true,
+        "pre_session": true,
+        "regular_session": null,
+        "config": {
+          "universe": "data/universes/sp500_sample.txt"
+        }
+      }
+    ]
+  },
+  "trading_config": {
+    "max_buying_power": 100000,
+    "max_per_trade": 10000,
+    "max_per_symbol": 20000,
+    "max_open_positions": 5
+  }
+}

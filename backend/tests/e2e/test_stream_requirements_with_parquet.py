@@ -108,20 +108,17 @@ def write_test_bars_parquet(
     import pyarrow as pa
     import pyarrow.parquet as pq
     from datetime import timedelta
+    from app.managers.data_manager.interval_storage import IntervalStorageStrategy
     
-    # Create bar directory structure
-    if interval == "1d":
-        # Daily: YYYY.parquet
-        file_path = (
-            base_path / exchange_group / "bars" / interval / symbol /
-            f"{start_dt.year}.parquet"
-        )
-    else:
-        # Intraday: YYYY/MM.parquet
-        file_path = (
-            base_path / exchange_group / "bars" / interval / symbol /
-            f"{start_dt.year}" / f"{start_dt.month:02d}.parquet"
-        )
+    # Use production storage strategy to get correct file path
+    storage_strategy = IntervalStorageStrategy(base_path, exchange_group)
+    file_path = storage_strategy.get_file_path(
+        interval, 
+        symbol, 
+        start_dt.year, 
+        start_dt.month, 
+        start_dt.day
+    )
     
     file_path.parent.mkdir(parents=True, exist_ok=True)
     

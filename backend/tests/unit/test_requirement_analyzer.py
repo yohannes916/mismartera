@@ -56,14 +56,6 @@ class TestIntervalParsing:
         assert info.seconds == 300
         assert info.is_base is False
     
-    def test_parse_1h_interval(self):
-        """Test parsing 1h interval."""
-        info = parse_interval("1h")
-        assert info.interval == "1h"
-        assert info.type == IntervalType.HOUR
-        assert info.seconds == 3600
-        assert info.is_base is False  # Hours never base
-    
     def test_parse_1d_interval(self):
         """Test parsing 1d interval."""
         info = parse_interval("1d")
@@ -128,22 +120,22 @@ class TestBaseIntervalDetermination:
         """Test 30m requires 1m base (Req 10)."""
         assert determine_required_base("30m") == "1m"
     
-    def test_1h_requires_1m(self):
-        """Test 1h requires 1m base (Req 11)."""
-        assert determine_required_base("1h") == "1m"
+    def test_60m_requires_1m(self):
+        """Test 60m (1 hour) requires 1m base (Req 11)."""
+        assert determine_required_base("60m") == "1m"
     
-    def test_4h_requires_1m(self):
-        """Test 4h requires 1m base (Req 11)."""
-        assert determine_required_base("4h") == "1m"
+    def test_240m_requires_1m(self):
+        """Test 240m (4 hours) requires 1m base (Req 11)."""
+        assert determine_required_base("240m") == "1m"
     
-    def test_1d_requires_1m(self):
-        """Test 1d requires 1m for aggregation (Req 11)."""
-        # 1d is itself a base, but when generating from scratch we use 1m
+    def test_1d_is_base(self):
+        """Test 1d is a base interval (Req 11)."""
+        # 1d is a base interval and returns itself
         assert determine_required_base("1d") == "1d"
     
-    def test_5d_requires_1m(self):
-        """Test 5d requires 1m base (Req 11)."""
-        assert determine_required_base("5d") == "1m"
+    def test_5d_requires_1d(self):
+        """Test 5d requires 1d base (Req 11)."""
+        assert determine_required_base("5d") == "1d"
     
     def test_base_interval_returns_itself(self):
         """Test base intervals return themselves."""
@@ -345,13 +337,13 @@ class TestComplexScenarios:
     
     def test_multi_timeframe_analysis(self):
         """Test multi-timeframe analysis."""
-        reqs = analyze_session_requirements(["1m", "5m", "15m", "1h", "1d"])
+        reqs = analyze_session_requirements(["1m", "5m", "15m", "60m", "1d"])
         assert reqs.required_base_interval == "1m"
-        assert set(reqs.derivable_intervals) == {"5m", "15m", "1h", "1d"}
+        assert set(reqs.derivable_intervals) == {"5m", "15m", "60m", "1d"}
     
     def test_conflict_resolution(self):
         """Test conflict resolution (5s needs 1s, overrides 1m)."""
-        reqs = analyze_session_requirements(["5s", "5m", "1h", "1d"])
+        reqs = analyze_session_requirements(["5s", "5m", "60m", "1d"])
         assert reqs.required_base_interval == "1s"  # Smallest wins
         # 1m is also derivable because 5m requires 1m, which must be generated from 1s
-        assert set(reqs.derivable_intervals) == {"5s", "1m", "5m", "1h", "1d"}
+        assert set(reqs.derivable_intervals) == {"5s", "1m", "5m", "60m", "1d"}

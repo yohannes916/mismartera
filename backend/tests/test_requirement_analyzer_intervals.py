@@ -7,7 +7,7 @@ import pytest
 from app.threads.quality.requirement_analyzer import (
     analyze_session_requirements,
     parse_interval,
-    get_base_interval_priority,
+    IntervalType,
 )
 
 
@@ -16,31 +16,67 @@ class TestIntervalParsing:
     
     def test_parse_seconds(self):
         """Test parsing second intervals."""
-        assert parse_interval("1s") == (1, "s")
-        assert parse_interval("5s") == (5, "s")
-        assert parse_interval("10s") == (10, "s")
-        assert parse_interval("30s") == (30, "s")
+        info = parse_interval("1s")
+        assert info.interval == "1s"
+        assert info.type == IntervalType.SECOND
+        assert info.seconds == 1
+        
+        info = parse_interval("5s")
+        assert info.seconds == 5
+        
+        info = parse_interval("10s")
+        assert info.seconds == 10
+        
+        info = parse_interval("30s")
+        assert info.seconds == 30
     
     def test_parse_minutes(self):
         """Test parsing minute intervals."""
-        assert parse_interval("1m") == (1, "m")
-        assert parse_interval("5m") == (5, "m")
-        assert parse_interval("15m") == (15, "m")
-        assert parse_interval("30m") == (30, "m")
-        assert parse_interval("60m") == (60, "m")
+        info = parse_interval("1m")
+        assert info.interval == "1m"
+        assert info.type == IntervalType.MINUTE
+        assert info.seconds == 60
+        
+        info = parse_interval("5m")
+        assert info.seconds == 300
+        
+        info = parse_interval("15m")
+        assert info.seconds == 900
+        
+        info = parse_interval("30m")
+        assert info.seconds == 1800
+        
+        info = parse_interval("60m")
+        assert info.seconds == 3600
     
     def test_parse_days(self):
         """Test parsing day intervals."""
-        assert parse_interval("1d") == (1, "d")
-        assert parse_interval("5d") == (5, "d")
-        assert parse_interval("10d") == (10, "d")
+        info = parse_interval("1d")
+        assert info.interval == "1d"
+        assert info.type == IntervalType.DAY
+        assert info.seconds == 86400
+        
+        info = parse_interval("5d")
+        assert info.seconds == 86400 * 5
+        
+        info = parse_interval("10d")
+        assert info.seconds == 86400 * 10
     
     def test_parse_weeks(self):
         """Test parsing week intervals."""
-        assert parse_interval("1w") == (1, "w")
-        assert parse_interval("2w") == (2, "w")
-        assert parse_interval("4w") == (4, "w")
-        assert parse_interval("52w") == (52, "w")
+        info = parse_interval("1w")
+        assert info.interval == "1w"
+        assert info.type == IntervalType.WEEK
+        assert info.seconds == 604800
+        
+        info = parse_interval("2w")
+        assert info.seconds == 604800 * 2
+        
+        info = parse_interval("4w")
+        assert info.seconds == 604800 * 4
+        
+        info = parse_interval("52w")
+        assert info.seconds == 604800 * 52
     
     def test_reject_hourly(self):
         """Test that hourly intervals are rejected."""
@@ -69,24 +105,25 @@ class TestBaseIntervalPriority:
     """Test base interval priority ordering."""
     
     def test_priority_order(self):
-        """Test base interval priority: 1s < 1m < 1d < 1w."""
-        assert get_base_interval_priority("1s") < get_base_interval_priority("1m")
-        assert get_base_interval_priority("1m") < get_base_interval_priority("1d")
-        assert get_base_interval_priority("1d") < get_base_interval_priority("1w")
+        """Test base interval priority: 1s < 1m < 1d < 1w (by seconds)."""
+        # Priority is determined by seconds (smaller = higher priority)
+        assert parse_interval("1s").seconds < parse_interval("1m").seconds
+        assert parse_interval("1m").seconds < parse_interval("1d").seconds
+        assert parse_interval("1d").seconds < parse_interval("1w").seconds
     
     def test_same_unit_priority(self):
         """Test priority within same unit."""
         # Seconds
-        assert get_base_interval_priority("1s") < get_base_interval_priority("5s")
+        assert parse_interval("1s").seconds < parse_interval("5s").seconds
         
         # Minutes
-        assert get_base_interval_priority("1m") < get_base_interval_priority("5m")
+        assert parse_interval("1m").seconds < parse_interval("5m").seconds
         
         # Days
-        assert get_base_interval_priority("1d") < get_base_interval_priority("5d")
+        assert parse_interval("1d").seconds < parse_interval("5d").seconds
         
         # Weeks
-        assert get_base_interval_priority("1w") < get_base_interval_priority("4w")
+        assert parse_interval("1w").seconds < parse_interval("4w").seconds
 
 
 class TestRequirementAnalyzer:
@@ -177,10 +214,9 @@ class TestRequirementAnalyzer:
     
     def test_empty_list(self):
         """Test with empty stream list."""
-        result = analyze_session_requirements([])
-        
-        # Should default to 1m
-        assert result.required_base_interval == "1m"
+        # Empty streams list should raise an error (changed behavior - now validates)
+        with pytest.raises(ValueError, match="Streams list cannot be empty"):
+            analyze_session_requirements([])
     
     def test_duplicate_intervals(self):
         """Test with duplicate intervals."""

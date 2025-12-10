@@ -72,6 +72,8 @@ class SystemManager:
         self._time_manager: Optional['TimeManager'] = None
         self._data_manager: Optional['DataManager'] = None
         self._execution_manager: Optional[object] = None  # TODO: Type when implemented
+        self._scanner_manager: Optional['ScannerManager'] = None
+        self._strategy_manager: Optional['StrategyManager'] = None
         
         # Thread pool (created on start)
         self._coordinator: Optional['SessionCoordinator'] = None
@@ -250,6 +252,38 @@ class SystemManager:
             raise NotImplementedError("ExecutionManager not yet implemented")
         return self._execution_manager
     
+    def get_scanner_manager(self) -> 'ScannerManager':
+        """
+        Get ScannerManager singleton.
+        
+        Returns:
+            ScannerManager instance
+            
+        Raises:
+            RuntimeError: If managers not initialized
+        """
+        if self._scanner_manager is None:
+            from app.threads.scanner_manager import ScannerManager
+            self._scanner_manager = ScannerManager(self)
+            logger.debug("ScannerManager created")
+        return self._scanner_manager
+    
+    def get_strategy_manager(self) -> 'StrategyManager':
+        """
+        Get StrategyManager singleton.
+        
+        Returns:
+            StrategyManager instance
+            
+        Raises:
+            RuntimeError: If managers not initialized
+        """
+        if self._strategy_manager is None:
+            from app.strategies.manager import StrategyManager
+            self._strategy_manager = StrategyManager(self)
+            logger.debug("StrategyManager created")
+        return self._strategy_manager
+    
     # =========================================================================
     # Configuration Management
     # =========================================================================
@@ -390,6 +424,31 @@ class SystemManager:
             logger.info("[SESSION_FLOW] 2.b.1: TimeManager created")
             data_manager = self.get_data_manager()
             logger.info("[SESSION_FLOW] 2.b.2: DataManager created")
+            scanner_manager = self.get_scanner_manager()
+            logger.info("[SESSION_FLOW] 2.b.3: ScannerManager created")
+            
+            # Initialize scanner manager (load scanners from config)
+            success = scanner_manager.initialize()
+            if not success:
+                raise RuntimeError("Scanner manager initialization failed")
+            logger.info("[SESSION_FLOW] 2.b.4: ScannerManager initialized")
+            
+            # Get strategy manager
+            strategy_manager = self.get_strategy_manager()
+            logger.info("[SESSION_FLOW] 2.b.5: StrategyManager created")
+            
+            # Initialize strategy manager (load strategies from config)
+            success = strategy_manager.initialize()
+            if not success:
+                raise RuntimeError("Strategy manager initialization failed")
+            logger.info("[SESSION_FLOW] 2.b.6: StrategyManager initialized")
+            
+            # Start strategies (before threads start)
+            success = strategy_manager.start_strategies()
+            if not success:
+                raise RuntimeError("Failed to start strategies")
+            logger.info("[SESSION_FLOW] 2.b.7: Strategies started")
+            
             logger.info("[SESSION_FLOW] 2.b: Complete - Managers initialized")
             
             # 3. Apply backtest configuration (if needed)
@@ -504,7 +563,8 @@ class SystemManager:
         self._data_processor = DataProcessor(
             session_data=session_data,
             system_manager=self,
-            metrics=self._performance_metrics
+            metrics=self._performance_metrics,
+            strategy_manager=self._strategy_manager
         )
         
         # 3. Create DataQualityManager (quality + gap filling)
@@ -655,6 +715,12 @@ class SystemManager:
         logger.info("=" * 70)
         logger.info("STOPPING TRADING SYSTEM")
         logger.info("=" * 70)
+        
+        # Stop strategies first (before threads)
+        if self._strategy_manager is not None:
+            logger.info("Stopping strategies...")
+            self._strategy_manager.stop_strategies()
+            logger.success("Strategies stopped")
         
         # Stop threads in reverse order
         if self._analysis_engine is not None:

@@ -1,0 +1,72 @@
+{
+  "mode": "backtest",
+  "backtest_config": {
+    "start_date": "2024-01-02",
+    "end_date": "2024-01-02",
+    "speed_multiplier": 0.0
+  },
+  "session_data_config": {
+    "symbols": [
+      "AAPL",
+      "MSFT"
+    ],
+    "streams": [
+      "1m"
+    ],
+    "streaming": {
+      "catchup_threshold_seconds": 60,
+      "catchup_check_interval": 10
+    },
+    "historical": {
+      "enable_quality": true,
+      "data": [
+        {
+          "trailing_days": 20,
+          "intervals": ["1d"],
+          "apply_to": "all"
+        }
+      ]
+    },
+    "gap_filler": {
+      "enable_session_quality": true,
+      "max_retries": 5,
+      "retry_interval_seconds": 60
+    },
+    "indicators": {
+      "session": [],
+      "historical": []
+    },
+    "scanners": [
+      {
+        "module": "scanners.gap_scanner",
+        "enabled": true,
+        "pre_session": true,
+        "regular_session": null,
+        "config": {
+          "universe": "data/universes/sp500_sample.txt"
+        }
+      },
+      {
+        "module": "scanners.momentum_scanner",
+        "enabled": true,
+        "pre_session": false,
+        "regular_session": [
+          {
+            "start": "09:35",
+            "end": "15:55",
+            "interval": "5m"
+          }
+        ],
+        "config": {
+          "universe": "data/universes/nasdaq100_sample.txt"
+        }
+      }
+    ]
+  },
+  "trading_config": {
+    "max_buying_power": 100000,
+    "max_per_trade": 10000,
+    "max_per_symbol": 20000,
+    "max_open_positions": 5
+  }
+}
