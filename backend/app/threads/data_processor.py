@@ -771,3 +771,52 @@ class DataProcessor(threading.Thread):
             },
             "_running": self._running
         }
+    
+    # =========================================================================
+    # Session Lifecycle (Phase 1 & 2 of Revised Flow)
+    # =========================================================================
+    
+    def teardown(self):
+        """Reset to initial state and deallocate resources (Phase 1).
+        
+        Called at START of new session (before data loaded).
+        Clears caches, resets flags, prepares for fresh session.
+        
+        Must be idempotent (safe to call multiple times).
+        """
+        logger.debug("DataProcessor.teardown() - resetting state")
+        
+        # Clear notification queue (drain any pending)
+        while not self._notification_queue.empty():
+            try:
+                self._notification_queue.get_nowait()
+            except queue.Empty:
+                break
+        
+        # Reset processing times (statistics)
+        if hasattr(self, '_processing_times'):
+            self._processing_times.clear()
+        
+        # Clear subscriptions will be rebuilt in setup()
+        # Note: Don't stop the thread, just reset state
+        
+        logger.debug("DataProcessor teardown complete")
+    
+    def setup(self):
+        """Initialize for new session (Phase 2).
+        
+        Called after data loaded, before session activated.
+        Can access SessionData (symbols, bars, indicators).
+        
+        Allocates resources, registers subscriptions.
+        """
+        logger.debug("DataProcessor.setup() - initializing for new session")
+        
+        # Ensure thread is running
+        if not self.is_alive():
+            logger.warning("DataProcessor thread not running during setup")
+        
+        # Register subscriptions if needed (placeholder for now)
+        # This will be expanded in Phase 7 if needed
+        
+        logger.debug("DataProcessor setup complete")

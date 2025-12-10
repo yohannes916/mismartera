@@ -2919,3 +2919,458 @@ def validate_session_config(config: dict) -> tuple[bool, list[str]]:
 **Version**: 1.2  
 **Last Updated**: 2025-12-04  
 **Status**: ACTIVE - SessionData Refactor Phase 1 Complete (Self-Describing Structure Added)
+
+
+---
+===== Before Loop (Once Only) ======:
+PHASE 0: SYSTEM-WIDE VALIDATION & PREP
+========================================
+0. Validate stream infrastructure (SYSTEM CAPABILITY)
+   - Check config format
+   - Determine base interval (1m, 1s, or 1d)
+   - Determine derived intervals (5m, 15m, etc.)
+   - Validate derivation capability (can we derive 5m from 1m?)
+   - Store results for reuse by ALL symbols
+   - Do NOT register anything yet 
+   - Do NOT validate individual symbols yet 
+
+
+===== Main Loop (Multi-Day Backtest) ===================
+PHASE 1: TEARDOWN & CLEANUP
+=============================
+1. Clear ALL state and resources (NO PERSISTENCE)
+   - SessionData.clear() (remove ALL symbols - config AND adhoc)
+     * Metadata cleared automatically (part of SymbolSessionData)
+   - Clear stream queues (bar_queues, quote_queues, tick_queues)
+   - Teardown all threads:
+     * session_coordinator.teardown()
+     * data_processor.teardown()
+     * data_quality_manager.teardown()
+     * scanner_manager.teardown()
+     * strategy_manager.teardown()
+   - Result: FRESH START for next trading day
+   
+2. Advance clock to new trading day @ market open
+   - Query TimeManager for next trading date
+   - Set backtest time to market open
+
+
+PHASE 2: INITIALIZATION (Three-Phase Unified Provisioning)
+===========================================================
+
+For EACH symbol from config, execute the three-phase pattern:
+
+REQUIREMENT ANALYSIS → VALIDATION → PROVISIONING + LOADING
+
+
+3a. REQUIREMENT ANALYSIS (Determine What's Needed)
+   -------------------------------------------------
+   For each symbol from config:
+     analyze_requirements(
+       operation_type="symbol",
+       symbol=symbol,
+       source="config",
+       session_data=session_data,
+       session_coordinator=coordinator
+     )
+   
+   Analysis determines:
+     - Required intervals (base + derived from config)
+     - Historical requirements (days, bars from config)
+     - Session requirements (streaming needed?)
+     - Indicator requirements (from config indicators)
+     - Existing state (symbol exists? intervals exist?)
+     - Provisioning steps needed
+   
+   Returns: ProvisioningRequirements object with complete analysis
+
+
+3b. VALIDATION (Step 0 - Can We Proceed?)
+   ----------------------------------------
+   For each symbol with requirements:
+     - Is symbol already loaded? (duplicate check via metadata)
+     - Data source available? (Alpaca, Schwab, Parquet)
+     - Intervals supported? (can source provide required intervals)
+     - Historical data available? (do we have historical bars)
+     - Meets all config requirements?
+   
+   Results:
+     - Validated symbols → Proceed to Step 3c
+     - Failed symbols → Drop with warning, log reason
+     - If ALL symbols fail → TERMINATE session
+   
+   REUSES: Existing Step 0 validation methods
+     - _validate_symbol_for_loading()
+     - _check_data_source_for_symbol()
+     - _check_historical_data_availability()
+
+
+3c. PROVISIONING + LOADING (Step 3 - Execute Plan)
+   -------------------------------------------------
+   For each validated symbol with requirements:
+     _execute_provisioning(requirements)
+   
+   Provisioning executor orchestrates:
+     1. Symbol creation (if needed)
+        - Create SymbolSessionData with metadata
+        - meets_session_config_requirements = True
+        - added_by = "config"
+     
+     2. Interval creation (if needed)
+        - Add bar structures for required intervals
+        - Base intervals + derived intervals
+     
+     3. Historical loading
+        - Load historical bars via DataManager
+        - Calculate historical indicators
+     
+     4. Session setup
+        - Load stream queues for current day
+        - Register session indicators
+     
+     5. Quality calculation
+        - Calculate quality scores
+   
+   REUSES: Existing Step 3 loading methods
+     - _register_single_symbol() (with metadata)
+     - _manage_historical_data(symbols=[...])
+     - _register_session_indicators(symbols=[...])
+     - _load_queues(symbols=[...])
+     - _calculate_historical_quality(symbols=[...])
+
+
+4. Initialize all threads (call setup/init)
+   - session_coordinator.setup()
+   - data_processor.setup()
+   - data_quality_manager.setup()
+   - scanner_manager.setup()
+   - strategy_manager.setup()
+
+
+5. Run pre-session scan (if configured)
+   - scanner_manager.run_pre_session_scans()
+
+
+PHASE 3: ACTIVE SESSION
+=========================
+6. Activate session
+   - Mark session as active
+   - Signal all threads
+
+
+7. Start streaming (clock advancement + data)
+   - Advance clock (data-driven or clock-driven)
+   - Process bars
+   - Pause for scans/insertions (coordinated)
+   - Stop at market close
+   
+   7a. ADHOC BAR/INDICATOR INSERTION (Unified Lightweight Pattern)
+       -------------------------------------------------------------
+       Scanners can add bars/indicators with unified three-phase pattern:
+         - session_data.add_bar_unified(symbol, interval, source="scanner")
+         - session_data.add_indicator_unified(symbol, indicator_config, source="scanner")
+       
+       Three-Phase Pattern (Lightweight Version):
+       
+       PHASE 1: REQUIREMENT ANALYSIS (Lightweight)
+         analyze_requirements(
+           operation_type="bar" | "indicator",
+           symbol=symbol,
+           source="scanner",
+           **kwargs  # interval, days, or indicator_config
+         )
+         
+         Analysis determines:
+           - Symbol exists? If not → needs auto-provisioning
+           - Required intervals (base + derived if needed)
+           - Historical needs (for indicators: warmup bars)
+           - Existing state (intervals already exist?)
+           - Provisioning steps (minimal)
+         
+         REUSES: analyze_indicator_requirements() for indicators
+                 parse_interval() + determine_required_base() for bars
+       
+       PHASE 2: VALIDATION (Lightweight)
+         - Is interval supported? (can we derive it?)
+         - Do we have Parquet data? (backtest mode only)
+         - Does bar/indicator already exist? (duplicate check)
+         
+         REUSES: Subset of Step 0 validation
+           - _check_parquet_data() for backtest
+           - Interval validation helpers
+         
+         NOTE: Does NOT validate full symbol requirements
+               (no full historical check, no quality check)
+       
+       PHASE 3: PROVISIONING (Minimal)
+         _execute_provisioning(requirements)
+         
+         Executes ONLY what's needed:
+           1. Auto-provision symbol if doesn't exist
+              - Create SymbolSessionData with metadata
+              - meets_session_config_requirements = False
+              - added_by = "scanner"
+              - auto_provisioned = True
+           
+           2. Add interval structure if needed
+              - Base interval + derived interval
+           
+           3. Load minimal historical (for indicators only)
+              - Only warmup bars needed by indicator
+              - NO full historical load
+           
+           4. Register indicator (if adding indicator)
+              - Add to symbol_data.indicators
+              - Register with IndicatorManager
+           
+           5. NO quality calculation, NO session indicators
+         
+         REUSES: Same _execute_provisioning() as full loading
+                 Just different provisioning_steps list
+       
+       Use case: Scanner finds interesting symbol, adds indicator
+                 System auto-provisions minimal structure needed
+   
+   7b. MID-SESSION SYMBOL INSERTION (Unified Full Pattern)
+       ----------------------------------------------------
+       Strategies or scanners can request full symbol loading:
+         - coordinator.add_symbol(symbol, added_by="strategy")
+       
+       Three-Phase Pattern (Full Version - Same as Pre-Session):
+       
+       PHASE 1: REQUIREMENT ANALYSIS (Full)
+         - Pause clock/streaming
+         
+         analyze_requirements(
+           operation_type="symbol",
+           symbol=symbol,
+           source="strategy",
+           session_data=session_data,
+           session_coordinator=coordinator
+         )
+         
+         Analysis determines:
+           - Symbol exists? (for upgrade path detection)
+           - Required intervals (ALL from config)
+           - Historical requirements (FULL from config)
+           - Indicator requirements (ALL from config)
+           - Existing state (adhoc? fully loaded?)
+           - Provisioning steps (full or upgrade)
+         
+         REUSES: Same analyzer as pre-session config loading
+       
+       PHASE 2: VALIDATION (Full - Step 0)
+         Run full Step 0 validation:
+           - Is symbol already fully loaded? (duplicate check)
+           - Data source available?
+           - ALL intervals supported?
+           - Historical data available?
+           - Meets ALL config requirements?
+         
+         Results:
+           - Validation passes → Proceed to Phase 3
+           - Validation fails → Drop with error, return False
+         
+         REUSES: Same _validate_symbol_for_loading() as pre-session
+       
+       PHASE 3: PROVISIONING + LOADING (Full - Step 3)
+         _execute_provisioning(requirements)
+         
+         Executes full loading (same as pre-session):
+           1. Symbol creation or upgrade
+              - If new: Create SymbolSessionData
+                * meets_session_config_requirements = True
+                * added_by = "strategy"
+                * auto_provisioned = False
+              
+              - If upgrading adhoc: Update existing
+                * meets_session_config_requirements = True
+                * upgraded_from_adhoc = True
+                * added_by = "strategy"
+           
+           2. Interval creation
+              - ALL required intervals from config
+              - Base + derived
+           
+           3. Historical loading
+              - FULL historical bars (config trailing_days)
+              - Calculate historical indicators
+           
+           4. Session setup
+              - Load stream queues for current day
+              - Register ALL session indicators
+           
+           5. Quality calculation
+              - Calculate quality scores
+         
+         REUSES: Same _execute_provisioning() as pre-session
+                 Same Step 3 loading methods
+         
+         - Resume clock/streaming
+       
+       Duplicate detection:
+         - If symbol already loaded with meets_session_config_requirements=True
+         - Skip loading, return success immediately (detected in validation)
+       
+       Use case: Strategy needs full historical data for position management
+                 System loads exactly as if symbol was in config
+   
+   7c. MID-SESSION SYMBOL DELETION
+       ----------------------------
+       Remove symbol from session:
+         - coordinator.remove_symbol(symbol)
+       
+       Behavior:
+         - Thread-safe deletion of SymbolSessionData
+         - Metadata deleted automatically (part of object)
+         - Clear from queues
+         - Does NOT persist to next session (no symbols persist)
+
+
+PHASE 4: END SESSION
+=====================
+8. Deactivate session
+   - Mark inactive
+   - Record metrics
+   - Leave data INTACT (for analysis/export)
+   - Do NOT persist to next session 
+
+
+9. Check if last day
+   - YES: Exit loop (keep last day's data for final analysis)
+   - NO: Loop back to Phase 1 (FULL CLEAR, fresh start)
+
+
+===== Key Architectural Principles =====
+
+1. UNIFIED THREE-PHASE PROVISIONING PATTERN
+   ==========================================
+   ALL additions (symbols, bars, indicators) use the same pattern:
+   
+   PHASE 1: REQUIREMENT ANALYSIS
+     - What do we need? (symbols, bars, intervals, historical, indicators)
+     - analyze_requirements(operation_type, symbol, source, **kwargs)
+     - Returns: ProvisioningRequirements with complete analysis
+   
+   PHASE 2: VALIDATION
+     - Do we have it? Can we get it?
+     - REUSES existing Step 0 validation methods
+     - Full validation for symbols, lightweight for bars/indicators
+   
+   PHASE 3: PROVISIONING + LOADING
+     - Create missing pieces, load data
+     - _execute_provisioning(requirements)
+     - REUSES existing Step 3 loading methods
+   
+   Benefits:
+     - Consistency across ALL operations
+     - Maximum code reuse (~90%)
+     - Same validation everywhere
+     - Same metadata tracking
+     - Clear separation of concerns
+
+2. TWO LOADING MODES (Same Pattern, Different Depth)
+   ==================================================
+   Full Mode (Config, Strategy):
+     - Requirement Analysis: Full (all intervals, all historical, all indicators)
+     - Validation: Full (Step 0 - all checks)
+     - Provisioning: Full (Step 3 - complete loading)
+     - Metadata: meets_session_config_requirements = True
+   
+   Lightweight Mode (Scanner, Adhoc):
+     - Requirement Analysis: Minimal (only needed intervals/bars)
+     - Validation: Lightweight (subset of checks)
+     - Provisioning: Minimal (auto-provision, warmup bars only)
+     - Metadata: meets_session_config_requirements = False
+
+3. NO PERSISTENCE BETWEEN SESSIONS
+   =================================
+   - Every session starts fresh from session_config.json
+   - Phase 1 clears ALL symbols (config + adhoc)
+   - Strategies can call add_symbol() if needed (e.g., for positions)
+   - Metadata cleared automatically (part of SymbolSessionData)
+
+4. SYMBOL METADATA (Integrated into SymbolSessionData)
+   ===================================================
+   - meets_session_config_requirements: bool (property of SymbolSessionData)
+     * True = Full loading (historical, indicators, quality)
+     * False = Adhoc (minimal structure)
+   - added_by: str ("config", "strategy", "scanner", "adhoc")
+   - auto_provisioned: bool (was symbol auto-created?)
+   - upgraded_from_adhoc: bool (was symbol upgraded from adhoc to full?)
+   - added_at: datetime (when was symbol added?)
+   - Deleted automatically when symbol deleted
+   - Exported to JSON and CSV for validation
+
+5. GRACEFUL DEGRADATION
+   =====================
+   - Failed symbols dropped with warnings
+   - Other symbols proceed normally
+   - Session terminates ONLY if ALL symbols fail
+   - Clear error messages with reasons
+
+6. MAXIMUM CODE REUSE (~90%)
+   ==========================
+   Requirement Analysis:
+     - REUSES: analyze_indicator_requirements() for indicators
+     - REUSES: parse_interval() + determine_required_base() for bars
+     - REUSES: Session config for symbol requirements
+   
+   Validation:
+     - REUSES: _validate_symbol_for_loading() for full validation
+     - REUSES: _check_data_source_for_symbol() for data source checks
+     - REUSES: _check_historical_data_availability() for historical checks
+     - REUSES: _check_parquet_data() for Parquet checks
+   
+   Provisioning + Loading:
+     - REUSES: _register_single_symbol() for symbol creation (with metadata)
+     - REUSES: _manage_historical_data() for historical loading
+     - REUSES: _register_session_indicators() for indicator setup
+     - REUSES: _load_queues() for queue setup
+     - REUSES: _calculate_historical_quality() for quality calculation
+   
+   New Code (~400 lines):
+     - analyze_requirements() dispatcher
+     - _analyze_bar_requirements() helper
+     - _analyze_symbol_requirements() helper
+     - _determine_provisioning_steps() helper
+     - _execute_provisioning() orchestrator
+     - add_indicator_unified() entry point
+     - add_bar_unified() entry point
+
+7. UPGRADE PATH
+   =============
+   - Adhoc symbol can be upgraded to full
+   - add_symbol() detects existing adhoc symbol
+   - Requirement analysis determines upgrade steps (load missing pieces)
+   - Provisioning executor loads: historical, indicators, quality
+   - Metadata updated: meets_session_config_requirements = True
+                       upgraded_from_adhoc = True
+
+8. UNIFIED ENTRY POINTS
+   =====================
+   All operations use unified entry points:
+   
+   Config Loading:
+     - For each symbol: analyze → validate → provision
+     - Same three-phase pattern
+   
+   Mid-Session Symbol (Full):
+     - coordinator.add_symbol(symbol, added_by="strategy")
+     - Full three-phase pattern (same as config)
+   
+   Mid-Session Bar (Lightweight):
+     - session_data.add_bar_unified(symbol, interval, source="scanner")
+     - Lightweight three-phase pattern
+   
+   Mid-Session Indicator (Lightweight):
+     - session_data.add_indicator_unified(symbol, config, source="scanner")
+     - Lightweight three-phase pattern (auto-provisions bars)
+
+9. ARCHITECTURAL COMPLIANCE
+   =========================
+   - TimeManager: ALL date/time via TimeManager API (no hardcoded dates)
+   - DataManager: ALL Parquet access via DataManager API (no direct file access)
+   - Infer from Config: Requirements inferred from session config structure
+   - Single Source of Truth: Config drives all requirements
+   - Thread-Safe: All operations use locks for symbol management

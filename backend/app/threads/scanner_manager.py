@@ -579,3 +579,48 @@ class ScannerManager:
         
         self._scanners.clear()
         logger.info("[SCANNER_MANAGER] Shutdown complete")
+    
+    # =========================================================================
+    # Session Lifecycle (Phase 1 & 2 of Revised Flow)
+    # =========================================================================
+    
+    def teardown(self):
+        """Reset to initial state and deallocate resources (Phase 1).
+        
+        Called at START of new session (before data loaded).
+        Clears scanners, resets state, prepares for fresh session.
+        
+        Must be idempotent (safe to call multiple times).
+        """
+        logger.debug("ScannerManager.teardown() - resetting state")
+        
+        # Teardown all scanners from previous session
+        for instance in list(self._scanners.values()):
+            if instance.state not in [ScannerState.TEARDOWN_COMPLETE, ScannerState.ERROR]:
+                try:
+                    self._execute_teardown(instance)
+                except Exception as e:
+                    logger.error(f"[SCANNER_MANAGER] Teardown failed for {instance.module}: {e}")
+        
+        # Clear all scanners (will be reloaded in setup)
+        self._scanners.clear()
+        self._pre_session_scanners.clear()
+        self._regular_scanners.clear()
+        
+        logger.debug("ScannerManager teardown complete")
+    
+    def setup(self):
+        """Initialize for new session (Phase 2).
+        
+        Called after data loaded, before session activated.
+        Can access SessionData (symbols, bars, indicators).
+        
+        Loads scanners from config, prepares for execution.
+        """
+        logger.debug("ScannerManager.setup() - initializing for new session")
+        
+        # Scanners will be loaded by setup_pre_session_scanners()
+        # or when session starts (for regular scanners)
+        # This is just a placeholder for consistency
+        
+        logger.debug("ScannerManager setup complete")

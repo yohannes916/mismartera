@@ -99,7 +99,17 @@ class IndicatorManager:
                     )
                     self._calculate_and_store(symbol, ind_data, bars)
         
-        logger.info(f"{symbol}: Indicator registration complete")
+        # DEBUG: Verify indicators were added to session_data
+        final_count = len(symbol_data.indicators)
+        logger.info(
+            f"{symbol}: Indicator registration complete - "
+            f"{final_count} indicators in symbol_data.indicators"
+        )
+        if final_count != len(indicators):
+            logger.error(
+                f"{symbol}: MISMATCH! Expected {len(indicators)} indicators, "
+                f"but symbol_data.indicators has {final_count}"
+            )
     
     def update_indicators(
         self,

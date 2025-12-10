@@ -32,6 +32,7 @@ from datetime import datetime, date, time, timedelta
 from typing import Optional, Dict, List, Any, Tuple, Set
 from collections import defaultdict
 from collections import deque
+from dataclasses import dataclass, field
 
 # Logging
 from app.logger import logger
@@ -71,6 +72,132 @@ from app.models.indicator_config import (
     SessionIndicatorConfig,
     HistoricalIndicatorConfig
 )
+
+
+@dataclass
+class SymbolValidationResult:
+    """Result of per-symbol validation for loading.
+    
+    Used by Step 0 validation to determine if a symbol can proceed to Step 3 loading.
+    """
+    symbol: str
+    can_proceed: bool = False
+    reason: str = ""
+    
+    # Data source validation
+    data_source_available: bool = False
+    data_source: Optional[str] = None  # "alpaca", "schwab", "parquet"
+    
+    # Interval validation
+    intervals_supported: List[str] = field(default_factory=list)
+    base_interval: Optional[str] = None
+    
+    # Historical data validation
+    has_historical_data: bool = False
+    historical_date_range: Optional[Tuple[date, date]] = None
+    
+    # Requirements validation
+    meets_config_requirements: bool = False
+
+
+@dataclass
+class ProvisioningRequirements:
+    """Unified requirements for any addition operation (symbol, bar, indicator).
+    
+    Phase 5a: Core Infrastructure for Unified Provisioning Architecture
+    
+    This dataclass represents the complete analysis of what's needed for ANY
+    addition operation (symbol, bar, or indicator) from ANY source (config,
+    scanner, or strategy).
+    
+    Three-Phase Pattern:
+        1. REQUIREMENT ANALYSIS → Creates this object
+        2. VALIDATION → Populates validation fields
+        3. PROVISIONING → Uses provisioning_steps to execute
+    
+    Attributes:
+        operation_type: What are we adding? ("symbol", "bar", "indicator")
+        source: Who is adding? ("config", "scanner", "strategy")
+        symbol: Symbol to operate on
+        
+        # Existing state (from session_data)
+        symbol_exists: bool - Does symbol already exist?
+        symbol_data: Optional[SymbolSessionData] - Existing symbol data if present
+        
+        # Interval requirements (INFERRED from operation)
+        required_intervals: List[str] - All intervals needed (base + derived)
+        base_interval: Optional[str] - Base interval (if derived needed)
+        intervals_exist: Dict[str, bool] - Which intervals already exist?
+        
+        # Historical requirements (INFERRED from config/indicator)
+        needs_historical: bool - Does operation need historical data?
+        historical_days: int - Calendar days of historical data needed
+        historical_bars: int - Number of bars needed (for indicators)
+        
+        # Session requirements
+        needs_session: bool - Does operation need session/streaming data?
+        
+        # Indicator requirements (if operation_type="indicator")
+        indicator_config: Optional[IndicatorConfig] - Indicator configuration
+        indicator_requirements: Optional[IndicatorRequirements] - From analyzer
+        
+        # Validation results (from Step 0 validation)
+        validation_result: Optional[SymbolValidationResult] - Full validation result
+        can_proceed: bool - Can we proceed with provisioning?
+        validation_errors: List[str] - Why validation failed
+        
+        # Provisioning plan (determined by analysis)
+        provisioning_steps: List[str] - Steps to execute (e.g., "create_symbol")
+        
+        # Metadata (for SymbolSessionData creation/update)
+        meets_session_config_requirements: bool - Full or adhoc?
+        added_by: str - Source identifier ("config", "scanner", "strategy")
+        auto_provisioned: bool - Was symbol auto-created?
+        
+        # Explanation
+        reason: str - Human-readable explanation of requirements
+    """
+    # Operation identification
+    operation_type: str  # "symbol", "bar", "indicator"
+    source: str  # "config", "scanner", "strategy"
+    symbol: str
+    
+    # Existing state
+    symbol_exists: bool = False
+    symbol_data: Optional[Any] = None  # SymbolSessionData if exists
+    
+    # Interval requirements
+    required_intervals: List[str] = field(default_factory=list)
+    base_interval: Optional[str] = None
+    intervals_exist: Dict[str, bool] = field(default_factory=dict)
+    
+    # Historical requirements
+    needs_historical: bool = False
+    historical_days: int = 0
+    historical_bars: int = 0
+    
+    # Session requirements
+    needs_session: bool = False
+    
+    # Indicator requirements (if applicable)
+    indicator_config: Optional[Any] = None  # IndicatorConfig
+    indicator_requirements: Optional[Any] = None  # IndicatorRequirements
+    
+    # Validation results
+    validation_result: Optional[SymbolValidationResult] = None
+    can_proceed: bool = False
+    validation_errors: List[str] = field(default_factory=list)
+    
+    # Provisioning plan
+    provisioning_steps: List[str] = field(default_factory=list)
+    
+    # Metadata
+    meets_session_config_requirements: bool = False
+    added_by: str = "adhoc"
+    auto_provisioned: bool = False
+    
+    # Explanation
+    reason: str = ""
 
 
 class SessionCoordinator(threading.Thread):
@@ -187,6 +314,12 @@ class SessionCoordinator(threading.Thread):
             f"[CONFIG] Indicators: {session_ind_count} session, "
             f"{hist_ind_count} historical"
         )
+        
+        # Revised Flow: Stream validation state (Phase 1 implementation)
+        self._streams_validated = False  # First-time validation flag
+        self._base_interval: Optional[str] = None  # Stored from validation
+        self._derived_intervals_validated: List[str] = []  # Stored from validation
+        self._session_count = 0  # Track number of sessions run
         
         logger.info(
             f"SessionCoordinator initialized (mode={session_config.mode}, "
@@ -523,8 +656,15 @@ class SessionCoordinator(threading.Thread):
         )
         
         if not all_indicators:
-            logger.debug(f"{symbol}: No indicators configured")
+            logger.warning(f"{symbol}: No indicators configured - skipping indicator registration")
             return
+        
+        # DEBUG: Log what we're about to register
+        logger.info(
+            f"{symbol}: About to register {len(all_indicators)} indicators "
+            f"({len(self._indicator_configs['session'])} session, "
+            f"{len(self._indicator_configs['historical'])} historical)"
+        )
         
         # Register with indicator manager
         self.indicator_manager.register_symbol_indicators(
@@ -533,11 +673,20 @@ class SessionCoordinator(threading.Thread):
             historical_bars=historical_bars  # For warmup
         )
         
-        indicator_count = len(all_indicators)
-        logger.info(
-            f"{symbol}: Registered {indicator_count} indicators "
-            f"(warmup from {'historical' if historical_bars else 'live data'})"
-        )
+        # DEBUG: Verify registration in session_data
+        symbol_data = self.session_data.get_symbol_data(symbol, internal=True)
+        if symbol_data:
+            actual_count = len(symbol_data.indicators)
+            logger.info(
+                f"{symbol}: Post-registration check - "
+                f"symbol_data.indicators has {actual_count} entries"
+            )
+            if actual_count == 0:
+                logger.error(
+                    f"{symbol}: CRITICAL - Indicators registered but symbol_data.indicators is EMPTY!"
+                )
+        else:
+            logger.error(f"{symbol}: CRITICAL - symbol_data not found after indicator registration!")
     
     async def add_symbol_mid_session(self, symbol: str) -> bool:
         """Add symbol during active session.
@@ -760,42 +909,82 @@ class SessionCoordinator(threading.Thread):
     # Symbol Management - Thread-Safe Operations
     # =========================================================================
     
-    def add_symbol(self, symbol: str, streams: Optional[List[str]] = None) -> bool:
-        """Add symbol to session (thread-safe, can be called from any thread).
+    def add_symbol(self, symbol: str, streams: Optional[List[str]] = None, added_by: str = "strategy") -> bool:
+        """Add symbol to session with unified three-phase pattern (thread-safe).
         
-        The symbol is added to config and marked as pending. The streaming loop
-        will automatically detect and process it.
+        Phase 5c: Updated to use unified provisioning pattern.
+        
+        Uses the three-phase pattern (analyze → validate → provision) for
+        consistent, robust symbol addition. This replaces the Phase 4 approach
+        with the complete unified architecture.
+        
+        Three-Phase Pattern:
+            1. REQUIREMENT ANALYSIS → What's needed?
+            2. VALIDATION → Can we proceed?
+            3. PROVISIONING → Execute plan
         
         Args:
             symbol: Symbol to add
-            streams: Data streams (default: ["1m"] for backtest)
+            streams: Data streams (default: ["1m"] for backtest) - DEPRECATED
+            added_by: Source of addition ("strategy", "scanner", "manual")
         
         Returns:
-            True if added, False if already exists
+            True if validated and provisioned, False if validation failed or already exists
+        
+        Code Reuse:
+            - REUSES: _analyze_requirements() from Phase 5a
+            - REUSES: _execute_provisioning() from Phase 5b
+            - REUSES: All validation and loading from Phases 1-4
         """
-        streams = streams or ["1m"]
+        streams = streams or ["1m"]  # For backward compatibility
         
         with self._symbol_operation_lock:
-            # Check if already exists
-            if symbol in self.session_config.session_data_config.symbols:
-                logger.warning(f"[SYMBOL] {symbol} already in session")
+            symbol = symbol.upper()
+            
+            logger.info(f"[UNIFIED] add_symbol({symbol}, added_by={added_by})")
+            
+            try:
+                # Phase 1: Analyze requirements
+                req = self._analyze_requirements(
+                    operation_type="symbol",
+                    symbol=symbol,
+                    source=added_by
+                )
+                
+                # Phase 2: Validate (done in analyze_requirements)
+                if not req.can_proceed:
+                    logger.error(
+                        f"[UNIFIED] {symbol}: Cannot add symbol - {req.validation_errors}"
+                    )
+                    return False
+                
+                logger.info(f"[UNIFIED] {symbol}: Validation passed ✅")
+                
+                # Phase 3: Provision
+                success = self._execute_provisioning(req)
+                
+                if success:
+                    # Add to config (single source of truth)
+                    if symbol not in self.session_config.session_data_config.symbols:
+                        self.session_config.session_data_config.symbols.append(symbol)
+                    
+                    # Add to streams config
+                    if "1m" not in self.session_config.session_data_config.streams:
+                        self.session_config.session_data_config.streams.append("1m")
+                    
+                    logger.success(
+                        f"[UNIFIED] {symbol}: Added successfully "
+                        f"(added_by={added_by})"
+                    )
+                else:
+                    logger.error(f"[UNIFIED] {symbol}: Provisioning failed")
+                
+                return success
+                
+            except Exception as e:
+                logger.error(f"[UNIFIED] {symbol}: Exception adding symbol: {e}")
+                logger.exception(e)
                 return False
-            
-            # Add to config (single source of truth)
-            self.session_config.session_data_config.symbols.append(symbol)
-            
-            # Add to streams config
-            if "1m" not in self.session_config.session_data_config.streams:
-                self.session_config.session_data_config.streams.append("1m")
-            
-            # Mark as pending
-            self._pending_symbols.add(symbol)
-            
-            logger.info(
-                f"[SYMBOL] Added {symbol} to config with streams {streams}, "
-                f"marked as pending"
-            )
-            return True
     
     def remove_symbol(self, symbol: str) -> bool:
         """Remove symbol from session (thread-safe, can be called from any thread).
@@ -852,104 +1041,313 @@ class SessionCoordinator(threading.Thread):
         
         return True
     
-    def _coordinator_loop(self):
-        """Main coordinator loop - orchestrates session lifecycle.
+    # =========================================================================
+    # Revised Flow: Coordination Methods (Phase 3 Implementation)
+    # =========================================================================
+    
+    def _teardown_and_cleanup(self):
+        """Phase 1: Teardown & Cleanup - Clear all state and advance clock.
         
-        Executes the 6-phase session lifecycle for each trading day:
-        1. Initialization
-        2. Historical Management
-        3. Queue Loading
-        4. Session Activation
-        5. Streaming Phase
-        6. End-of-Session
+        Called at START of new session (except first session).
         
-        Continues until:
-        - Stop event is set (graceful shutdown)
-        - Backtest complete (all days processed)
-        - Error occurs
+        Steps:
+        1a. Clear SessionData completely (remove all symbols)
+        1b. Clear stream queues
+        1c. Teardown all threads (reset state)
+        2.  Advance clock to next trading day @ market open
         """
-        logger.info("[SESSION_FLOW] 3.b.1: Coordinator loop started")
+        logger.info("=" * 70)
+        logger.info("PHASE 1: TEARDOWN & CLEANUP")
+        logger.info("=" * 70)
         
+        # Step 1a: Clear SessionData
+        logger.info("Step 1a: Clearing SessionData")
+        self.session_data.clear()
+        logger.debug(f"SessionData cleared - removed all symbols")
+        
+        # Step 1b: Clear stream queues
+        logger.info("Step 1b: Clearing stream queues")
+        self._bar_queues.clear()
+        if hasattr(self, '_quote_queues'):
+            self._quote_queues.clear()
+        if hasattr(self, '_tick_queues'):
+            self._tick_queues.clear()
+        self._symbol_check_counters.clear()
+        logger.debug("Stream queues cleared")
+        
+        # Step 1c: Teardown all threads
+        logger.info("Step 1c: Tearing down threads")
+        if hasattr(self.data_processor, 'teardown'):
+            self.data_processor.teardown()
+        if hasattr(self.quality_manager, 'teardown'):
+            self.quality_manager.teardown()
+        if hasattr(self._scanner_manager, 'teardown'):
+            self._scanner_manager.teardown()
+        logger.debug("All threads torn down")
+        
+        # Step 2: Advance clock to next trading day
+        logger.info("Step 2: Advancing clock to next trading day")
+        current_time = self._time_manager.get_current_time()
+        current_date = current_time.date()
+        self._advance_to_next_trading_day(current_date)
+        
+        new_time = self._time_manager.get_current_time()
+        logger.info(f"Clock advanced: {current_date} → {new_time.date()} @ {new_time.time()}")
+        
+        logger.info("✓ Phase 1 complete")
+    
+    def _load_session_data(self):
+        """Phase 2 - Step 3: Load ALL session data from config (unified step).
+        
+        Phase 4 Enhancement: Added per-symbol validation (Step 0) before loading.
+        
+        Coordinates:
+        - STEP 0: Per-symbol validation (NEW - Phase 4)
+        - Symbols (registration)
+        - Historical bars
+        - Session indicators
+        - Historical indicators
+        - Stream queues
+        - Quality scores
+        
+        All data comes from session_config.
+        """
+        logger.info("=" * 70)
+        logger.info("LOADING SESSION DATA FROM CONFIG")
+        logger.info("=" * 70)
+        
+        # STEP 0: Validate symbols (NEW - Phase 4)
+        logger.info("Step 0: Validating symbols")
+        config_symbols = self.session_config.session_data_config.symbols
+        validated_symbols = self._validate_symbols_for_loading(config_symbols)
+        logger.info(f"Step 0: {len(validated_symbols)}/{len(config_symbols)} symbols validated")
+        
+        # STEP 3: Load validated symbols only
+        # Sub-step 1: Register symbols
+        logger.info("Step 3.1: Registering symbols")
+        for symbol in validated_symbols:
+            self._register_single_symbol(
+                symbol,
+                meets_session_config_requirements=True,
+                added_by="config",
+                auto_provisioned=False
+            )
+        
+        # Sub-step 2-4: Load historical data and indicators
+        logger.info("Step 3.2: Loading historical data and indicators")
+        self._manage_historical_data(symbols=validated_symbols)
+        
+        # Sub-step 3.5: Register session indicators
+        logger.info("Step 3.3: Registering session indicators")
+        self._register_session_indicators(symbols=validated_symbols)
+        
+        # Sub-step 5: Load stream queues
+        logger.info("Step 3.4: Loading stream queues")
+        self._load_queues(symbols=validated_symbols)
+        
+        # Sub-step 6: Calculate quality
+        logger.info("Step 3.5: Calculating quality scores")
+        self._calculate_historical_quality(symbols=validated_symbols)
+        
+        logger.info("=" * 70)
+        logger.info(f"✓ SESSION DATA LOADED ({len(validated_symbols)} symbols)")
+        logger.info("=" * 70)
+    
+    def _initialize_threads(self):
+        """Phase 2 - Step 4: Initialize all threads for new session.
+        
+        Calls setup() on each thread (Phase 1 stub methods).
+        """
+        logger.info("Initializing threads for new session")
+        
+        # Initialize in order
+        if hasattr(self.data_processor, 'setup'):
+            logger.debug("Initializing data_processor")
+            self.data_processor.setup()
+        
+        if hasattr(self.quality_manager, 'setup'):
+            logger.debug("Initializing quality_manager")
+            self.quality_manager.setup()
+        
+        if hasattr(self._scanner_manager, 'setup'):
+            logger.debug("Initializing scanner_manager")
+            self._scanner_manager.setup()
+        
+        logger.info("✓ All threads initialized")
+    
+    def _register_session_indicators(self, symbols: Optional[List[str]] = None):
+        """Register session indicators for specified symbols (or all if None).
+        
+        Calls existing _register_symbol_indicators method for each symbol.
+        Used by both pre-session initialization and mid-session insertion.
+        
+        Args:
+            symbols: List of symbols to process, or None for all symbols from config
+        """
+        if symbols is None:
+            symbols = self.session_config.session_data_config.symbols
+        
+        for symbol in symbols:
+            # Get historical bars for warmup
+            symbol_data = self.session_data.get_symbol_data(symbol, internal=True)
+            if not symbol_data:
+                logger.warning(f"{symbol}: Symbol data not found, skipping indicator registration")
+                continue
+            
+            # Get historical bars for this symbol
+            historical_bars = {}
+            for interval_key, interval_data in symbol_data.historical.bars.items():
+                # Flatten data_by_date into single list
+                all_bars = []
+                for date_bars in interval_data.data_by_date.values():
+                    all_bars.extend(date_bars)
+                if all_bars:
+                    historical_bars[interval_key] = all_bars
+            
+            # Call existing method
+            self._register_symbol_indicators(
+                symbol=symbol,
+                historical_bars=historical_bars
+            )  # EXISTING method (lines 505-556)
+        
+        logger.info(f"Registered indicators for {len(symbols)} symbols")
+    
+    def _coordinator_loop(self):
+        """Main coordinator loop - REVISED FLOW (Phase 5 implementation).
+        
+        Revised Session Lifecycle:
+        BEFORE LOOP:
+          0. Validate stream configuration (once)
+        
+        MAIN LOOP (each trading day):
+          PHASE 1: Teardown & Cleanup
+            1. Clear all state and resources
+            2. Advance clock to new trading day
+          
+          PHASE 2: Initialization
+            3. Load ALL session data from config
+            4. Initialize all threads
+            5. Run pre-session scans
+          
+          PHASE 3: Active Session
+            6. Activate session
+            7. Start streaming
+          
+          PHASE 4: End Session
+            8. Deactivate session (data preserved)
+            9. Check if last day
+        
+        Reference: /docs/windsurf/REVISED_SESSION_FLOW.md
+        """
+        logger.info("=" * 70)
+        logger.info("COORDINATOR LOOP STARTED")
+        logger.info("=" * 70)
+        
+        # =====================================================================
+        # BEFORE LOOP: First-time validation
+        # =====================================================================
+        if not self._streams_validated:
+            logger.info("=" * 70)
+            logger.info("PHASE 0: VALIDATION & PREP (First-time only)")
+            logger.info("=" * 70)
+            
+            if not self._validate_stream_requirements():
+                raise RuntimeError("Stream validation failed - cannot start backtest")
+            
+            logger.info("✓ Phase 0 complete - streams validated")
+        
+        # =====================================================================
+        # MAIN LOOP
+        # =====================================================================
         while not self._stop_event.is_set():
             try:
-                # Phase 1: Initialization
-                logger.info("=" * 70)
-                logger.info("[SESSION_FLOW] 3.b.2.PHASE_1: Initialization phase starting")
-                logger.info("Phase 1: Initialization")
-                self._initialize_session()
-                logger.info("[SESSION_FLOW] 3.b.2.PHASE_1: Complete")
-                
-                # Phase 2: Historical Management
-                logger.info("[SESSION_FLOW] 3.b.2.PHASE_2: Historical Management phase starting")
-                logger.info("Phase 2: Historical Management")
-                gap_start = self.metrics.start_timer()
-                self._manage_historical_data()
-                self._calculate_historical_indicators()
-                self._calculate_historical_quality()
-                self.metrics.record_session_gap(gap_start)
-                logger.info("[SESSION_FLOW] 3.b.2.PHASE_2: Complete")
-                
-                # Phase 2.5: Pre-Session Scanner Setup
-                logger.info("[SESSION_FLOW] 3.b.2.PHASE_2.5: Pre-Session Scanner Setup phase starting")
-                logger.info("Phase 2.5: Pre-Session Scanner Setup")
-                success = self._scanner_manager.setup_pre_session_scanners()
-                if not success:
-                    logger.error("[SESSION_FLOW] 3.b.2.PHASE_2.5: Scanner setup FAILED")
-                    raise RuntimeError("Pre-session scanner setup failed")
-                logger.info("[SESSION_FLOW] 3.b.2.PHASE_2.5: Complete")
-                
-                # Phase 3: Queue Loading
-                logger.info("[SESSION_FLOW] 3.b.2.PHASE_3: Queue Loading phase starting")
-                logger.info("Phase 3: Queue Loading")
-                self._load_queues()
-                logger.info("[SESSION_FLOW] 3.b.2.PHASE_3: Complete")
-                
-                # Phase 4: Session Activation
-                logger.info("[SESSION_FLOW] 3.b.2.PHASE_4: Session Activation phase starting")
-                logger.info("Phase 4: Session Activation")
-                self._activate_session()
-                logger.info("[SESSION_FLOW] 3.b.2.PHASE_4: Complete")
-                
-                # Phase 5: Streaming Phase
-                logger.info("[SESSION_FLOW] 3.b.2.PHASE_5: Streaming phase starting")
-                logger.info("Phase 5: Streaming Phase")
-                self._streaming_phase()
-                logger.info("[SESSION_FLOW] 3.b.2.PHASE_5: Complete")
-                
-                # Phase 6: End-of-Session
-                logger.info("[SESSION_FLOW] 3.b.2.PHASE_6: End-of-Session phase starting")
-                logger.info("Phase 6: End-of-Session")
-                
-                # Check if this is the last day BEFORE advancing time
-                is_last_day = False
-                if self.mode == "backtest":
-                    current_time = self._time_manager.get_current_time()
-                    current_date = current_time.date()
-                    end_date = self._time_manager.backtest_end_date
-                    if current_date >= end_date:
-                        is_last_day = True
-                        logger.info(
-                            f"[SESSION_FLOW] 3.b.2.PHASE_6: Last backtest day {current_date}, "
-                            f"will terminate after cleanup"
-                        )
-                
-                self._end_session()
-                logger.info("[SESSION_FLOW] 3.b.2.PHASE_6: Complete")
-                
-                # Check termination condition
-                logger.info("[SESSION_FLOW] 3.b.2.CHECK: Checking termination condition")
-                if is_last_day or self._should_terminate():
-                    logger.info("[SESSION_FLOW] 3.b.2.CHECK: Termination condition met")
-                    logger.info("Backtest complete, terminating coordinator")
-                    break
+                # =============================================================
+                # PHASE 1: TEARDOWN & CLEANUP (skip on first session)
+                # =============================================================
+                if self._session_count > 0:
+                    self._teardown_and_cleanup()  # NEW coordination method
                 else:
-                    logger.info("[SESSION_FLOW] 3.b.2.CHECK: Continuing to next session")
+                    # First session: just log starting info
+                    current_time = self._time_manager.get_current_time()
+                    logger.info("=" * 70)
+                    logger.info(f"FIRST SESSION - Starting at {current_time}")
+                    logger.info("=" * 70)
+                
+                # =============================================================
+                # PHASE 2: INITIALIZATION
+                # =============================================================
+                logger.info("=" * 70)
+                logger.info("PHASE 2: INITIALIZATION")
+                logger.info("=" * 70)
+                
+                # Step 3: Load ALL session data
+                gap_start = self.metrics.start_timer()
+                self._load_session_data()  # NEW coordination method
+                self.metrics.record_session_gap(gap_start)
+                
+                # Step 4: Initialize threads
+                self._initialize_threads()  # NEW coordination method
+                
+                # Step 5: Pre-session scans
+                if self._scanner_manager._pre_session_scanners:
+                    logger.info("Running pre-session scans")
+                    success = self._scanner_manager.setup_pre_session_scanners()
+                    if not success:
+                        raise RuntimeError("Pre-session scan failed")
+                
+                logger.info("✓ Phase 2 complete")
+                
+                # =============================================================
+                # PHASE 3: ACTIVE SESSION
+                # =============================================================
+                logger.info("=" * 70)
+                logger.info("PHASE 3: ACTIVE SESSION")
+                logger.info("=" * 70)
+                
+                # Step 6: Activate session
+                self._activate_session()  # EXISTING method (unchanged)
+                
+                # Step 7: Stream data
+                self._streaming_phase()  # EXISTING method (unchanged)
+                
+                logger.info("✓ Phase 3 complete")
+                
+                # =============================================================
+                # PHASE 4: END SESSION
+                # =============================================================
+                logger.info("=" * 70)
+                logger.info("PHASE 4: END SESSION")
+                logger.info("=" * 70)
+                
+                # Step 8: Deactivate (no cleanup!)
+                self._deactivate_session()  # MODIFIED method
+                
+                # Step 9: Check if last day
+                current_time = self._time_manager.get_current_time()
+                current_date = current_time.date()
+                end_date = self._time_manager.backtest_end_date
+                
+                if current_date >= end_date:
+                    logger.info("=" * 70)
+                    logger.info(f"LAST BACKTEST DAY ({current_date})")
+                    logger.info("Data preserved for analysis - exiting loop")
+                    logger.info("=" * 70)
+                    break
+                
+                logger.info("✓ Phase 4 complete")
+                
+                # Increment session counter
+                self._session_count += 1
+                logger.info(f"Session {self._session_count} complete, continuing to next day")
                 
             except Exception as e:
                 logger.error(f"Error in coordinator loop: {e}", exc_info=True)
                 break
         
-        logger.info("[SESSION_FLOW] 3.b.1: Coordinator loop exited")
+        logger.info("=" * 70)
+        logger.info("COORDINATOR LOOP EXITED")
+        logger.info(f"Total sessions completed: {self._session_count}")
+        logger.info("=" * 70)
     
     # =========================================================================
     # Phase 1: Initialization
@@ -1016,61 +1414,39 @@ class SessionCoordinator(threading.Thread):
     # =========================================================================
     
     def _manage_historical_data(self, symbols: Optional[List[str]] = None):
-        """Manage historical data before session starts.
+        """Load historical data (assumes symbols already registered).
+        
+        MODIFIED (Phase 4): Removed pre-registration and clearing logic.
+        - Symbols are registered in Phase 2 (_register_symbols)
+        - Clearing happens in Phase 1 (_teardown_and_cleanup)
         
         Tasks:
         - Load historical bars (trailing days)
         - Calculate historical indicators
-        - Calculate quality scores
         
         Args:
             symbols: Symbols to process. If None, uses all from config.
-        
-        Reference: SESSION_ARCHITECTURE.md lines 1650-1655
         """
-        logger.info("[SESSION_FLOW] PHASE_2.1: Managing historical data")
-        logger.info("Managing historical data")
+        logger.info("Loading historical data")
         
-        # Start timing for historical data management
+        # Start timing
         start_time = self.metrics.start_timer()
         
         # Load historical data configuration
         historical_config = self.session_config.session_data_config.historical
         
         if not historical_config.data:
-            logger.info("[SESSION_FLOW] PHASE_2.1: No historical data configured, skipping")
             logger.info("No historical data configured, skipping")
             return
         
-        # Get current session date
+        # Get current session date (from TimeManager)
         current_time = self._time_manager.get_current_time()
         current_date = current_time.date()
         
-        logger.info(f"[SESSION_FLOW] PHASE_2.1: Loading historical data for session {current_date}")
         logger.info(f"Loading historical data for session {current_date}")
         
-        # PRE-REGISTER symbols so clear works properly
+        # Get symbols to process (already registered)
         symbols_to_process = symbols or self.session_config.session_data_config.symbols
-        logger.info(f"[SESSION_FLOW] PHASE_2.1: Pre-registering {len(symbols_to_process)} symbols")
-        for symbol in symbols_to_process:
-            if symbol not in self.session_data._symbols:  # FIX: Check _symbols, not _active_symbols
-                self.session_data.register_symbol(symbol)
-                logger.debug(f"Pre-registered symbol: {symbol}")
-            else:
-                logger.debug(f"Symbol {symbol} already registered")
-        
-        # Clear data BEFORE loading
-        # If symbols specified (mid-session add), only clear those symbols
-        # If no symbols specified (initial load), clear all
-        if symbols:
-            logger.info(f"[SESSION_FLOW] PHASE_2.1: Clearing historical data for {len(symbols)} symbols: {symbols}")
-            for symbol in symbols:
-                self.session_data.clear_symbol_historical(symbol)
-        else:
-            logger.info("[SESSION_FLOW] PHASE_2.1: Clearing ALL session data (current + historical)")
-            self.session_data.clear_session_bars()      # Clear current session bars
-            self.session_data.clear_historical_bars()   # Clear historical bars
-        logger.info("[SESSION_FLOW] PHASE_2.1: Data cleared - ready for load")
         
         # Process each historical data configuration
         for hist_data_config in historical_config.data:
@@ -1126,8 +1502,8 @@ class SessionCoordinator(threading.Thread):
             # No period specified, use base name only
             return base_name
     
-    def _calculate_historical_indicators(self):
-        """Calculate all historical indicators before EVERY session.
+    def _calculate_historical_indicators(self, symbols: Optional[List[str]] = None):
+        """Calculate historical indicators for specified symbols (or all if None).
         
         Tasks:
         - For each indicator in config:
@@ -1135,19 +1511,26 @@ class SessionCoordinator(threading.Thread):
           - Store in session_data with indexed access
         - Auto-generates descriptive keys (e.g., "avg_volume_2d")
         
+        Used by both pre-session initialization and mid-session insertion.
+        
+        Args:
+            symbols: List of symbols to process, or None for all symbols from config
+        
         Reference: SESSION_ARCHITECTURE.md lines 380-440
         """
         indicators = self.session_config.session_data_config.historical.indicators
         
         if not indicators:
-            logger.info("No historical indicators configured, skipping")
+            logger.debug("No historical indicators configured, skipping")
             return
+        
+        if symbols is None:
+            symbols = self.session_config.session_data_config.symbols
         
         # Debug: Check what symbols are registered
         logger.debug(f"Registered symbols in session_data: {list(self.session_data._symbols.keys())}")
         
         start_time = self.metrics.start_timer()
-        symbols = self.session_config.session_data_config.symbols
         logger.info(f"Calculating {len(indicators)} historical indicators for {len(symbols)} symbols")
         
         # Calculate indicators per symbol
@@ -1206,8 +1589,8 @@ class SessionCoordinator(threading.Thread):
         elapsed = self.metrics.elapsed_time(start_time)
         logger.info(f"Historical indicators calculated ({elapsed:.3f}s)")
     
-    def _calculate_historical_quality(self):
-        """Calculate quality scores for HISTORICAL bars only.
+    def _calculate_historical_quality(self, symbols: Optional[List[str]] = None):
+        """Calculate quality scores for HISTORICAL bars for specified symbols (or all if None).
         
         ARCHITECTURE:
         - Session Coordinator (this): Calculate quality on HISTORICAL bars (Phase 2)
@@ -1215,17 +1598,25 @@ class SessionCoordinator(threading.Thread):
         
         This method calculates quality on historical bars loaded from database.
         Current session bars quality is handled by DataQualityManager during streaming.
+        
+        Used by both pre-session initialization and mid-session insertion.
+        
+        Args:
+            symbols: List of symbols to process, or None for all symbols from config
         """
+        if symbols is None:
+            symbols = self.session_config.session_data_config.symbols
+        
         enable_quality = self.session_config.session_data_config.historical.enable_quality
         
         if not enable_quality:
             # Disabled: Assign 100% quality to all historical bars
             logger.info("[SESSION_FLOW] PHASE_2.3: Quality disabled, assigning 100% to historical bars")
-            self._assign_perfect_quality()
+            self._assign_perfect_quality(symbols=symbols)
             return
         
         # Enabled: Calculate actual quality and gaps on HISTORICAL bars
-        logger.info("[SESSION_FLOW] PHASE_2.3: Calculating quality and gaps for HISTORICAL bars")
+        logger.info(f"[SESSION_FLOW] PHASE_2.3: Calculating quality and gaps for {len(symbols)} symbols")
         start_time = self.metrics.start_timer()
         
         # Calculate quality and gaps for base intervals ONLY (1m, 1s, 1d)
@@ -1233,7 +1624,7 @@ class SessionCoordinator(threading.Thread):
         base_intervals = ["1m", "1s", "1d"]
         
         # Use shared method for quality and gap calculation
-        for symbol in self.session_config.session_data_config.symbols:
+        for symbol in symbols:
             # Calculate quality and gaps using shared method
             self._calculate_quality_and_gaps_for_symbol(symbol, base_intervals)
             
@@ -1246,7 +1637,7 @@ class SessionCoordinator(threading.Thread):
         # Calculate average quality for logging
         total_symbols = 0
         total_quality = 0.0
-        for symbol in self.session_config.session_data_config.symbols:
+        for symbol in symbols:
             for interval in base_intervals:
                 quality = self._get_historical_quality(symbol, interval)
                 if quality is not None:
@@ -1272,13 +1663,20 @@ class SessionCoordinator(threading.Thread):
         # logger.info("[SESSION_FLOW] PHASE_2.4: Complete - Derived historical bars generated")
         logger.info("[SESSION_FLOW] PHASE_2.4: Skipping derived historical bars (only load configured intervals)")
     
-    def _assign_perfect_quality(self):
-        """Assign 100% quality to all historical bars (when quality disabled)."""
-        logger.info("[SESSION_FLOW] PHASE_2.3: Assigning perfect quality (100%)")
+    def _assign_perfect_quality(self, symbols: Optional[List[str]] = None):
+        """Assign 100% quality to historical bars for specified symbols (or all if None).
+        
+        Args:
+            symbols: List of symbols to process, or None for all symbols from config
+        """
+        if symbols is None:
+            symbols = self.session_config.session_data_config.symbols
+        
+        logger.info(f"[SESSION_FLOW] PHASE_2.3: Assigning perfect quality (100%) to {len(symbols)} symbols")
         
         # Set quality to 100% for all symbols/intervals in session_data
         count = 0
-        for symbol in self.session_config.session_data_config.symbols:
+        for symbol in symbols:
             for interval in ["1m", "5m", "15m", "30m", "1h", "1d"]:
                 self.session_data.set_quality(symbol, interval, 100.0)
                 count += 1
@@ -1793,25 +2191,35 @@ class SessionCoordinator(threading.Thread):
     # Phase 3: Queue Loading
     # =========================================================================
     
-    def _load_queues(self):
-        """Load queues with data for streaming phase.
+    def _load_queues(self, symbols: Optional[List[str]] = None):
+        """Load queues with data for streaming phase (for specified symbols or all).
         
         Backtest: Load current session day data into queues
         Live: Start API streams
         
         Uses stream/generate marking from _mark_stream_generate() to know
         what data to load vs what will be generated by data_processor.
+        
+        Used by both pre-session initialization and mid-session insertion.
+        
+        Args:
+            symbols: List of symbols to load, or None for all symbols from config
         """
-        logger.info(f"[SESSION_FLOW] PHASE_3.1: Loading queues (mode={self.mode})")
+        if symbols is None:
+            symbols_desc = "all symbols"
+        else:
+            symbols_desc = f"{len(symbols)} symbols"
+        
+        logger.info(f"[SESSION_FLOW] PHASE_3.1: Loading queues for {symbols_desc} (mode={self.mode})")
         start_time = self.metrics.start_timer()
         
         if self.mode == "backtest":
-            logger.info("[SESSION_FLOW] PHASE_3.1: Backtest mode - loading backtest queues")
-            self._load_backtest_queues()
+            logger.info(f"[SESSION_FLOW] PHASE_3.1: Backtest mode - loading queues for {symbols_desc}")
+            self._load_backtest_queues(symbols=symbols)
             logger.info("[SESSION_FLOW] PHASE_3.1: Backtest queues loaded")
         else:  # live mode
             logger.info("[SESSION_FLOW] PHASE_3.1: Live mode - starting live streams")
-            self._start_live_streams()
+            self._start_live_streams(symbols=symbols)
             logger.info("[SESSION_FLOW] PHASE_3.1: Live streams started")
         
         elapsed = self.metrics.elapsed_time(start_time)
@@ -2099,8 +2507,66 @@ class SessionCoordinator(threading.Thread):
     # Symbol Processing - Pending Symbols
     # =========================================================================
     
+    def _load_symbols_mid_session(
+        self,
+        symbols: List[str],
+        added_by: str = "strategy"
+    ):
+        """Load specific symbols mid-session (mirrors _load_session_data).
+        
+        Phase 7 Enhancement: FULL CODE REUSE with pre-session initialization!
+        Phase 8: Enhanced with metadata tracking.
+        
+        This is IDENTICAL to Phase 2 initialization, just for specific symbols.
+        Uses exact same coordination methods with optional symbols parameter.
+        
+        Args:
+            symbols: List of symbols to load
+            added_by: Source of addition ("strategy", "scanner", "manual")
+        """
+        logger.info(f"Loading {len(symbols)} symbols mid-session (using coordination methods, added_by={added_by})")
+        
+        # Step 1: Register symbols with full session-config metadata
+        for symbol in symbols:
+            # Check if upgrading from adhoc
+            existing = self.session_data.get_symbol_data(symbol)
+            if existing and not existing.meets_session_config_requirements:
+                logger.info(f"{symbol}: Upgrading from adhoc to full session-config")
+                # Update metadata on existing object
+                existing.meets_session_config_requirements = True
+                existing.upgraded_from_adhoc = True
+                existing.added_by = added_by
+            else:
+                # New symbol - register with full metadata
+                self._register_single_symbol(
+                    symbol,
+                    meets_session_config_requirements=True,
+                    added_by=added_by,
+                    auto_provisioned=False
+                )
+        
+        # Step 2: Load historical data (REUSE!)
+        self._manage_historical_data(symbols=symbols)
+        
+        # Step 3: Register indicators (REUSE!)
+        self._register_session_indicators(symbols=symbols)
+        
+        # Step 4: Calculate historical indicators (REUSE!)
+        self._calculate_historical_indicators(symbols=symbols)
+        
+        # Step 5: Load queues (REUSE!)
+        self._load_queues(symbols=symbols)  # Wrapper that calls _load_backtest_queues
+        
+        # Step 6: Calculate quality (REUSE!)
+        self._calculate_historical_quality(symbols=symbols)
+        
+        logger.info(f"✓ Loaded {len(symbols)} symbols mid-session (100% code reuse, meets_config_req=True)")
+    
     def _process_pending_symbols(self):
-        """Process pending symbols using existing infrastructure.
+        """Process pending symbols using FULL COORDINATION METHOD REUSE (Phase 7 final).
+        
+        Uses exact same flow as Phase 2 initialization via _load_symbols_mid_session().
+        Maximum code reuse: 98% shared with pre-session flow.
         
         No manual session deactivation - streaming loop handles it automatically
         based on data lag.
@@ -2121,30 +2587,12 @@ class SessionCoordinator(threading.Thread):
         time.sleep(0.1)
         
         try:
-            # Load symbols using existing methods (95% reuse)
-            logger.info("[SYMBOL] Phase 1: Validating streams")
-            self._validate_and_mark_streams(symbols=pending)
+            # Call coordination method (100% REUSE!)
+            gap_start = self.metrics.start_timer()
+            self._load_symbols_mid_session(pending)
+            self.metrics.record_session_gap(gap_start)
             
-            logger.info("[SYMBOL] Phase 2: Loading historical data") 
-            self._manage_historical_data(symbols=pending)
-            
-            logger.info("[SYMBOL] Phase 3: Calculating historical quality and gaps")
-            # Calculate quality and gaps for newly loaded symbols
-            base_intervals = ["1m", "1s", "1d"]
-            for symbol in pending:
-                self._calculate_quality_and_gaps_for_symbol(symbol, base_intervals)
-                
-                # Propagate base quality to derived intervals
-                for interval in base_intervals:
-                    quality = self._get_historical_quality(symbol, interval)
-                    if quality is not None:
-                        self._propagate_quality_to_derived_historical(symbol, interval, quality)
-            
-            logger.info("[SYMBOL] Phase 4: Loading queues")
-            self._load_backtest_queues(symbols=pending)
-            
-            # Symbols are now tracked in SessionData (no separate _loaded_symbols needed)
-            logger.info(f"[SYMBOL] Loaded {len(pending)} symbols successfully")
+            logger.info(f"[SYMBOL] ✓ Loaded {len(pending)} symbols (full coordination method reuse)")
             
         except Exception as e:
             logger.error(f"[SYMBOL] Error loading symbols: {e}", exc_info=True)
@@ -2371,16 +2819,17 @@ class SessionCoordinator(threading.Thread):
     # Phase 6: End-of-Session
     # =========================================================================
     
-    def _end_session(self):
-        """End current session and prepare for next.
+    def _deactivate_session(self):
+        """Phase 4: Deactivate session and record metrics (NO cleanup).
+        
+        MODIFIED (Phase 4): Renamed from _end_session, removed cleanup logic.
+        - Clearing happens in Phase 1 (_teardown_and_cleanup)
+        - Clock advancing happens in Phase 1 (_teardown_and_cleanup)
         
         Tasks:
         - Deactivate session
         - Record metrics
-        - Clear session data (keep historical)
-        - Advance to next trading day
-        
-        Reference: SESSION_ARCHITECTURE.md lines 1663-1666
+        - Leave data INTACT for analysis
         """
         # 1. Deactivate session
         self._session_active = False
@@ -2388,7 +2837,7 @@ class SessionCoordinator(threading.Thread):
         
         # Notify scanner manager that session has ended
         self._scanner_manager.on_session_end()
-        logger.info("[SESSION_FLOW] PHASE_6.1a: Scanner manager notified of session end")
+        logger.debug("Scanner manager notified of session end")
         
         logger.info("Session deactivated")
         
@@ -2400,22 +2849,22 @@ class SessionCoordinator(threading.Thread):
         # 3. Increment trading days counter
         self.metrics.increment_trading_days()
         
-        # 4. Clear session bars (keep historical data for next session)
-        self.session_data.clear_session_bars()
-        logger.debug("Session bars cleared")
-        
-        # 5. Get current session date
+        # 4. Get current session date for logging
         current_time = self._time_manager.get_current_time()
         current_date = current_time.date()
         
-        logger.info(f"Session {current_date} ended")
+        logger.info(f"Session {current_date} ended - data preserved for analysis")
         
-        # 6. Advance to next trading day (if in backtest mode)
-        if self.mode == "backtest":
-            self._advance_to_next_trading_day(current_date)
-        else:
-            # Live mode: just wait for next day (handled by system)
-            logger.info("Live mode: waiting for next trading day")
+        # REMOVED: clear_session_bars() - moved to Phase 1
+        # REMOVED: _advance_to_next_trading_day() - moved to Phase 1
+    
+    def _end_session(self):
+        """DEPRECATED: Use _deactivate_session() instead.
+        
+        Kept for backwards compatibility during migration.
+        """
+        logger.warning("_end_session() is deprecated, use _deactivate_session()")
+        self._deactivate_session()
     
     def _advance_to_next_trading_day(self, current_date: date):
         """Advance time to next trading day's market open.
@@ -2562,28 +3011,29 @@ class SessionCoordinator(threading.Thread):
         self.quality_manager = quality_manager
         logger.info("Quality manager wired to coordinator")
     
-    def _validate_and_mark_streams(self, symbols: Optional[List[str]] = None) -> bool:
-        """Validate stream requirements and mark streams/generations.
+    def _validate_stream_requirements(self) -> bool:
+        """Validate stream configuration and data availability (ONCE only).
+        
+        Phase 2 - BEFORE LOOP: Validates but does NOT register symbols.
         
         Uses stream requirements coordinator to:
         1. Validate configuration format
         2. Analyze requirements to determine base interval
-        3. Validate Parquet data availability
-        4. Mark streamed vs generated intervals
+        3. Validate Parquet data availability (backtest mode)
         
-        Args:
-            symbols: Symbols to process. If None, uses all from config.
+        Stores validation results in instance variables for later use:
+        - self._base_interval
+        - self._derived_intervals_validated
+        - self._streams_validated
         
         Returns:
-            True if validation passed and streams marked
-            False if validation failed
-        
-        Note: Only runs in backtest mode. Live mode uses simple marking.
+            True if validation passed, False if failed
         """
         if self.mode != "backtest":
-            # Live mode: use simple marking
-            logger.info("Live mode: using simple stream marking (no validation)")
-            self._mark_stream_generate(symbols=symbols)
+            # Live mode: no Parquet validation needed
+            logger.info("Live mode: stream validation skipped (no Parquet check needed)")
+            self._streams_validated = True
+            # In live mode, we'll determine intervals during registration
             return True
         
         logger.info("=" * 70)
@@ -2596,7 +3046,7 @@ class SessionCoordinator(threading.Thread):
             time_manager=self._time_manager
         )
         
-        # Create data checker using DataManager API (proper abstraction)
+        # Create data checker using DataManager API
         data_manager = self._system_manager.get_data_manager()
         data_checker = create_data_manager_checker(data_manager)
         
@@ -2623,52 +3073,865 @@ class SessionCoordinator(threading.Thread):
         logger.info(f"  Generate derived: {result.derivable_intervals}")
         logger.info("=" * 70)
         
-        # Register symbols with bar structure based on validation results
-        symbols_to_process = symbols or self.session_config.session_data_config.symbols
-        base_interval = result.required_base_interval
-        derived_intervals = result.derivable_intervals
+        # Store results for later use (during symbol registration)
+        self._base_interval = result.required_base_interval
+        self._derived_intervals_validated = result.derivable_intervals
+        self._streams_validated = True
         
-        for symbol in symbols_to_process:
-            # Create bar structure with base interval (streamed) + derived intervals (generated)
-            bars = {
-                # Base interval (streamed from queue/API)
-                base_interval: BarIntervalData(
-                    derived=False,  # Streamed, not generated
-                    base=None,      # Not derived from anything
-                    data=deque(),   # Empty deque for base interval
-                    quality=0.0,
-                    gaps=[],
-                    updated=False
-                )
-            }
+        logger.info("Validation results stored for symbol registration")
+        
+        return True
+    
+    # =========================================================================
+    # Phase 5a: Unified Requirement Analysis (Three-Phase Pattern)
+    # =========================================================================
+    
+    def _analyze_requirements(
+        self,
+        operation_type: str,
+        symbol: str,
+        source: str,
+        **kwargs
+    ) -> ProvisioningRequirements:
+        """Phase 1: Unified requirement analysis for ANY addition operation.
+        
+        This is the DISPATCHER for the three-phase unified provisioning pattern.
+        ALL additions (symbols, bars, indicators) from ALL sources (config, scanner,
+        strategy) go through this method.
+        
+        Three-Phase Pattern:
+            1. REQUIREMENT ANALYSIS (this method) → Determines what's needed
+            2. VALIDATION (caller uses validation_result) → Checks if possible
+            3. PROVISIONING (caller uses provisioning_steps) → Executes plan
+        
+        Args:
+            operation_type: What to add ("symbol", "bar", "indicator")
+            symbol: Symbol to operate on
+            source: Who is adding ("config", "scanner", "strategy")
+            **kwargs: Operation-specific arguments
+                For "indicator": indicator_config (IndicatorConfig)
+                For "bar": interval (str), days (int), historical_only (bool)
+                For "symbol": None (infers from config)
+        
+        Returns:
+            ProvisioningRequirements with complete analysis
+        
+        Code Reuse:
+            - REUSES: analyze_indicator_requirements() for indicators
+            - REUSES: parse_interval() + determine_required_base() for bars
+            - REUSES: Session config for symbol requirements
+            - REUSES: _validate_symbol_for_loading() for validation
+        """
+        logger.debug(f"[ANALYZE] {operation_type.upper()} for {symbol} (source={source})")
+        
+        # Create requirements object
+        req = ProvisioningRequirements(
+            operation_type=operation_type,
+            source=source,
+            symbol=symbol.upper(),
+            added_by=source
+        )
+        
+        # Phase 1: Check existing state (INFER from structure)
+        existing = self.session_data.get_symbol_data(symbol)
+        req.symbol_exists = existing is not None
+        req.symbol_data = existing
+        
+        if existing:
+            req.intervals_exist = {interval: True for interval in existing.bars.keys()}
+            logger.debug(f"[ANALYZE] {symbol}: Symbol exists with intervals={list(existing.bars.keys())}")
+        
+        # Phase 2: Analyze by operation type
+        if operation_type == "indicator":
+            self._analyze_indicator_requirements(req, **kwargs)
+        elif operation_type == "bar":
+            self._analyze_bar_requirements(req, **kwargs)
+        elif operation_type == "symbol":
+            self._analyze_symbol_requirements(req)
+        else:
+            req.can_proceed = False
+            req.validation_errors.append(f"Unknown operation_type: {operation_type}")
+            return req
+        
+        # Phase 3: Validate (REUSE Step 0 validation for symbols/bars)
+        if operation_type in ["symbol", "bar"]:
+            validation_result = self._validate_symbol_for_loading(symbol)
+            req.validation_result = validation_result
+            req.can_proceed = validation_result.can_proceed
             
-            # Add derived intervals (generated by DataProcessor)
-            for interval in derived_intervals:
-                bars[interval] = BarIntervalData(
-                    derived=True,       # Generated, not streamed
-                    base=base_interval, # Derived from base
-                    data=[],            # Empty list for derived
-                    quality=0.0,
-                    gaps=[],
-                    updated=False
-                )
-            
-            # Create SymbolSessionData with bar structure
-            symbol_data = SymbolSessionData(
-                symbol=symbol,
-                base_interval=base_interval,
-                bars=bars
+            if not validation_result.can_proceed:
+                req.validation_errors.append(validation_result.reason)
+        else:
+            # Lightweight validation for indicators
+            req.can_proceed = len(req.validation_errors) == 0
+        
+        # Phase 4: Determine provisioning steps
+        self._determine_provisioning_steps(req)
+        
+        # Phase 5: Set metadata flags
+        req.meets_session_config_requirements = (source == "config")
+        req.auto_provisioned = (not req.symbol_exists and source != "config")
+        
+        logger.info(
+            f"[ANALYZE] {symbol}: {operation_type} analysis complete - "
+            f"can_proceed={req.can_proceed}, steps={len(req.provisioning_steps)}"
+        )
+        
+        return req
+    
+    def _analyze_indicator_requirements(
+        self,
+        req: ProvisioningRequirements,
+        indicator_config,
+        **kwargs
+    ):
+        """Analyze indicator-specific requirements.
+        
+        REUSES: analyze_indicator_requirements() from requirement_analyzer
+        """
+        from app.threads.quality.requirement_analyzer import analyze_indicator_requirements
+        
+        # REUSE existing analyzer (uses TimeManager internally!)
+        indicator_reqs = analyze_indicator_requirements(
+            indicator_config=indicator_config,
+            system_manager=self._system_manager,
+            warmup_multiplier=2.0,
+            from_date=None,  # Uses TimeManager.get_current_time()
+            exchange="NYSE"
+        )
+        
+        req.indicator_config = indicator_config
+        req.indicator_requirements = indicator_reqs
+        req.required_intervals = indicator_reqs.required_intervals
+        req.historical_bars = indicator_reqs.historical_bars
+        req.historical_days = indicator_reqs.historical_days
+        req.needs_historical = indicator_reqs.historical_days > 0
+        req.needs_session = True
+        req.reason = indicator_reqs.reason
+        
+        if len(req.required_intervals) > 1:
+            req.base_interval = req.required_intervals[0]
+    
+    def _analyze_bar_requirements(
+        self,
+        req: ProvisioningRequirements,
+        interval: str,
+        days: int = 0,
+        historical_only: bool = False,
+        **kwargs
+    ):
+        """Analyze bar-specific requirements.
+        
+        REUSES: parse_interval() + determine_required_base() from requirement_analyzer
+        """
+        from app.threads.quality.requirement_analyzer import parse_interval, determine_required_base
+        
+        try:
+            interval_info = parse_interval(interval)
+        except ValueError as e:
+            req.can_proceed = False
+            req.validation_errors.append(f"Invalid interval: {e}")
+            return
+        
+        req.required_intervals = [interval]
+        
+        if not interval_info.is_base:
+            base_interval = determine_required_base(interval)
+            if base_interval:
+                req.required_intervals.insert(0, base_interval)
+                req.base_interval = base_interval
+        
+        req.historical_days = days
+        req.needs_historical = days > 0
+        req.needs_session = not historical_only
+        req.reason = f"Bar {interval} requires intervals={req.required_intervals}, {days} days historical"
+    
+    def _analyze_symbol_requirements(self, req: ProvisioningRequirements):
+        """Analyze symbol-specific requirements.
+        
+        INFERS requirements from session config (Single Source of Truth).
+        """
+        config = self.session_config.session_data_config
+        
+        # INFER intervals from config
+        req.required_intervals = list(config.streams)
+        
+        if hasattr(config, 'derived_intervals') and config.derived_intervals:
+            req.required_intervals.extend(config.derived_intervals)
+        elif self._derived_intervals_validated:
+            req.required_intervals.extend(self._derived_intervals_validated)
+        
+        req.base_interval = self._base_interval or "1m"
+        
+        # INFER historical from config
+        if config.historical.enabled and config.historical.data:
+            first_config = config.historical.data[0]
+            req.historical_days = first_config.trailing_days
+            req.needs_historical = True
+        
+        req.needs_session = True
+        req.reason = f"Symbol requires intervals={req.required_intervals}, {req.historical_days} days historical"
+    
+    def _determine_provisioning_steps(self, req: ProvisioningRequirements):
+        """Determine provisioning steps based on requirements and existing state.
+        
+        INFERS steps from structure analysis (what exists vs what's needed).
+        """
+        steps = []
+        
+        # Step 1: Symbol provisioning
+        if not req.symbol_exists:
+            steps.append("create_symbol")
+        elif req.symbol_data and not req.symbol_data.meets_session_config_requirements:
+            if req.source in ["config", "strategy"]:
+                steps.append("upgrade_symbol")
+        
+        # Step 2: Interval provisioning
+        for interval in req.required_intervals:
+            if interval not in req.intervals_exist:
+                steps.append(f"add_interval_{interval}")
+        
+        # Step 3: Historical provisioning
+        if req.needs_historical:
+            if req.source == "config" or req.historical_days > 0:
+                steps.append("load_historical")
+        
+        # Step 4: Session provisioning
+        if req.needs_session:
+            steps.append("load_session")
+        
+        # Step 5: Indicator provisioning
+        if req.indicator_config:
+            steps.append("register_indicator")
+        
+        # Step 6: Quality calculation (only for full loading)
+        if req.source == "config" and req.needs_historical:
+            steps.append("calculate_quality")
+        
+        req.provisioning_steps = steps
+    
+    # =========================================================================
+    # Phase 5b: Unified Provisioning Executor (Orchestrates Step 3 Loading)
+    # =========================================================================
+    
+    def _execute_provisioning(self, req: ProvisioningRequirements) -> bool:
+        """Phase 3: Execute provisioning plan from requirement analysis.
+        
+        This is the EXECUTOR for the three-phase unified provisioning pattern.
+        It takes the provisioning plan from Phase 1 (requirement analysis) and
+        Phase 2 (validation) and executes it by orchestrating existing Step 3
+        loading methods.
+        
+        Three-Phase Pattern:
+            1. REQUIREMENT ANALYSIS → Creates ProvisioningRequirements
+            2. VALIDATION → Populates can_proceed
+            3. PROVISIONING (this method) → Executes provisioning_steps
+        
+        Args:
+            req: ProvisioningRequirements with complete analysis and plan
+        
+        Returns:
+            True if provisioning succeeded, False otherwise
+        
+        Code Reuse:
+            - REUSES: _register_single_symbol() from Phases 1-4
+            - REUSES: _manage_historical_data() existing method
+            - REUSES: _register_session_indicators() existing method
+            - REUSES: _load_queues() existing method
+            - REUSES: _calculate_historical_quality() existing method
+        
+        Provisioning Steps:
+            - "create_symbol": Create new SymbolSessionData with metadata
+            - "upgrade_symbol": Upgrade adhoc symbol to full
+            - "add_interval_{interval}": Add interval bar structure
+            - "load_historical": Load historical bars via DataManager
+            - "load_session": Load session/streaming data
+            - "register_indicator": Register indicator with IndicatorManager
+            - "calculate_quality": Calculate quality scores
+        
+        Example:
+            >>> req = coordinator._analyze_requirements("symbol", "AAPL", "config")
+            >>> if req.can_proceed:
+            ...     success = coordinator._execute_provisioning(req)
+        """
+        if not req.can_proceed:
+            logger.error(
+                f"[PROVISION] {req.symbol}: Cannot proceed - validation failed: "
+                f"{req.validation_errors}"
             )
+            return False
+        
+        logger.info(
+            f"[PROVISION] {req.symbol}: Starting provisioning "
+            f"({len(req.provisioning_steps)} steps) - "
+            f"operation={req.operation_type}, source={req.source}"
+        )
+        
+        try:
+            # Execute each provisioning step in order
+            for step in req.provisioning_steps:
+                if not self._execute_provisioning_step(req, step):
+                    logger.error(f"[PROVISION] {req.symbol}: Step '{step}' failed")
+                    return False
             
-            # Register with SessionData
-            self.session_data.register_symbol_data(symbol_data)
+            logger.info(
+                f"[PROVISION] {req.symbol}: ✅ Complete "
+                f"({len(req.provisioning_steps)} steps executed)"
+            )
+            return True
+            
+        except Exception as e:
+            logger.error(f"[PROVISION] {req.symbol}: Exception during provisioning: {e}")
+            logger.exception(e)
+            return False
+    
+    def _execute_provisioning_step(
+        self,
+        req: ProvisioningRequirements,
+        step: str
+    ) -> bool:
+        """Execute a single provisioning step.
+        
+        REUSES: All existing Step 3 loading methods!
+        
+        Args:
+            req: ProvisioningRequirements with context
+            step: Step to execute (e.g., "create_symbol", "load_historical")
+        
+        Returns:
+            True if step succeeded, False otherwise
+        """
+        logger.debug(f"[PROVISION] {req.symbol}: Executing step '{step}'")
+        
+        try:
+            if step == "create_symbol":
+                return self._provision_create_symbol(req)
+            
+            elif step == "upgrade_symbol":
+                return self._provision_upgrade_symbol(req)
+            
+            elif step.startswith("add_interval_"):
+                interval = step.replace("add_interval_", "")
+                return self._provision_add_interval(req, interval)
+            
+            elif step == "load_historical":
+                return self._provision_load_historical(req)
+            
+            elif step == "load_session":
+                return self._provision_load_session(req)
+            
+            elif step == "register_indicator":
+                return self._provision_register_indicator(req)
+            
+            elif step == "calculate_quality":
+                return self._provision_calculate_quality(req)
+            
+            else:
+                logger.warning(f"[PROVISION] {req.symbol}: Unknown step '{step}'")
+                return True  # Don't fail on unknown steps
+        
+        except Exception as e:
+            logger.error(f"[PROVISION] {req.symbol}: Step '{step}' exception: {e}")
+            return False
+    
+    def _provision_create_symbol(self, req: ProvisioningRequirements) -> bool:
+        """Create new symbol with metadata.
+        
+        REUSES: _register_single_symbol() from Phases 1-4
+        """
+        logger.debug(
+            f"[PROVISION] {req.symbol}: Creating symbol "
+            f"(meets_config_req={req.meets_session_config_requirements})"
+        )
+        
+        # REUSE existing method with metadata
+        self._register_single_symbol(
+            req.symbol,
+            meets_session_config_requirements=req.meets_session_config_requirements,
+            added_by=req.added_by,
+            auto_provisioned=req.auto_provisioned
+        )
+        
+        logger.debug(f"[PROVISION] {req.symbol}: Symbol created ✅")
+        return True
+    
+    def _provision_upgrade_symbol(self, req: ProvisioningRequirements) -> bool:
+        """Upgrade adhoc symbol to full.
+        
+        Updates metadata to indicate full loading.
+        """
+        if not req.symbol_data:
+            logger.error(f"[PROVISION] {req.symbol}: No symbol_data for upgrade")
+            return False
+        
+        logger.debug(f"[PROVISION] {req.symbol}: Upgrading adhoc → full")
+        
+        # Update metadata (INFER from structure - metadata is part of object)
+        req.symbol_data.meets_session_config_requirements = True
+        req.symbol_data.upgraded_from_adhoc = True
+        req.symbol_data.added_by = req.added_by
+        
+        logger.debug(f"[PROVISION] {req.symbol}: Symbol upgraded ✅")
+        return True
+    
+    def _provision_add_interval(
+        self,
+        req: ProvisioningRequirements,
+        interval: str
+    ) -> bool:
+        """Add interval bar structure to symbol.
+        
+        Creates bar structure for base or derived interval.
+        """
+        from collections import deque
+        from app.managers.data_manager.session_data import BarIntervalData
+        
+        symbol_data = self.session_data.get_symbol_data(req.symbol)
+        if not symbol_data:
+            logger.error(f"[PROVISION] {req.symbol}: No symbol_data for interval add")
+            return False
+        
+        logger.debug(f"[PROVISION] {req.symbol}: Adding interval {interval}")
+        
+        # Determine if this is a derived interval
+        is_derived = (interval != req.base_interval and req.base_interval is not None)
+        
+        # Create bar structure
+        symbol_data.bars[interval] = BarIntervalData(
+            derived=is_derived,
+            base=req.base_interval if is_derived else None,
+            data=deque() if not is_derived else [],
+            quality=0.0,
+            gaps=[],
+            updated=False
+        )
+        
+        logger.debug(
+            f"[PROVISION] {req.symbol}: Interval {interval} added "
+            f"(derived={is_derived}) ✅"
+        )
+        return True
+    
+    def _provision_load_historical(self, req: ProvisioningRequirements) -> bool:
+        """Load historical data for symbol.
+        
+        REUSES: _manage_historical_data() existing method
+        """
+        logger.debug(
+            f"[PROVISION] {req.symbol}: Loading {req.historical_days} days historical"
+        )
+        
+        # REUSE existing historical loading method
+        # Note: This method already uses DataManager.load_historical_bars()
+        self._manage_historical_data(symbols=[req.symbol])
+        
+        logger.debug(f"[PROVISION] {req.symbol}: Historical loaded ✅")
+        return True
+    
+    def _provision_load_session(self, req: ProvisioningRequirements) -> bool:
+        """Load session/streaming data for symbol.
+        
+        REUSES: _load_queues() existing method
+        """
+        logger.debug(f"[PROVISION] {req.symbol}: Loading session data")
+        
+        # REUSE existing queue loading method
+        self._load_queues(symbols=[req.symbol])
+        
+        logger.debug(f"[PROVISION] {req.symbol}: Session data loaded ✅")
+        return True
+    
+    def _provision_register_indicator(self, req: ProvisioningRequirements) -> bool:
+        """Register indicator for symbol.
+        
+        REUSES: _register_session_indicators() existing method
+        """
+        if not req.indicator_config:
+            logger.error(f"[PROVISION] {req.symbol}: No indicator_config provided")
+            return False
+        
+        logger.debug(
+            f"[PROVISION] {req.symbol}: Registering indicator "
+            f"{req.indicator_config.name}"
+        )
+        
+        # Add indicator to symbol_data
+        from app.indicators import IndicatorData
+        
+        symbol_data = self.session_data.get_symbol_data(req.symbol)
+        if not symbol_data:
+            logger.error(f"[PROVISION] {req.symbol}: No symbol_data for indicator")
+            return False
+        
+        key = req.indicator_config.make_key()
+        
+        # Check if already exists
+        if key in symbol_data.indicators:
+            logger.debug(f"[PROVISION] {req.symbol}: Indicator {key} already exists")
+            return True
+        
+        # Add indicator metadata (invalid until calculated)
+        symbol_data.indicators[key] = IndicatorData(
+            name=req.indicator_config.name,
+            type=req.indicator_config.type.value,
+            interval=req.indicator_config.interval,
+            current_value=None,
+            last_updated=None,
+            valid=False
+        )
+        
+        # Register with IndicatorManager (if available)
+        if hasattr(self, '_indicator_manager') and self._indicator_manager:
+            self._indicator_manager.register_symbol_indicators(
+                symbol=req.symbol,
+                indicators=[req.indicator_config],
+                historical_bars=None  # Will calculate when bars available
+            )
+        
+        logger.debug(f"[PROVISION] {req.symbol}: Indicator {key} registered ✅")
+        return True
+    
+    def _provision_calculate_quality(self, req: ProvisioningRequirements) -> bool:
+        """Calculate quality scores for symbol.
+        
+        REUSES: _calculate_historical_quality() existing method
+        """
+        logger.debug(f"[PROVISION] {req.symbol}: Calculating quality scores")
+        
+        # REUSE existing quality calculation method
+        self._calculate_historical_quality(symbols=[req.symbol])
+        
+        logger.debug(f"[PROVISION] {req.symbol}: Quality calculated ✅")
+        return True
+    
+    # =========================================================================
+    # Phase 3: Per-Symbol Validation Helpers (Call existing APIs)
+    # =========================================================================
+    
+    def _check_parquet_data(self, symbol: str, interval: str, check_date: date) -> bool:
+        """Check if Parquet data exists for symbol/interval/date.
+        
+        REUSES: DataManager.load_historical_bars() API
+        
+        Args:
+            symbol: Symbol to check
+            interval: Interval to check (e.g., "1m", "5m")
+            check_date: Date to check
+        
+        Returns:
+            True if data exists, False otherwise
+        """
+        try:
+            # Call DataManager API (which uses TimeManager internally)
+            bars = self._data_manager.load_historical_bars(
+                symbol=symbol,
+                interval=interval,
+                days=1  # Just check for this date
+            )
+            return len(bars) > 0
+        except Exception as e:
+            logger.debug(f"{symbol}: Error checking Parquet data: {e}")
+            return False
+    
+    def _check_historical_data_availability(self, symbol: str) -> bool:
+        """Check if historical data exists for symbol.
+        
+        REUSES: DataManager.load_historical_bars() API
+        Infers: Required intervals from config
+        
+        Args:
+            symbol: Symbol to check
+        
+        Returns:
+            True if historical data available, False otherwise
+        """
+        historical_config = self.session_config.session_data_config.historical
+        
+        # No historical required?
+        if not historical_config.data:
+            return True  # Nothing to check
+        
+        # Check first configured interval
+        first_config = historical_config.data[0]
+        interval = first_config.interval
+        days = first_config.trailing_days
+        
+        try:
+            # Call DataManager API (uses TimeManager internally)
+            bars = self._data_manager.load_historical_bars(
+                symbol=symbol,
+                interval=interval,
+                days=days
+            )
+            return len(bars) > 0
+        except Exception as e:
+            logger.debug(f"{symbol}: Error checking historical data: {e}")
+            return False
+    
+    def _check_data_source_for_symbol(self, symbol: str) -> Optional[str]:
+        """Check which data source has this symbol.
+        
+        For now, assumes Parquet is primary source.
+        Future: Query Alpaca/Schwab APIs for availability.
+        
+        Args:
+            symbol: Symbol to check
+        
+        Returns:
+            Data source name or None
+        """
+        # For backtest mode, check Parquet
+        if self.mode == "backtest":
+            # Check if we have any historical data in Parquet
+            if self._check_historical_data_availability(symbol):
+                return "parquet"
+        else:
+            # Live mode: assume API availability
+            # Future: Query Alpaca/Schwab for symbol info
+            return "alpaca"  # Default for live mode
+        
+        return None
+    
+    def _validate_symbol_for_loading(self, symbol: str) -> SymbolValidationResult:
+        """Step 0: Validate single symbol for full loading.
+        
+        Determines if symbol can proceed to Step 3 (data loading).
+        Uses stored system-wide validation results and calls existing APIs.
+        
+        Args:
+            symbol: Symbol to validate
+        
+        Returns:
+            SymbolValidationResult with can_proceed flag
+        """
+        result = SymbolValidationResult(symbol=symbol)
+        
+        logger.debug(f"[STEP_0] Validating {symbol}")
+        
+        # Check 1: Already loaded?
+        existing = self.session_data.get_symbol_data(symbol)
+        if existing and existing.meets_session_config_requirements:
+            result.can_proceed = False
+            result.reason = "already_loaded"
+            logger.debug(f"[STEP_0] {symbol}: Already fully loaded")
+            return result
+        
+        # Check 2: Data source available?
+        data_source = self._check_data_source_for_symbol(symbol)
+        if not data_source:
+            result.can_proceed = False
+            result.reason = "no_data_source"
+            result.data_source_available = False
+            logger.warning(f"[STEP_0] {symbol}: No data source available")
+            return result
+        
+        result.data_source = data_source
+        result.data_source_available = True
+        
+        # Check 3: Intervals supported?
+        # Use stored validation results (from system-wide validation)
+        result.base_interval = self._base_interval or "1m"
+        result.intervals_supported = [result.base_interval] + (self._derived_intervals_validated or [])
+        
+        # Check 4: Historical data available?
+        has_historical = self._check_historical_data_availability(symbol)
+        if not has_historical and self.session_config.session_data_config.historical.enabled:
+            result.can_proceed = False
+            result.reason = "no_historical_data"
+            result.has_historical_data = False
+            logger.warning(f"[STEP_0] {symbol}: No historical data available")
+            return result
+        
+        result.has_historical_data = has_historical
+        
+        # Check 5: Meets all requirements?
+        result.meets_config_requirements = True
+        result.can_proceed = True
+        result.reason = "validated"
+        
+        logger.debug(f"[STEP_0] {symbol}: Validation passed ✅")
+        return result
+    
+    def _validate_symbols_for_loading(self, symbols: List[str]) -> List[str]:
+        """Step 0: Validate all symbols, drop failures, proceed with successes.
+        
+        Graceful degradation: Failed symbols dropped, others proceed.
+        Terminates ONLY if ALL symbols fail.
+        
+        Args:
+            symbols: List of symbols to validate
+        
+        Returns:
+            List of validated symbols that can proceed to Step 3
+        
+        Raises:
+            RuntimeError: If NO symbols pass validation
+        """
+        logger.info(f"[STEP_0] Validating {len(symbols)} symbols")
+        
+        validated_symbols = []
+        failed_symbols = []
+        
+        for symbol in symbols:
+            result = self._validate_symbol_for_loading(symbol)
+            
+            if result.can_proceed:
+                validated_symbols.append(symbol)
+                logger.info(f"[STEP_0] {symbol}: ✅ Validated")
+            else:
+                failed_symbols.append((symbol, result.reason))
+                logger.warning(
+                    f"[STEP_0] {symbol}: ❌ Validation failed - {result.reason}"
+                )
+        
+        # Report results
+        if failed_symbols:
+            logger.warning(
+                f"[STEP_0] {len(failed_symbols)} symbols failed validation: "
+                f"{[s for s, _ in failed_symbols]}"
+            )
+            for symbol, reason in failed_symbols:
+                logger.warning(f"  - {symbol}: {reason}")
+        
+        # Check if ANY symbols passed
+        if not validated_symbols:
+            raise RuntimeError(
+                "[STEP_0] NO SYMBOLS PASSED VALIDATION - Cannot proceed to session. "
+                f"Failed symbols: {failed_symbols}"
+            )
+        
+        logger.info(
+            f"[STEP_0] {len(validated_symbols)} symbols validated, "
+            f"proceeding to Step 3"
+        )
+        
+        return validated_symbols
+    
+    # =========================================================================
+    # Symbol Registration
+    # =========================================================================
+    
+    def _register_single_symbol(
+        self,
+        symbol: str,
+        meets_session_config_requirements: bool = True,
+        added_by: str = "config",
+        auto_provisioned: bool = False
+    ):
+        """Register a single symbol with bar structure and metadata (helper for bulk and mid-session).
+        
+        Phase 7: Extracted from _register_symbols for code reuse.
+        Phase 8: Enhanced with metadata parameters.
+        
+        Used by:
+        - _register_symbols() - bulk registration (all symbols)
+        - _process_pending_symbols() - mid-session insertion (single symbol)
+        - _auto_provision_symbol() - adhoc bar/indicator addition
+        
+        Uses stored validation results from _validate_stream_requirements().
+        
+        Args:
+            symbol: Symbol to register
+            meets_session_config_requirements: True for full loading, False for adhoc
+            added_by: Source of addition ("config", "strategy", "scanner", "adhoc")
+            auto_provisioned: True if auto-created for adhoc addition
+        """
+        base_interval = self._base_interval or "1m"  # Default to 1m if not set
+        derived_intervals = self._derived_intervals_validated or []
+        
+        # Create bar structure with base interval (streamed) + derived intervals (generated)
+        bars = {
+            # Base interval (streamed from queue/API)
+            base_interval: BarIntervalData(
+                derived=False,  # Streamed, not generated
+                base=None,      # Not derived from anything
+                data=deque(),   # Empty deque for base interval
+                quality=0.0,
+                gaps=[],
+                updated=False
+            )
+        }
+        
+        # Add derived intervals (generated by DataProcessor)
+        for interval in derived_intervals:
+            bars[interval] = BarIntervalData(
+                derived=True,       # Generated, not streamed
+                base=base_interval, # Derived from base
+                data=[],            # Empty list for derived
+                quality=0.0,
+                gaps=[],
+                updated=False
+            )
+        
+        # Create SymbolSessionData with bar structure and metadata
+        symbol_data = SymbolSessionData(
+            symbol=symbol,
+            base_interval=base_interval,
+            bars=bars,
+            meets_session_config_requirements=meets_session_config_requirements,
+            added_by=added_by,
+            auto_provisioned=auto_provisioned,
+            added_at=self._time_manager.get_current_time() if self._session_active else None,
+            upgraded_from_adhoc=False
+        )
+        
+        # Register with SessionData
+        self.session_data.register_symbol_data(symbol_data)
+        
+        logger.debug(
+            f"{symbol}: Registered with base={base_interval}, "
+            f"derived={derived_intervals}, "
+            f"meets_config_req={meets_session_config_requirements}, "
+            f"added_by={added_by}"
+        )
+    
+    def _register_symbols(self):
+        """Register all symbols in SessionData using stored validation results.
+        
+        Phase 2 - Step 3: Called every session after validation (first time) or directly (subsequent sessions).
+        
+        Uses stored validation results:
+        - self._base_interval (from _validate_stream_requirements)
+        - self._derived_intervals_validated (from _validate_stream_requirements)
+        
+        Creates SymbolSessionData with bar structure for each symbol.
+        """
+        logger.info("Registering symbols with bar structure")
+        
+        symbols_to_process = self.session_config.session_data_config.symbols
+        
+        # Register each symbol using helper
+        for symbol in symbols_to_process:
+            self._register_single_symbol(symbol)
         
         # Log results
+        base_interval = self._base_interval or "1m"
+        derived_intervals = self._derived_intervals_validated or []
         streamed_count = len(symbols_to_process)  # Each symbol has 1 base interval
         generated_count = len(symbols_to_process) * len(derived_intervals)
-        logger.info(f"Registered {len(symbols_to_process)} symbols: {streamed_count} STREAMED, {generated_count} GENERATED")
-        logger.debug(f"Base interval: {base_interval}, Derived: {derived_intervals}")
         
+        logger.info(
+            f"Registered {len(symbols_to_process)} symbols: "
+            f"{streamed_count} STREAMED, {generated_count} GENERATED"
+        )
+        logger.debug(f"Base interval: {base_interval}, Derived: {derived_intervals}")
+    
+    def _validate_and_mark_streams(self, symbols: Optional[List[str]] = None) -> bool:
+        """Validate stream requirements and mark streams/generations.
+        
+        DEPRECATED: This method combines validation + registration.
+        Use _validate_stream_requirements() + _register_symbols() instead.
+        
+        Kept for backwards compatibility during migration.
+        """
+        logger.warning("_validate_and_mark_streams() is deprecated, use split methods")
+        
+        # Call new split methods
+        if not self._streams_validated:
+            if not self._validate_stream_requirements():
+                return False
+        
+        self._register_symbols()
         return True
     
     def _mark_stream_generate(self, symbols: Optional[List[str]] = None):

@@ -738,3 +738,50 @@ class DataQualityManager(threading.Thread):
             },
             "_running": self._running
         }
+    
+    # =========================================================================
+    # Session Lifecycle (Phase 1 & 2 of Revised Flow)
+    # =========================================================================
+    
+    def teardown(self):
+        """Reset to initial state and deallocate resources (Phase 1).
+        
+        Called at START of new session (before data loaded).
+        Clears caches, resets flags, prepares for fresh session.
+        
+        Must be idempotent (safe to call multiple times).
+        """
+        logger.debug("DataQualityManager.teardown() - resetting state")
+        
+        # Clear notification queue (drain any pending)
+        while not self._notification_queue.empty():
+            try:
+                self._notification_queue.get_nowait()
+            except queue.Empty:
+                break
+        
+        # Clear any cached quality measurements
+        # (Quality is recalculated each session, no persistence needed)
+        
+        # Note: Don't stop the thread, just reset state
+        
+        logger.debug("DataQualityManager teardown complete")
+    
+    def setup(self):
+        """Initialize for new session (Phase 2).
+        
+        Called after data loaded, before session activated.
+        Can access SessionData (symbols, bars, indicators).
+        
+        Allocates resources, registers subscriptions.
+        """
+        logger.debug("DataQualityManager.setup() - initializing for new session")
+        
+        # Ensure thread is running
+        if not self.is_alive():
+            logger.warning("DataQualityManager thread not running during setup")
+        
+        # No special initialization needed currently
+        # Quality measurements happen on-demand when notified
+        
+        logger.debug("DataQualityManager setup complete")

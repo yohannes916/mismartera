@@ -102,6 +102,7 @@ class SymbolSessionData:
     - Deque for efficient append and recent-N access
     - Timestamp index for fast lookups
     - Dynamic base interval support (1s or 1m per symbol)
+    - Integrated metadata for tracking symbol origin and loading status
     """
     
     symbol: str
@@ -109,6 +110,14 @@ class SymbolSessionData:
     # Base interval for this symbol ("1s" or "1m")
     # Kept for performance - enables O(1) base interval lookup
     base_interval: str = "1m"
+    
+    # === METADATA (Integrated - tracks symbol origin and loading) ===
+    # These flags determine how the symbol was added and what data is loaded
+    meets_session_config_requirements: bool = False  # Full loading vs adhoc
+    added_by: str = "config"  # "config", "strategy", "scanner", "adhoc"
+    auto_provisioned: bool = False  # Was this auto-created for adhoc addition?
+    added_at: Optional[datetime] = None  # When was this symbol added?
+    upgraded_from_adhoc: bool = False  # Was this upgraded from adhoc to full?
     
     # === BARS (Self-Describing Structure) ===
     # Each interval contains all its metadata: derived flag, base source, data, quality, gaps
@@ -291,13 +300,72 @@ class SymbolSessionData:
         return len(interval_data.data)
     
     def reset_session_metrics(self) -> None:
-        """Reset session metrics for a new session."""
+        """Reset session metrics for a new session.
+        
+        NOTE: This does NOT clear indicators! Indicators are configuration-driven
+        and persist across sessions. Only their VALUES are reset (current_value, valid, etc.),
+        not the IndicatorData structures themselves.
+        """
         self.metrics = SessionMetrics()
-        self.indicators = {}
+        
+        # Reset indicator VALUES but keep structures
+        for ind_data in self.indicators.values():
+            ind_data.current_value = None
+            ind_data.last_updated = None
+            ind_data.valid = False
+            # Keep: config, state (for stateful indicators like EMA)
+        
         self.quotes_updated = False
         self.ticks_updated = False
         self._latest_bar = None
         # Note: bars and historical are typically cleared separately via clear_session_bars()
+    
+    def _serialize_indicator_config(self, config) -> Optional[dict]:
+        """Serialize IndicatorConfig to dict.
+        
+        Args:
+            config: IndicatorConfig object
+            
+        Returns:
+            Dict with config details or None
+        """
+        if config is None:
+            return None
+        
+        try:
+            return {
+                "name": config.name,
+                "type": config.type.value if hasattr(config.type, 'value') else str(config.type),
+                "period": config.period,
+                "interval": config.interval,
+                "params": config.params if config.params else {},
+                "warmup_bars": config.warmup_bars() if hasattr(config, 'warmup_bars') else config.period
+            }
+        except Exception as e:
+            logger.warning(f"Failed to serialize indicator config: {e}")
+            return None
+    
+    def _serialize_indicator_state(self, state) -> Optional[dict]:
+        """Serialize IndicatorResult state to dict.
+        
+        Args:
+            state: IndicatorResult object
+            
+        Returns:
+            Dict with state details or None
+        """
+        if state is None:
+            return None
+        
+        try:
+            return {
+                "timestamp": state.timestamp.isoformat() if state.timestamp else None,
+                "value": state.value,
+                "valid": state.valid
+            }
+        except Exception as e:
+            logger.warning(f"Failed to serialize indicator state: {e}")
+            return None
     
     def to_json(self, complete: bool = True) -> dict:
         """Export symbol session data to JSON format.
@@ -313,7 +381,7 @@ class SymbolSessionData:
               "quotes": {count, data},
               "ticks": {count, data},
               "metrics": {volume, high, low, last_update},
-              "indicators": {indicator_name: value},
+              "indicators": {indicator_name: {name, type, interval, value, config, state, ...}},
               "historical": {bars, indicators}
             }
         """
@@ -328,8 +396,22 @@ class SymbolSessionData:
                 "last_update": self.metrics.last_update.isoformat() if self.metrics.last_update else None
             },
             "indicators": {},  # Will populate below
-            "historical": {}
+            "historical": {},
+            "metadata": {  # NEW: Symbol metadata
+                "meets_session_config_requirements": self.meets_session_config_requirements,
+                "added_by": self.added_by,
+                "auto_provisioned": self.auto_provisioned,
+                "added_at": self.added_at.isoformat() if self.added_at else None,
+                "upgraded_from_adhoc": self.upgraded_from_adhoc
+            }
         }
+        
+        # DEBUG: Log indicator count for debugging
+        indicator_count = len(self.indicators)
+        if indicator_count > 0:
+            logger.debug(f"{self.symbol}: Serializing {indicator_count} indicators")
+        else:
+            logger.warning(f"{self.symbol}: No indicators to serialize (indicators dict is empty)")
         
         # Serialize indicators (IndicatorData objects to dict)
         for key, indicator_data in self.indicators.items():
@@ -342,7 +424,8 @@ class SymbolSessionData:
                     # Use indicator category (trend, momentum, etc.) from config
                     indicator_type = indicator_data.config.type.value
                 
-                result["indicators"][key] = {
+                # Base fields (always present)
+                indicator_export = {
                     "name": indicator_data.name,
                     "type": indicator_type,
                     "interval": indicator_data.interval,
@@ -350,6 +433,22 @@ class SymbolSessionData:
                     "last_updated": indicator_data.last_updated.isoformat() if indicator_data.last_updated else None,
                     "valid": indicator_data.valid
                 }
+                
+                # NEW: Add metadata fields (config, state, historical_values)
+                if hasattr(indicator_data, 'config') and indicator_data.config:
+                    indicator_export["config"] = self._serialize_indicator_config(indicator_data.config)
+                
+                if hasattr(indicator_data, 'state') and indicator_data.state:
+                    indicator_export["state"] = self._serialize_indicator_state(indicator_data.state)
+                
+                if hasattr(indicator_data, 'historical_values') and indicator_data.historical_values:
+                    # Only export historical values in complete mode (can be large)
+                    if complete:
+                        indicator_export["historical_values"] = indicator_data.historical_values
+                    else:
+                        indicator_export["historical_values_count"] = len(indicator_data.historical_values)
+                
+                result["indicators"][key] = indicator_export
             else:
                 # Plain value (backward compatibility)
                 result["indicators"][key] = indicator_data
@@ -459,9 +558,29 @@ class SymbolSessionData:
             result["historical"]["loaded"] = True
             result["historical"]["bars"] = {}
             
-            # Export historical indicators
+            # Export historical indicators (properly serialize IndicatorData objects)
             if self.historical.indicators:
-                result["historical"]["indicators"] = self.historical.indicators.copy()
+                result["historical"]["indicators"] = {}
+                for key, ind_data in self.historical.indicators.items():
+                    # Check if it's an IndicatorData object
+                    if hasattr(ind_data, 'current_value'):
+                        indicator_type = ind_data.type
+                        if ind_data.config and hasattr(ind_data.config, 'type'):
+                            indicator_type = ind_data.config.type.value
+                        
+                        result["historical"]["indicators"][key] = {
+                            "name": ind_data.name,
+                            "type": indicator_type,
+                            "interval": ind_data.interval,
+                            "value": ind_data.current_value,
+                            "last_updated": ind_data.last_updated.isoformat() if ind_data.last_updated else None,
+                            "valid": ind_data.valid,
+                            "config": self._serialize_indicator_config(ind_data.config) if hasattr(ind_data, 'config') else None,
+                            "state": self._serialize_indicator_state(ind_data.state) if hasattr(ind_data, 'state') else None
+                        }
+                    else:
+                        # Plain value
+                        result["historical"]["indicators"][key] = ind_data
             
             # Export historical bars per interval
             for interval, hist_interval_data in self.historical.bars.items():
@@ -2292,6 +2411,199 @@ class SessionData:
             return True
         else:
             logger.error("SessionCoordinator not set, cannot add symbol")
+            return False
+    
+    # =========================================================================
+    # Phase 5c: Unified Entry Points (Three-Phase Pattern)
+    # =========================================================================
+    
+    def add_indicator_unified(
+        self,
+        symbol: str,
+        indicator_config,
+        source: str = "scanner"
+    ) -> bool:
+        """Add indicator with unified three-phase pattern.
+        
+        Phase 5c: Unified entry point for indicator addition that uses the
+        three-phase provisioning pattern (analyze → validate → provision).
+        
+        This method replaces the old add_indicator() with a unified approach
+        that handles requirement analysis, validation, and provisioning in a
+        consistent way.
+        
+        Three-Phase Pattern:
+            1. REQUIREMENT ANALYSIS → What's needed?
+            2. VALIDATION → Can we proceed?
+            3. PROVISIONING → Execute plan
+        
+        Args:
+            symbol: Symbol to add indicator for
+            indicator_config: IndicatorConfig object with indicator details
+            source: Who is adding? ("scanner", "strategy", "adhoc")
+        
+        Returns:
+            True if indicator added successfully, False otherwise
+        
+        Code Reuse:
+            - REUSES: _analyze_requirements() from Phase 5a
+            - REUSES: _execute_provisioning() from Phase 5b
+            - REUSES: All validation and loading from Phases 1-4
+        
+        Auto-Provisioning:
+            - If symbol doesn't exist, auto-provisions minimal structure
+            - Loads only required intervals and warmup bars
+            - Sets meets_session_config_requirements = False
+        
+        Example:
+            >>> from app.indicators import IndicatorConfig, IndicatorType
+            >>> sma_config = IndicatorConfig(
+            ...     name="sma", type=IndicatorType.TREND,
+            ...     period=20, interval="5m", params={}
+            ... )
+            >>> success = session_data.add_indicator_unified(
+            ...     symbol="TSLA",
+            ...     indicator_config=sma_config,
+            ...     source="scanner"
+            ... )
+        """
+        if not self._session_coordinator:
+            logger.error("SessionCoordinator not set, cannot add indicator")
+            return False
+        
+        symbol = symbol.upper()
+        
+        logger.info(
+            f"[UNIFIED] add_indicator_unified({symbol}, "
+            f"{indicator_config.name}, source={source})"
+        )
+        
+        try:
+            # Phase 1: Analyze requirements
+            req = self._session_coordinator._analyze_requirements(
+                operation_type="indicator",
+                symbol=symbol,
+                source=source,
+                indicator_config=indicator_config
+            )
+            
+            # Phase 2: Validate (done in analyze_requirements)
+            if not req.can_proceed:
+                logger.error(
+                    f"[UNIFIED] {symbol}: Cannot add indicator - {req.validation_errors}"
+                )
+                return False
+            
+            # Phase 3: Provision
+            success = self._session_coordinator._execute_provisioning(req)
+            
+            if success:
+                logger.success(
+                    f"[UNIFIED] {symbol}: Indicator {indicator_config.name} "
+                    f"added successfully (source={source})"
+                )
+            else:
+                logger.error(f"[UNIFIED] {symbol}: Provisioning failed")
+            
+            return success
+            
+        except Exception as e:
+            logger.error(f"[UNIFIED] {symbol}: Exception adding indicator: {e}")
+            logger.exception(e)
+            return False
+    
+    def add_bar_unified(
+        self,
+        symbol: str,
+        interval: str,
+        days: int = 0,
+        historical_only: bool = False,
+        source: str = "scanner"
+    ) -> bool:
+        """Add bar with unified three-phase pattern.
+        
+        Phase 5c: Unified entry point for bar addition that uses the
+        three-phase provisioning pattern (analyze → validate → provision).
+        
+        Three-Phase Pattern:
+            1. REQUIREMENT ANALYSIS → What's needed?
+            2. VALIDATION → Can we proceed?
+            3. PROVISIONING → Execute plan
+        
+        Args:
+            symbol: Symbol to add bar for
+            interval: Bar interval (e.g., "1m", "5m", "1d")
+            days: Historical days to load (0 for session only)
+            historical_only: If True, no session streaming
+            source: Who is adding? ("scanner", "strategy", "adhoc")
+        
+        Returns:
+            True if bar added successfully, False otherwise
+        
+        Code Reuse:
+            - REUSES: _analyze_requirements() from Phase 5a
+            - REUSES: _execute_provisioning() from Phase 5b
+            - REUSES: All validation and loading from Phases 1-4
+        
+        Auto-Provisioning:
+            - If symbol doesn't exist, auto-provisions minimal structure
+            - Adds base interval if needed (e.g., 1m for 5m)
+            - Sets meets_session_config_requirements = False
+        
+        Example:
+            >>> # Add 15m bars with 5 days historical
+            >>> success = session_data.add_bar_unified(
+            ...     symbol="RIVN",
+            ...     interval="15m",
+            ...     days=5,
+            ...     source="scanner"
+            ... )
+        """
+        if not self._session_coordinator:
+            logger.error("SessionCoordinator not set, cannot add bar")
+            return False
+        
+        symbol = symbol.upper()
+        
+        logger.info(
+            f"[UNIFIED] add_bar_unified({symbol}, {interval}, "
+            f"days={days}, source={source})"
+        )
+        
+        try:
+            # Phase 1: Analyze requirements
+            req = self._session_coordinator._analyze_requirements(
+                operation_type="bar",
+                symbol=symbol,
+                source=source,
+                interval=interval,
+                days=days,
+                historical_only=historical_only
+            )
+            
+            # Phase 2: Validate (done in analyze_requirements)
+            if not req.can_proceed:
+                logger.error(
+                    f"[UNIFIED] {symbol}: Cannot add bar - {req.validation_errors}"
+                )
+                return False
+            
+            # Phase 3: Provision
+            success = self._session_coordinator._execute_provisioning(req)
+            
+            if success:
+                logger.success(
+                    f"[UNIFIED] {symbol}: Bar {interval} added successfully "
+                    f"({days} days historical, source={source})"
+                )
+            else:
+                logger.error(f"[UNIFIED] {symbol}: Provisioning failed")
+            
+            return success
+            
+        except Exception as e:
+            logger.error(f"[UNIFIED] {symbol}: Exception adding bar: {e}")
+            logger.exception(e)
             return False
     
     def lock_symbol(self, symbol: str, reason: str) -> bool:
