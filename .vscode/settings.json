@@ -31,11 +31,10 @@
     "python.testing.pytestEnabled": true,
     "python.testing.unittestEnabled": false,
     "python.testing.pytestArgs": [
-        "backend/app/managers/data_manager/tests",
-        "-v",
-        "-s"
+        "backend/tests",
+        "-v"
     ],
-    "python.testing.cwd": "${workspaceFolder}/backend",
+    "python.testing.cwd": "${workspaceFolder}",
     "python.testing.autoTestDiscoverOnSaveEnabled": true,
     
     // Editor

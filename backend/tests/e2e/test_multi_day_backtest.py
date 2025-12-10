@@ -15,11 +15,9 @@ from app.models.session_config import SessionConfig, SessionDataConfig
 @pytest.fixture
 def multi_day_setup():
     """Setup for multi-day backtest."""
-    config = SessionConfig()
+    # Use Mock to avoid complex SessionConfig initialization
+    config = Mock()
     config.session_data_config = SessionDataConfig(
-        base_interval="1m",
-        derived_intervals=[5, 15],
-        trailing_days=30,
         symbols=["AAPL", "MSFT"],
         streams=["1m"]
     )

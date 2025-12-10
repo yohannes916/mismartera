@@ -78,14 +78,31 @@
             "python": "${workspaceFolder}/backend/.venv/bin/python"
         },
         {
-            "name": "Tests: Run All DataManager Tests",
+            "name": "Pytest: All Unit Tests",
             "type": "debugpy",
             "request": "launch",
             "module": "pytest",
             "args": [
-                "app/managers/data_manager/tests/",
+                "tests/unit/",
                 "-v",
-                "-s",
+                "--tb=short"
+            ],
+            "cwd": "${workspaceFolder}/backend",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/backend"
+            },
+            "python": "${workspaceFolder}/backend/.venv/bin/python"
+        },
+        {
+            "name": "Pytest: All Integration Tests",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "pytest",
+            "args": [
+                "tests/integration/",
+                "-v",
                 "--tb=short"
             ],
             "cwd": "${workspaceFolder}/backend",
@@ -116,32 +133,12 @@
             "python": "${workspaceFolder}/backend/.venv/bin/python"
         },
         {
-            "name": "Tests: Debug get_current_time Tests",
+            "name": "Pytest: DataManager Coverage",
             "type": "debugpy",
             "request": "launch",
             "module": "pytest",
             "args": [
-                "app/managers/data_manager/tests/test_get_current_time.py",
-                "-v",
-                "-s",
-                "--tb=short",
-                "--log-cli-level=DEBUG"
-            ],
-            "cwd": "${workspaceFolder}/backend",
-            "console": "integratedTerminal",
-            "justMyCode": false,
-            "env": {
-                "PYTHONPATH": "${workspaceFolder}/backend"
-            },
-            "python": "${workspaceFolder}/backend/.venv/bin/python"
-        },
-        {
-            "name": "Tests: Run with Coverage",
-            "type": "debugpy",
-            "request": "launch",
-            "module": "pytest",
-            "args": [
-                "app/managers/data_manager/tests/",
+                "tests/unit/",
                 "-v",
                 "--cov=app/managers/data_manager",
                 "--cov-report=html",
@@ -162,63 +159,6 @@
             "module": "pytest",
             "args": [
                 "--lf",
-                "-v",
-                "-s",
-                "--tb=short"
-            ],
-            "cwd": "${workspaceFolder}/backend",
-            "console": "integratedTerminal",
-            "justMyCode": false,
-            "env": {
-                "PYTHONPATH": "${workspaceFolder}/backend"
-            },
-            "python": "${workspaceFolder}/backend/.venv/bin/python"
-        },
-        {
-            "name": "Tests: Volume Analytics",
-            "type": "debugpy",
-            "request": "launch",
-            "module": "pytest",
-            "args": [
-                "app/managers/data_manager/tests/test_volume_analytics.py",
-                "-v",
-                "-s",
-                "--tb=short"
-            ],
-            "cwd": "${workspaceFolder}/backend",
-            "console": "integratedTerminal",
-            "justMyCode": false,
-            "env": {
-                "PYTHONPATH": "${workspaceFolder}/backend"
-            },
-            "python": "${workspaceFolder}/backend/.venv/bin/python"
-        },
-        {
-            "name": "Tests: Price Analytics",
-            "type": "debugpy",
-            "request": "launch",
-            "module": "pytest",
-            "args": [
-                "app/managers/data_manager/tests/test_price_analytics.py",
-                "-v",
-                "-s",
-                "--tb=short"
-            ],
-            "cwd": "${workspaceFolder}/backend",
-            "console": "integratedTerminal",
-            "justMyCode": false,
-            "env": {
-                "PYTHONPATH": "${workspaceFolder}/backend"
-            },
-            "python": "${workspaceFolder}/backend/.venv/bin/python"
-        },
-        {
-            "name": "Tests: Snapshot API",
-            "type": "debugpy",
-            "request": "launch",
-            "module": "pytest",
-            "args": [
-                "app/managers/data_manager/tests/test_snapshot_api.py",
                 "-v",
                 "-s",
                 "--tb=short"
@@ -309,16 +249,34 @@
             "python": "${workspaceFolder}/backend/.venv/bin/python"
         },
         {
-            "name": "Tests: All Backend Tests with Coverage",
+            "name": "Pytest: All Tests with Full Coverage",
             "type": "debugpy",
             "request": "launch",
             "module": "pytest",
             "args": [
                 "tests/",
                 "-v",
-                "--cov=app/threads/quality",
+                "--cov=app",
                 "--cov-report=html",
                 "--cov-report=term"
+            ],
+            "cwd": "${workspaceFolder}/backend",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/backend"
+            },
+            "python": "${workspaceFolder}/backend/.venv/bin/python"
+        },
+        {
+            "name": "Pytest: Current Test Function",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "pytest",
+            "args": [
+                "${file}::${selectedText}",
+                "-v",
+                "--tb=short"
             ],
             "cwd": "${workspaceFolder}/backend",
             "console": "integratedTerminal",

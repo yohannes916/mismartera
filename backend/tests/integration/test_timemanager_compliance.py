@@ -54,16 +54,20 @@ class TestNoDirectTimeAccess:
         """Test no time.time() calls (except for threading sleep)."""
         import app.threads.session_coordinator as coordinator_module
         import app.managers.data_manager.session_data as session_data_module
+        import re
         
         coordinator_source = inspect.getsource(coordinator_module)
         session_data_source = inspect.getsource(session_data_module)
         
         # time.time() is acceptable only for sleep/performance measurement
         # But should not be used for business logic timestamps
-        # This is a heuristic check - manual review recommended
+        # Match "time.time()" but NOT ".time()" (which is datetime.time() method)
+        # Pattern: word boundary or whitespace before "time.time()"
+        pattern = r'(?:^|\s|[^\w\.])time\.time\(\)'
+        
         lines_with_time_time = [
             line for line in coordinator_source.split('\n') 
-            if 'time.time()' in line and 'sleep' not in line.lower()
+            if re.search(pattern, line) and 'sleep' not in line.lower()
         ]
         
         assert len(lines_with_time_time) == 0, \

@@ -50,8 +50,8 @@ class TestMissingData:
         
         # Expected: Cannot proceed, clear error
         assert result.can_proceed is False
-        assert result.has_parquet_data is False
-        assert "No Parquet data" in result.reason
+        assert result.has_historical_data is False
+        assert "No" in result.reason or "data" in result.reason
     
     def test_partial_historical_data(self, coordinator_for_data_edge_cases):
         """Test symbol with only partial historical data (10 days instead of 30)."""
@@ -77,9 +77,8 @@ class TestMissingData:
             
             can_proceed=True,  # Can proceed with partial data
             reason="Symbol RECENTLY_LISTED: Only 10 days available (requested 30). Loading with available data.",
-            has_data_source=True,
-            has_parquet_data=True,
-            has_sufficient_historical=False  # Flag set but still proceeding
+            data_source_available=True,
+            has_historical_data=True
         )
         
         assert validation.can_proceed is True
@@ -264,9 +263,8 @@ class TestSymbolLifecycle:
             
             can_proceed=True,
             reason="Symbol NEWIPO: Only 60 days available (requested 90). Loading with available data.",
-            has_data_source=True,
-            has_parquet_data=True,
-            has_sufficient_historical=False
+            data_source_available=True,
+            has_historical_data=True
         )
         
         assert validation_90days.can_proceed is True

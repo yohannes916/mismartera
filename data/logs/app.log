@@ -4,3 +4,66 @@
 2025-11-20 15:24:52.922 | INFO     | app.logger:setup_logger:60 - Logger initialized with level: INFO
 2025-11-20 15:32:52.375 | INFO     | app.logger:setup_logger:60 - Logger initialized with level: INFO
 2025-11-20 15:33:18.199 | INFO     | app.logger:setup_logger:60 - Logger initialized with level: INFO
+2025-12-10 14:27:52.119 | INFO     | app.logger:setup_logger:145 - Logger initialized with level: INFO
+2025-12-10 14:27:52.120 | INFO     | app.logger:setup_logger:147 - Log deduplication enabled: tracking last 5 logs, threshold 1.0s
+2025-12-10 14:27:53.802 | DEBUG    | app.managers.data_manager.symbol_exchange_mapping:register_symbol:24 - Registered AAPL -> NASDAQ
+2025-12-10 14:27:53.805 | INFO     | app.managers.data_manager.symbol_exchange_mapping:initialize_default_mappings:209 - Initialized with 105 default US equity symbols
+2025-12-10 14:27:53.820 | INFO     | app.managers.data_manager.parquet_storage:__init__:73 - Parquet storage initialized: base=data/parquet, group=US_EQUITY
+2025-12-10 14:27:54.046 | WARNING  | app.integrations.schwab_client:__init__:42 - Schwab API credentials not configured
+2025-12-10 14:27:54.241 | WARNING  | app.integrations.claude_client:__init__:22 - Anthropic API key not configured
+2025-12-10 14:32:01.406 | INFO     | app.logger:setup_logger:145 - Logger initialized with level: INFO
+2025-12-10 14:32:01.407 | INFO     | app.logger:setup_logger:147 - Log deduplication enabled: tracking last 5 logs, threshold 1.0s
+2025-12-10 14:32:02.870 | DEBUG    | app.managers.data_manager.symbol_exchange_mapping:register_symbol:24 - Registered AAPL -> NASDAQ
+2025-12-10 14:32:02.874 | INFO     | app.managers.data_manager.symbol_exchange_mapping:initialize_default_mappings:209 - Initialized with 105 default US equity symbols
+2025-12-10 14:32:02.894 | INFO     | app.managers.data_manager.parquet_storage:__init__:73 - Parquet storage initialized: base=data/parquet, group=US_EQUITY
+2025-12-10 14:32:03.142 | WARNING  | app.integrations.schwab_client:__init__:42 - Schwab API credentials not configured
+2025-12-10 14:32:03.407 | WARNING  | app.integrations.claude_client:__init__:22 - Anthropic API key not configured
+2025-12-10 14:32:37.771 | INFO     | app.logger:setup_logger:145 - Logger initialized with level: INFO
+2025-12-10 14:32:37.772 | INFO     | app.logger:setup_logger:147 - Log deduplication enabled: tracking last 5 logs, threshold 1.0s
+2025-12-10 14:32:39.323 | DEBUG    | app.managers.data_manager.symbol_exchange_mapping:register_symbol:24 - Registered AAPL -> NASDAQ
+2025-12-10 14:32:39.327 | INFO     | app.managers.data_manager.symbol_exchange_mapping:initialize_default_mappings:209 - Initialized with 105 default US equity symbols
+2025-12-10 14:32:39.342 | INFO     | app.managers.data_manager.parquet_storage:__init__:73 - Parquet storage initialized: base=data/parquet, group=US_EQUITY
+2025-12-10 14:32:39.559 | WARNING  | app.integrations.schwab_client:__init__:42 - Schwab API credentials not configured
+2025-12-10 14:32:39.766 | WARNING  | app.integrations.claude_client:__init__:22 - Anthropic API key not configured
+2025-12-10 14:32:58.927 | INFO     | app.logger:setup_logger:145 - Logger initialized with level: INFO
+2025-12-10 14:32:58.928 | INFO     | app.logger:setup_logger:147 - Log deduplication enabled: tracking last 5 logs, threshold 1.0s
+2025-12-10 14:33:00.081 | DEBUG    | app.managers.data_manager.symbol_exchange_mapping:register_symbol:24 - Registered AAPL -> NASDAQ
+2025-12-10 14:33:00.084 | INFO     | app.managers.data_manager.symbol_exchange_mapping:initialize_default_mappings:209 - Initialized with 105 default US equity symbols
+2025-12-10 14:33:00.100 | INFO     | app.managers.data_manager.parquet_storage:__init__:73 - Parquet storage initialized: base=data/parquet, group=US_EQUITY
+2025-12-10 14:33:00.312 | WARNING  | app.integrations.schwab_client:__init__:42 - Schwab API credentials not configured
+2025-12-10 14:33:00.503 | WARNING  | app.integrations.claude_client:__init__:22 - Anthropic API key not configured
+2025-12-10 14:34:51.081 | INFO     | app.logger:setup_logger:145 - Logger initialized with level: INFO
+2025-12-10 14:34:51.082 | INFO     | app.logger:setup_logger:147 - Log deduplication enabled: tracking last 5 logs, threshold 1.0s
+2025-12-10 14:34:52.381 | DEBUG    | app.managers.data_manager.symbol_exchange_mapping:register_symbol:24 - Registered AAPL -> NASDAQ
+2025-12-10 14:34:52.384 | INFO     | app.managers.data_manager.symbol_exchange_mapping:initialize_default_mappings:209 - Initialized with 105 default US equity symbols
+2025-12-10 14:34:52.397 | INFO     | app.managers.data_manager.parquet_storage:__init__:73 - Parquet storage initialized: base=data/parquet, group=US_EQUITY
+2025-12-10 14:34:52.607 | WARNING  | app.integrations.schwab_client:__init__:42 - Schwab API credentials not configured
+2025-12-10 14:34:52.812 | WARNING  | app.integrations.claude_client:__init__:22 - Anthropic API key not configured
+2025-12-10 14:41:51.833 | INFO     | app.logger:setup_logger:145 - Logger initialized with level: INFO
+2025-12-10 14:41:51.833 | INFO     | app.logger:setup_logger:147 - Log deduplication enabled: tracking last 5 logs, threshold 1.0s
+2025-12-10 14:41:53.211 | DEBUG    | app.managers.data_manager.symbol_exchange_mapping:register_symbol:24 - Registered AAPL -> NASDAQ
+2025-12-10 14:41:53.215 | INFO     | app.managers.data_manager.symbol_exchange_mapping:initialize_default_mappings:209 - Initialized with 105 default US equity symbols
+2025-12-10 14:41:53.232 | INFO     | app.managers.data_manager.parquet_storage:__init__:73 - Parquet storage initialized: base=data/parquet, group=US_EQUITY
+2025-12-10 14:41:53.498 | WARNING  | app.integrations.schwab_client:__init__:42 - Schwab API credentials not configured
+2025-12-10 14:41:53.734 | WARNING  | app.integrations.claude_client:__init__:22 - Anthropic API key not configured
+2025-12-10 14:53:51.752 | INFO     | app.logger:setup_logger:145 - Logger initialized with level: INFO
+2025-12-10 14:53:51.753 | INFO     | app.logger:setup_logger:147 - Log deduplication enabled: tracking last 5 logs, threshold 1.0s
+2025-12-10 14:53:53.020 | DEBUG    | app.managers.data_manager.symbol_exchange_mapping:register_symbol:24 - Registered AAPL -> NASDAQ
+2025-12-10 14:53:53.022 | INFO     | app.managers.data_manager.symbol_exchange_mapping:initialize_default_mappings:209 - Initialized with 105 default US equity symbols
+2025-12-10 14:53:53.034 | INFO     | app.managers.data_manager.parquet_storage:__init__:73 - Parquet storage initialized: base=data/parquet, group=US_EQUITY
+2025-12-10 14:53:53.213 | WARNING  | app.integrations.schwab_client:__init__:42 - Schwab API credentials not configured
+2025-12-10 14:53:53.369 | WARNING  | app.integrations.claude_client:__init__:22 - Anthropic API key not configured
+2025-12-10 14:54:36.835 | INFO     | app.logger:setup_logger:145 - Logger initialized with level: INFO
+2025-12-10 14:54:36.836 | INFO     | app.logger:setup_logger:147 - Log deduplication enabled: tracking last 5 logs, threshold 1.0s
+2025-12-10 14:54:37.788 | DEBUG    | app.managers.data_manager.symbol_exchange_mapping:register_symbol:24 - Registered AAPL -> NASDAQ
+2025-12-10 14:54:37.790 | INFO     | app.managers.data_manager.symbol_exchange_mapping:initialize_default_mappings:209 - Initialized with 105 default US equity symbols
+2025-12-10 14:54:37.808 | INFO     | app.managers.data_manager.parquet_storage:__init__:73 - Parquet storage initialized: base=data/parquet, group=US_EQUITY
+2025-12-10 14:54:38.033 | WARNING  | app.integrations.schwab_client:__init__:42 - Schwab API credentials not configured
+2025-12-10 14:54:38.221 | WARNING  | app.integrations.claude_client:__init__:22 - Anthropic API key not configured
+2025-12-10 14:55:23.228 | INFO     | app.logger:setup_logger:145 - Logger initialized with level: INFO
+2025-12-10 14:55:23.228 | INFO     | app.logger:setup_logger:147 - Log deduplication enabled: tracking last 5 logs, threshold 1.0s
+2025-12-10 14:55:24.044 | DEBUG    | app.managers.data_manager.symbol_exchange_mapping:register_symbol:24 - Registered AAPL -> NASDAQ
+2025-12-10 14:55:24.046 | INFO     | app.managers.data_manager.symbol_exchange_mapping:initialize_default_mappings:209 - Initialized with 105 default US equity symbols
+2025-12-10 14:55:24.057 | INFO     | app.managers.data_manager.parquet_storage:__init__:73 - Parquet storage initialized: base=data/parquet, group=US_EQUITY
+2025-12-10 14:55:24.252 | WARNING  | app.integrations.schwab_client:__init__:42 - Schwab API credentials not configured
+2025-12-10 14:55:24.441 | WARNING  | app.integrations.claude_client:__init__:22 - Anthropic API key not configured

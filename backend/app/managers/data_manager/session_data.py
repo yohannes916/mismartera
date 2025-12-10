@@ -2717,7 +2717,17 @@ class SessionData:
                 result["symbols"][symbol] = symbol_data.to_json(complete=complete)
             
             # Update last export time for next delta
-            self._last_export_time = datetime.now()
+            # Always use TimeManager through session coordinator
+            if self._session_coordinator:
+                self._last_export_time = self._session_coordinator._time_manager.get_current_time()
+            else:
+                # If no coordinator set, SessionData is being used incorrectly
+                # This should only happen in isolated unit tests
+                logger.warning("SessionData.to_json() called without session_coordinator - export timestamp unavailable")
+                # Keep previous timestamp or None
+                if self._last_export_time is None:
+                    # Use a sentinel value for tests - they should mock this
+                    self._last_export_time = None
         
         return result, last_export_time
 

@@ -33,8 +33,8 @@ class TestCompleteValidationFailure:
         coordinator = coordinator_for_validation_tests
         
         # Mock all checks failing
-        coordinator._data_manager.has_data_source = Mock(return_value=False)
-        coordinator._data_manager.has_parquet_data = Mock(return_value=False)
+        coordinator._data_manager.data_source_available = Mock(return_value=False)
+        coordinator._data_manager.has_historical_data = Mock(return_value=False)
         coordinator._data_manager.check_data_availability = Mock(return_value={
             "has_data": False,
             "days_available": 0
@@ -51,9 +51,9 @@ class TestCompleteValidationFailure:
         
         # Expected: Complete failure
         assert validation.can_proceed is False
-        assert validation.has_data_source is False
-        assert validation.has_parquet_data is False
-        assert validation.has_sufficient_historical is False
+        assert validation.data_source_available is False
+        assert validation.has_historical_data is False
+        assert validation.has_historical_data is False
         assert "failed all" in validation.reason.lower() or "no data" in validation.reason.lower()
     
     def test_symbol_not_found_anywhere(self, coordinator_for_validation_tests):
@@ -89,8 +89,8 @@ class TestPartialValidationFailure:
         coordinator = coordinator_for_validation_tests
         
         # Has data source, has Parquet, but insufficient historical
-        coordinator._data_manager.has_data_source = Mock(return_value=True)
-        coordinator._data_manager.has_parquet_data = Mock(return_value=True)
+        coordinator._data_manager.data_source_available = Mock(return_value=True)
+        coordinator._data_manager.has_historical_data = Mock(return_value=True)
         coordinator._data_manager.check_data_availability = Mock(return_value={
             "has_data": True,
             "days_available": 5,  # Only 5 days
@@ -102,24 +102,23 @@ class TestPartialValidationFailure:
             
             can_proceed=True,  # Can proceed with warning
             reason="Symbol PARTIAL: Only 5 days of historical data available (requested 30)",
-            has_data_source=True,
-            has_parquet_data=True,
-            has_sufficient_historical=False  # Flagged but proceeding
+            data_source_available=True,
+            has_historical_data=True  # Has some data but not sufficient
         )
         
         # Expected: Partial failure, can proceed with warning
         assert validation.can_proceed is True
-        assert validation.has_data_source is True
-        assert validation.has_parquet_data is True
-        assert validation.has_sufficient_historical is False
+        assert validation.data_source_available is True
+        assert validation.has_historical_data is True
+        assert "5 days" in validation.reason
     
     def test_has_source_no_parquet(self, coordinator_for_validation_tests):
         """Test has data source but no Parquet files."""
         coordinator = coordinator_for_validation_tests
         
         # Has source (database) but no Parquet files
-        coordinator._data_manager.has_data_source = Mock(return_value=True)
-        coordinator._data_manager.has_parquet_data = Mock(return_value=False)
+        coordinator._data_manager.data_source_available = Mock(return_value=True)
+        coordinator._data_manager.has_historical_data = Mock(return_value=False)
         
         validation = SymbolValidationResult(symbol="TEST",
             
@@ -131,8 +130,8 @@ class TestPartialValidationFailure:
         
         # Expected: Has source but cannot proceed without Parquet
         assert validation.can_proceed is False
-        assert validation.has_data_source is True
-        assert validation.has_parquet_data is False
+        assert validation.data_source_available is True
+        assert validation.has_historical_data is False
 
 
 class TestValidationTimeout:

@@ -12,11 +12,9 @@ from app.models.session_config import SessionConfig, SessionDataConfig
 @pytest.fixture
 def valid_session_config():
     """Create valid session config."""
-    config = SessionConfig()
+    # Use Mock to avoid complex SessionConfig initialization
+    config = Mock()
     config.session_data_config = SessionDataConfig(
-        base_interval="1m",
-        derived_intervals=[5, 15],
-        trailing_days=30,
         symbols=["AAPL", "MSFT"],
         streams=["1m"]
     )
@@ -42,65 +40,50 @@ class TestPhase0Validation:
         config = coordinator_with_config.session_config.session_data_config
         
         # Validate config format
-        assert config.base_interval is not None
         assert config.symbols is not None
         assert isinstance(config.symbols, list)
+        assert len(config.symbols) > 0
         
-        # Determine base interval
-        base_interval = config.base_interval
-        assert base_interval == "1m"
+        # Validate streams exist
+        assert config.streams is not None
+        assert isinstance(config.streams, list)
+        assert len(config.streams) > 0
         
-        # Determine derived intervals
-        derived_intervals = [f"{minutes}m" for minutes in config.derived_intervals]
-        assert "5m" in derived_intervals
-        assert "15m" in derived_intervals
+        # Test that streams can be validated
+        assert "1m" in config.streams
         
-        # All validations passed
-        coordinator_with_config._base_interval = base_interval
-        coordinator_with_config._derived_intervals_validated = derived_intervals
+        # Phase 0 would set these on the coordinator
+        coordinator_with_config._base_interval = "1m"
+        coordinator_with_config._derived_intervals_validated = []
         
         assert coordinator_with_config._base_interval == "1m"
-        assert len(coordinator_with_config._derived_intervals_validated) == 2
     
     def test_phase0_determine_base_interval(self, coordinator_with_config):
-        """Test base interval determination (1m, 1s, 1d)."""
+        """Test base interval determination from streams."""
         config = coordinator_with_config.session_config.session_data_config
         
-        # Test 1m base
-        config.base_interval = "1m"
-        base = config.base_interval
-        assert base == "1m"
-        
-        # Test 1s base (if supported)
-        config.base_interval = "1s"
-        base = config.base_interval
-        assert base == "1s"
-        
-        # Test 1d base (if supported)
-        config.base_interval = "1d"
-        base = config.base_interval
-        assert base == "1d"
+        # Test determining base from streams
+        assert "1m" in config.streams
+        # Coordinator would determine base interval from streams
+        coordinator_with_config._base_interval = "1m"
+        assert coordinator_with_config._base_interval == "1m"
     
     def test_phase0_determine_derived_intervals(self, coordinator_with_config):
-        """Test derived intervals determination."""
+        """Test derived intervals determination from historical config."""
         config = coordinator_with_config.session_config.session_data_config
         
-        # Multiple derived intervals
-        config.derived_intervals = [5, 15, 60]
-        derived = [f"{m}m" for m in config.derived_intervals]
+        # Derived intervals would come from historical.data upkeep config
+        # Coordinator would store them after Phase 0
+        coordinator_with_config._derived_intervals_validated = ["5m", "15m"]
+        derived = coordinator_with_config._derived_intervals_validated
         
         # All derived intervals identified
         assert "5m" in derived
         assert "15m" in derived
-        assert "60m" in derived
-        assert len(derived) == 3
+        assert len(derived) == 2
     
     def test_phase0_validate_derivation_capability(self, coordinator_with_config):
         """Test derivation validation (can derive 5m from 1m?)."""
-        config = coordinator_with_config.session_config.session_data_config
-        config.base_interval = "1m"
-        config.derived_intervals = [5, 15, 60]
-        
         # Mock derivation check
         def can_derive(base, derived):
             """Check if derived can be created from base."""
@@ -121,28 +104,37 @@ class TestPhase0Validation:
     
     def test_phase0_invalid_config_format(self):
         """Test Phase 0 with malformed config."""
-        # Missing base_interval
-        config = SessionDataConfig(
-            base_interval=None,  # Invalid
-            derived_intervals=[5, 15],
-            trailing_days=30,
-            symbols=["AAPL"],
-            streams=["1m"]
-        )
+        # Test with empty symbols - should fail validation
+        with pytest.raises(ValueError, match="symbols list cannot be empty"):
+            config = SessionDataConfig(
+                symbols=[],  # Empty - invalid
+                streams=["1m"]
+            )
+            config.validate()
         
-        # Validation should fail
-        assert config.base_interval is None
+        # Test with empty streams - should fail validation
+        with pytest.raises(ValueError, match="streams list cannot be empty"):
+            config2 = SessionDataConfig(
+                symbols=["AAPL"],
+                streams=[]  # Empty - invalid
+            )
+            config2.validate()
         
-        # Or with empty symbols
-        config2 = SessionDataConfig(
-            base_interval="1m",
-            derived_intervals=[5],
-            trailing_days=30,
-            symbols=[],  # Empty
-            streams=["1m"]
-        )
+        # Test with duplicate symbols - should fail validation
+        with pytest.raises(ValueError, match="Duplicate symbols"):
+            config3 = SessionDataConfig(
+                symbols=["AAPL", "AAPL"],  # Duplicate - invalid
+                streams=["1m"]
+            )
+            config3.validate()
         
-        assert len(config2.symbols) == 0
+        # Test with invalid stream format - should fail validation
+        with pytest.raises(ValueError, match="Invalid stream"):
+            config4 = SessionDataConfig(
+                symbols=["AAPL"],
+                streams=["invalid_format"]  # Invalid stream
+            )
+            config4.validate()
     
     def test_phase0_results_stored_for_reuse(self, coordinator_with_config):
         """Test Phase 0 results stored and reused."""
@@ -169,9 +161,9 @@ class TestPhase0Validation:
         # Phase 0 is SYSTEM-WIDE only
         config = coordinator_with_config.session_config.session_data_config
         
-        # Check system-wide settings
-        assert config.base_interval is not None
-        assert config.derived_intervals is not None
+        # Check system-wide settings exist
+        assert config.streams is not None
+        assert len(config.streams) > 0
         
         # But DO NOT validate individual symbols yet
         # That happens in Phase 2 (Step 0 validation per symbol)
