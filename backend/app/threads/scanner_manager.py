@@ -96,7 +96,6 @@ class ScannerManager:
         self._system_manager = system_manager
         self._session_data = None
         self._time_manager = None
-        self._mode = None  # "backtest" or "live"
         
         # Scanner tracking
         self._scanners: Dict[str, ScannerInstance] = {}
@@ -120,11 +119,8 @@ class ScannerManager:
             self._session_data = get_session_data()  # SessionData is a singleton
             self._time_manager = self._system_manager.get_time_manager()
             
-            # Get mode from session config
-            session_config = self._system_manager.session_config
-            self._mode = session_config.mode
-            
             # Load scanners from config
+            session_config = self._system_manager.session_config
             scanner_configs = session_config.session_data_config.scanners
             
             if not scanner_configs:
@@ -407,7 +403,7 @@ class ScannerManager:
         return ScanContext(
             session_data=self._session_data,
             time_manager=self._time_manager,
-            mode=self._mode,
+            mode=self.mode,
             current_time=current_time,
             config=instance.config
         )
@@ -541,6 +537,23 @@ class ScannerManager:
         minute = int(parts[1])
         return dt_time(hour, minute)
     
+    @property
+    def mode(self) -> str:
+        """Get operation mode from SystemManager (single source of truth).
+        
+        Returns:
+            'live' or 'backtest'
+        """
+        return self._system_manager.mode.value
+    
+    def has_pre_session_scanners(self) -> bool:
+        """Check if any scanners are configured for pre-session.
+        
+        Returns:
+            True if any scanner has pre_session=True
+        """
+        return any(instance.pre_session for instance in self._scanners.values())
+    
     def get_scanner_states(self) -> Dict[str, Dict[str, Any]]:
         """Get current state of all scanners.
         
@@ -604,8 +617,11 @@ class ScannerManager:
         
         # Clear all scanners (will be reloaded in setup)
         self._scanners.clear()
-        self._pre_session_scanners.clear()
-        self._regular_scanners.clear()
+        
+        # Reset state flags
+        self._initialized = False
+        self._session_started = False
+        self._session_ended = False
         
         logger.debug("ScannerManager teardown complete")
     

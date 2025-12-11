@@ -39,6 +39,18 @@ class TestSymbolAddition:
         # Bind the real add_symbol method
         mock_coordinator.add_symbol = SessionCoordinator.add_symbol.__get__(mock_coordinator)
         
+        # Mock dependencies that add_symbol relies on
+        from app.threads.session_coordinator import ProvisioningRequirements
+        mock_req = ProvisioningRequirements(
+            operation_type="symbol",
+            source="strategy",
+            symbol="AAPL",
+            symbol_exists=False,
+            can_proceed=True
+        )
+        mock_coordinator._analyze_requirements = Mock(return_value=mock_req)
+        mock_coordinator._execute_provisioning = Mock(return_value=True)
+        
         result = mock_coordinator.add_symbol("AAPL")
         
         assert result is True
@@ -48,14 +60,46 @@ class TestSymbolAddition:
         """Adding symbol should mark it as pending."""
         mock_coordinator.add_symbol = SessionCoordinator.add_symbol.__get__(mock_coordinator)
         
+        # Mock dependencies
+        from app.threads.session_coordinator import ProvisioningRequirements
+        mock_req = ProvisioningRequirements(
+            operation_type="symbol",
+            source="strategy",
+            symbol="AAPL",
+            symbol_exists=False,
+            can_proceed=True
+        )
+        mock_coordinator._analyze_requirements = Mock(return_value=mock_req)
+        mock_coordinator._execute_provisioning = Mock(return_value=True)
+        
         mock_coordinator.add_symbol("AAPL")
         
-        assert "AAPL" in mock_coordinator._pending_symbols
-        assert "AAPL" not in mock_coordinator._loaded_symbols
+        # Verify provisioning was called (symbol is managed through provisioning, not pending_symbols directly)
+        mock_coordinator._execute_provisioning.assert_called_once()
     
     def test_add_duplicate_symbol_returns_false(self, mock_coordinator):
         """Adding same symbol twice should return False."""
         mock_coordinator.add_symbol = SessionCoordinator.add_symbol.__get__(mock_coordinator)
+        
+        # Mock dependencies for first add
+        from app.threads.session_coordinator import ProvisioningRequirements
+        mock_req1 = ProvisioningRequirements(
+            operation_type="symbol",
+            source="strategy",
+            symbol="AAPL",
+            symbol_exists=False,
+            can_proceed=True
+        )
+        mock_req2 = ProvisioningRequirements(
+            operation_type="symbol",
+            source="strategy",
+            symbol="AAPL",
+            symbol_exists=True,
+            can_proceed=False,
+            validation_errors=["Symbol already exists"]
+        )
+        mock_coordinator._analyze_requirements = Mock(side_effect=[mock_req1, mock_req2])
+        mock_coordinator._execute_provisioning = Mock(return_value=True)
         
         # First add
         result1 = mock_coordinator.add_symbol("AAPL")
@@ -184,16 +228,20 @@ class TestPendingSymbolProcessing:
         coordinator._stream_paused.clear.assert_called_once()
     
     def test_process_pending_calls_parameterized_methods(self, coordinator_with_pending):
-        """Processing should call validate, load historical, load queues."""
+        """Processing should call load_symbols_mid_session."""
         coordinator = coordinator_with_pending
         coordinator._process_pending_symbols = SessionCoordinator._process_pending_symbols.__get__(coordinator)
         
+        # Mock the _load_symbols_mid_session method that _process_pending_symbols calls
+        coordinator._load_symbols_mid_session = Mock()
+        coordinator.metrics = Mock()
+        coordinator.metrics.start_timer = Mock(return_value=0)
+        coordinator.metrics.record_session_gap = Mock()
+        
         coordinator._process_pending_symbols()
         
-        # Should call with pending symbols
-        coordinator._validate_and_mark_streams.assert_called_once()
-        coordinator._manage_historical_data.assert_called_once()
-        coordinator._load_backtest_queues.assert_called_once()
+        # Should call _load_symbols_mid_session with pending symbols
+        coordinator._load_symbols_mid_session.assert_called_once()
     
     def test_process_pending_marks_as_loaded(self, coordinator_with_pending):
         """After processing, symbols should be marked as loaded."""

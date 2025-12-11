@@ -29,18 +29,18 @@ class ExecutionManager:
     Supports both Real and Backtest modes.
     """
     
-    def __init__(self, mode: str = "live", brokerage: str = "alpaca"):
+    def __init__(self, system_manager: object, brokerage: str = "alpaca"):
         """
         Initialize ExecutionManager
         
         Args:
-            mode: Operating mode - "live" or "backtest"
+            system_manager: Reference to SystemManager (single source of truth for mode)
             brokerage: Brokerage to use - "alpaca", "schwab", etc.
         """
-        self.mode = mode
+        self.system_manager = system_manager
         self.brokerage_name = brokerage
         self._brokerage: Optional[BrokerageInterface] = None  # Lazy-loaded
-        logger.info(f"ExecutionManager initialized in {mode} mode with {brokerage}")
+        logger.info(f"ExecutionManager initialized with {brokerage}")
     
     def _get_brokerage(self) -> BrokerageInterface:
         """Lazy-load and return brokerage client."""
@@ -86,6 +86,15 @@ class ExecutionManager:
             Name of the current brokerage
         """
         return self.brokerage_name
+    
+    @property
+    def mode(self) -> str:
+        """Get operation mode from SystemManager (single source of truth).
+        
+        Returns:
+            'live' or 'backtest'
+        """
+        return self.system_manager.mode.value
     
     # ==================== ORDER PLACEMENT ====================
     

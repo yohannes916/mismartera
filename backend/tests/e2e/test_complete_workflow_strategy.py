@@ -40,14 +40,11 @@ class TestStrategyWorkflows:
             symbol="MSFT",
             base_interval="1m",
             bars={"1m": BarIntervalData(derived=False, base=None, data=deque(list(range(100))),  # Full historical
-                                       quality=0.0, gaps=[], updated=False),
+                                       quality=0.92, gaps=[], updated=False),
                   "5m": BarIntervalData(derived=True, base="1m", data=list(range(20)), 
-                                       quality=0.0, gaps=[], updated=False),
+                                       quality=0.92, gaps=[], updated=False),
                   "15m": BarIntervalData(derived=True, base="1m", data=list(range(7)), 
-                                        quality=0.0, gaps=[], updated=False)},
-            indicators={},
-            quality=0.92,  # Quality calculated
-            session_metrics=None,
+                                        quality=0.92, gaps=[], updated=False)},
             meets_session_config_requirements=True,
             added_by="strategy",
             auto_provisioned=False,
@@ -60,7 +57,8 @@ class TestStrategyWorkflows:
         assert msft.meets_session_config_requirements is True
         assert msft.auto_provisioned is False
         assert len(msft.bars) == 3  # All intervals
-        assert msft.quality > 0  # Quality calculated
+        # Quality is in BarIntervalData, check 1m interval
+        assert msft.bars["1m"].quality > 0  # Quality calculated
     
     def test_strategy_multiple_symbols(self, strategy_workflow_setup):
         """Test strategy adds multiple symbols at once."""
@@ -76,10 +74,7 @@ class TestStrategyWorkflows:
                 base_interval="1m",
                 bars={"1m": BarIntervalData(derived=False, base=None, data=deque(), 
                                            quality=0.0, gaps=[], updated=False)},
-                indicators={},
-                quality=0.0,
-                session_metrics=None,
-                meets_session_config_requirements=True,
+                indicators={},                meets_session_config_requirements=True,
                 added_by="strategy",
                 auto_provisioned=False,
                 upgraded_from_adhoc=False,
@@ -89,7 +84,7 @@ class TestStrategyWorkflows:
             coordinator._calculate_historical_quality(symbols=[symbol])
         
         # Verify all added with full provisioning
-        assert len(session_data.symbols) == 5
+        assert len(session_data.get_active_symbols()) == 5
         assert coordinator._calculate_historical_quality.call_count == 5
         
         for symbol in portfolio:
@@ -108,10 +103,7 @@ class TestStrategyWorkflows:
                 symbol=symbol,
                 base_interval="1m",
                 bars={},
-                indicators={},
-                quality=0.0,
-                session_metrics=None,
-                meets_session_config_requirements=True,
+                indicators={},                meets_session_config_requirements=True,
                 added_by="config",
                 auto_provisioned=False,
                 upgraded_from_adhoc=False,
@@ -119,7 +111,7 @@ class TestStrategyWorkflows:
             )
             session_data.register_symbol_data(symbol_data)
         
-        assert len(session_data.symbols) == 2
+        assert len(session_data.get_active_symbols()) == 2
         
         # Strategy adds 3 more mid-session
         for symbol in ["GOOGL", "META", "AMZN"]:
@@ -127,10 +119,7 @@ class TestStrategyWorkflows:
                 symbol=symbol,
                 base_interval="1m",
                 bars={},
-                indicators={},
-                quality=0.0,
-                session_metrics=None,
-                meets_session_config_requirements=True,
+                indicators={},                meets_session_config_requirements=True,
                 added_by="strategy",
                 auto_provisioned=False,
                 upgraded_from_adhoc=False,
@@ -139,8 +128,9 @@ class TestStrategyWorkflows:
             session_data.register_symbol_data(symbol_data)
         
         # Verify incremental additions
-        assert len(session_data.symbols) == 5
+        assert len(session_data.get_active_symbols()) == 5
         
         # All meet requirements
-        for symbol_data in session_data.symbols.values():
+        for symbol in session_data.get_active_symbols():
+            symbol_data = session_data.get_symbol_data(symbol)
             assert symbol_data.meets_session_config_requirements is True

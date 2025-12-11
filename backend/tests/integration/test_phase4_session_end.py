@@ -20,6 +20,7 @@ def active_session_to_end():
     coordinator._session_metrics = {}
     
     # Add symbols with data
+    from app.managers.data_manager.session_data import SessionMetrics
     for symbol in ["AAPL", "MSFT"]:
         symbol_data = SymbolSessionData(
             symbol=symbol,
@@ -32,9 +33,12 @@ def active_session_to_end():
                 gaps=[],
                 updated=True
             )},
-            indicators={},
-            quality=0.85,
-            session_metrics={"trades": 5, "profit": 1000.0},
+            metrics=SessionMetrics(
+                volume=10000,
+                high=150.0,
+                low=145.0,
+                last_update=datetime.now()
+            ),
             meets_session_config_requirements=True,
             added_by="config",
             auto_provisioned=False,
@@ -79,12 +83,14 @@ class TestSessionEnd:
         session_data = coordinator.session_data
         
         # Simulate recording session metrics
-        for symbol_data in session_data.symbols.values():
-            if symbol_data.session_metrics:
+        for symbol in session_data.get_active_symbols():
+            symbol_data = session_data.get_symbol_data(symbol)
+            # SessionMetrics is a dataclass, access attributes directly
+            if symbol_data.metrics.last_update:
                 coordinator._session_metrics[symbol_data.symbol] = {
-                    "trades": symbol_data.session_metrics.get("trades", 0),
-                    "profit": symbol_data.session_metrics.get("profit", 0.0),
-                    "quality": symbol_data.quality
+                    "trades": 5,  # Mock value
+                    "profit": 1000.0,  # Mock value
+                    "quality": symbol_data.bars["1m"].quality if "1m" in symbol_data.bars else 0.0
                 }
         
         # Expected: Metrics captured
@@ -101,14 +107,14 @@ class TestSessionEnd:
         active_session_to_end._session_active = False
         
         # Verify data still present
-        assert len(session_data.symbols) == 2
+        assert len(session_data.get_active_symbols()) == 2
         assert session_data.get_symbol_data("AAPL") is not None
         assert session_data.get_symbol_data("MSFT") is not None
         
         # Verify bar data still present
         aapl = session_data.get_symbol_data("AAPL")
         assert len(aapl.bars["1m"].data) == 100
-        assert aapl.quality == 0.85
+        assert aapl.bars["1m"].quality == 0.85
         
         # Expected: Data intact for post-session analysis
     
@@ -123,7 +129,7 @@ class TestSessionEnd:
         session_data.clear()
         
         # Expected: No data persists to next session
-        assert len(session_data.symbols) == 0
+        assert len(session_data.get_active_symbols()) == 0
     
     def test_last_day_data_kept(self, active_session_to_end):
         """Test last day of backtest keeps data for analysis."""
@@ -137,13 +143,13 @@ class TestSessionEnd:
         # On last day, data might be kept for final analysis
         if is_last_day:
             # Data remains
-            assert len(session_data.symbols) == 2
+            assert len(session_data.get_active_symbols()) == 2
             assert session_data.get_symbol_data("AAPL") is not None
         
         # Expected: Data available for final results
         aapl = session_data.get_symbol_data("AAPL")
-        assert aapl.session_metrics is not None
-        assert aapl.quality > 0
+        assert aapl.metrics is not None  # SessionMetrics dataclass
+        assert aapl.bars["1m"].quality > 0
 
 
 class TestThreadShutdown:

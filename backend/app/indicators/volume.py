@@ -182,6 +182,8 @@ def calculate_volume_ratio(
     
     Formula: Current_Volume / SMA(Volume, period)
     
+    If period=0, uses default of 20 bars for average.
+    
     Args:
         bars: Historical bars
         config: Indicator configuration
@@ -190,7 +192,7 @@ def calculate_volume_ratio(
     Returns:
         IndicatorResult with volume ratio (>1 = above average)
     """
-    period = config.period
+    period = config.period if config.period > 0 else 20  # Default to 20 if period=0
     
     if len(bars) < period:
         return IndicatorResult(

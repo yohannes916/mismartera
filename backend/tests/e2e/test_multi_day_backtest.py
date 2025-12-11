@@ -65,7 +65,7 @@ class TestMultiDayBacktest:
         
         # Phase 1: Teardown day 1
         coordinator.session_data.clear()
-        assert len(coordinator.session_data.symbols) == 0
+        assert len(coordinator.session_data.get_active_symbols()) == 0
         
         # Day 2: Jan 3, 2025
         time_mgr.get_current_time = Mock(return_value=datetime(2025, 1, 3, 9, 30, 0))
@@ -171,10 +171,7 @@ class TestMultiDayBacktest:
             symbol="AAPL",
             base_interval="1m",
             bars={},
-            indicators={},
-            quality=0.85,
-            session_metrics=None,
-            meets_session_config_requirements=True,
+            indicators={},            meets_session_config_requirements=True,
             added_by="config",
             auto_provisioned=False,
             upgraded_from_adhoc=False,
@@ -186,10 +183,7 @@ class TestMultiDayBacktest:
             symbol="TSLA",
             base_interval="1m",
             bars={},
-            indicators={},
-            quality=0.0,
-            session_metrics=None,
-            meets_session_config_requirements=False,
+            indicators={},            meets_session_config_requirements=False,
             added_by="scanner",
             auto_provisioned=True,
             upgraded_from_adhoc=False,
@@ -198,13 +192,14 @@ class TestMultiDayBacktest:
         coordinator.session_data.register_symbol_data(tsla)
         
         # Verify day 1 state
-        assert len(coordinator.session_data.symbols) == 2
-        assert "AAPL" in coordinator.session_data.symbols
-        assert "TSLA" in coordinator.session_data.symbols
+        active_symbols = coordinator.session_data.get_active_symbols()
+        assert len(active_symbols) == 2
+        assert "AAPL" in active_symbols
+        assert "TSLA" in active_symbols
         
         # Teardown day 1
         coordinator.session_data.clear()
-        assert len(coordinator.session_data.symbols) == 0
+        assert len(coordinator.session_data.get_active_symbols()) == 0
         
         # Day 2: Only AAPL (no TSLA persistence)
         coordinator.session_data = SessionData()
@@ -213,10 +208,7 @@ class TestMultiDayBacktest:
             symbol="AAPL",
             base_interval="1m",
             bars={},
-            indicators={},
-            quality=0.0,  # Fresh quality
-            session_metrics=None,
-            meets_session_config_requirements=True,
+            indicators={},            meets_session_config_requirements=True,
             added_by="config",
             auto_provisioned=False,
             upgraded_from_adhoc=False,
@@ -225,9 +217,10 @@ class TestMultiDayBacktest:
         coordinator.session_data.register_symbol_data(aapl_day2)
         
         # Verify day 2 state (no TSLA!)
-        assert len(coordinator.session_data.symbols) == 1
-        assert "AAPL" in coordinator.session_data.symbols
-        assert "TSLA" not in coordinator.session_data.symbols
+        active_symbols_day2 = coordinator.session_data.get_active_symbols()
+        assert len(active_symbols_day2) == 1
+        assert "AAPL" in active_symbols_day2
+        assert "TSLA" not in active_symbols_day2
     
     def test_state_reset_verification(self, multi_day_setup):
         """Test all state components reset between days."""
@@ -243,10 +236,7 @@ class TestMultiDayBacktest:
             symbol="AAPL",
             base_interval="1m",
             bars={},
-            indicators={},
-            quality=0.85,
-            session_metrics=None,
-            meets_session_config_requirements=True,
+            indicators={},            meets_session_config_requirements=True,
             added_by="config",
             auto_provisioned=False,
             upgraded_from_adhoc=False,
@@ -257,7 +247,7 @@ class TestMultiDayBacktest:
         # Verify state exists
         assert coordinator._session_active is True
         assert len(coordinator._pending_symbols) == 1
-        assert len(coordinator.session_data.symbols) == 1
+        assert len(coordinator.session_data.get_active_symbols()) == 1
         
         # Teardown
         coordinator.session_data.clear()
@@ -267,7 +257,7 @@ class TestMultiDayBacktest:
         # Verify complete reset
         assert coordinator._session_active is False
         assert len(coordinator._pending_symbols) == 0
-        assert len(coordinator.session_data.symbols) == 0
+        assert len(coordinator.session_data.get_active_symbols()) == 0
     
     def test_clock_advancement(self, multi_day_setup):
         """Test clock advances correctly each day."""

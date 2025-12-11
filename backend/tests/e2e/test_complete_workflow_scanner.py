@@ -47,9 +47,6 @@ class TestScannerWorkflows:
                                        quality=0.0, gaps=[], updated=False),
                   "5m": BarIntervalData(derived=True, base="1m", data=[], 
                                        quality=0.0, gaps=[], updated=False)},
-            indicators={},
-            quality=0.0,  # No quality for adhoc
-            session_metrics=None,
             meets_session_config_requirements=False,
             added_by="scanner",
             auto_provisioned=True,
@@ -85,10 +82,7 @@ class TestScannerWorkflows:
             base_interval="1m",
             bars={"1m": BarIntervalData(derived=False, base=None, data=deque(), 
                                        quality=0.0, gaps=[], updated=False)},
-            indicators={},
-            quality=0.0,
-            session_metrics=None,
-            meets_session_config_requirements=False,
+            indicators={},            meets_session_config_requirements=False,
             added_by="scanner",
             auto_provisioned=True,
             upgraded_from_adhoc=False,
@@ -128,10 +122,7 @@ class TestScannerWorkflows:
                 symbol=symbol,
                 base_interval="1m",
                 bars={},
-                indicators={},
-                quality=0.0,
-                session_metrics=None,
-                meets_session_config_requirements=False,
+                indicators={},                meets_session_config_requirements=False,
                 added_by="scanner",
                 auto_provisioned=True,
                 upgraded_from_adhoc=False,
@@ -140,7 +131,7 @@ class TestScannerWorkflows:
             session_data.register_symbol_data(symbol_data)
         
         # Verify all discovered
-        assert len(session_data.symbols) == 4
+        assert len(session_data.get_active_symbols()) == 4
         for symbol in discoveries:
             symbol_data = session_data.get_symbol_data(symbol)
             assert symbol_data is not None
@@ -157,10 +148,7 @@ class TestScannerWorkflows:
                 symbol=symbol,
                 base_interval="1m",
                 bars={},
-                indicators={},
-                quality=0.0,
-                session_metrics=None,
-                meets_session_config_requirements=False,
+                indicators={},                meets_session_config_requirements=False,
                 added_by="scanner",
                 auto_provisioned=True,
                 upgraded_from_adhoc=False,

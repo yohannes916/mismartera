@@ -23,10 +23,8 @@ class TestNoPersistence:
             symbol="TEMP1",
             base_interval="1m",
             bars={"1m": BarIntervalData(derived=False, base=None, data=deque([1, 2, 3]), 
-                                       quality=0.0, gaps=[], updated=False)},
+                                       quality=0.75, gaps=[], updated=False)},
             indicators={"sma_20": Mock()},
-            quality=0.75,
-            session_metrics={"trades": 10},
             meets_session_config_requirements=True,
             added_by="config",
             auto_provisioned=False,
@@ -36,19 +34,20 @@ class TestNoPersistence:
         session1.register_symbol_data(symbol1)
         
         # Verify session 1 state
-        assert len(session1.symbols) == 1
+        assert len(session1.get_active_symbols()) == 1
         assert session1.get_symbol_data("TEMP1") is not None
-        assert session1.get_symbol_data("TEMP1").quality == 0.75
+        # Quality is stored in BarIntervalData, not top-level
+        assert session1.get_symbol_data("TEMP1").bars["1m"].quality == 0.75
         
         # End session 1 (teardown)
         session1.clear()
-        assert len(session1.symbols) == 0
+        assert len(session1.get_active_symbols()) == 0
         
         # Session 2 (new day)
         session2 = SessionData()
         
         # Verify completely fresh
-        assert len(session2.symbols) == 0
+        assert len(session2.get_active_symbols()) == 0
         assert session2.get_symbol_data("TEMP1") is None
         
         # Add symbol with same name but fresh state
@@ -56,9 +55,7 @@ class TestNoPersistence:
             symbol="TEMP1",  # Same name
             base_interval="1m",
             bars={},  # Empty bars
-            indicators={},  # No indicators
-            quality=0.0,  # Fresh quality
-            session_metrics=None,  # No metrics
+            indicators={},  # No indicators            session_metrics=None,  # No metrics
             meets_session_config_requirements=True,
             added_by="config",
             auto_provisioned=False,
@@ -69,7 +66,7 @@ class TestNoPersistence:
         
         # Verify fresh state
         retrieved = session2.get_symbol_data("TEMP1")
-        assert retrieved.quality == 0.0  # Fresh, not 0.75
+        # No bars or indicators, so can't check quality
         assert len(retrieved.bars) == 0  # Empty, not 3 bars
         assert len(retrieved.indicators) == 0  # Empty, not 1 indicator
     
@@ -83,10 +80,7 @@ class TestNoPersistence:
             symbol="AAPL",
             base_interval="1m",
             bars={},
-            indicators={},
-            quality=0.0,
-            session_metrics=None,
-            meets_session_config_requirements=True,
+            indicators={},            meets_session_config_requirements=True,
             added_by="config",
             auto_provisioned=False,
             upgraded_from_adhoc=False,
@@ -99,10 +93,7 @@ class TestNoPersistence:
             symbol="TSLA",
             base_interval="1m",
             bars={},
-            indicators={},
-            quality=0.0,
-            session_metrics=None,
-            meets_session_config_requirements=False,
+            indicators={},            meets_session_config_requirements=False,
             added_by="scanner",
             auto_provisioned=True,
             upgraded_from_adhoc=False,
@@ -111,9 +102,10 @@ class TestNoPersistence:
         session1.register_symbol_data(adhoc_symbol)
         
         # Verify day 1
-        assert len(session1.symbols) == 2
-        assert "AAPL" in session1.symbols
-        assert "TSLA" in session1.symbols
+        symbols_day1 = session1.get_active_symbols()
+        assert len(symbols_day1) == 2
+        assert "AAPL" in symbols_day1
+        assert "TSLA" in symbols_day1
         
         # Teardown
         session1.clear()
@@ -126,10 +118,7 @@ class TestNoPersistence:
             symbol="AAPL",
             base_interval="1m",
             bars={},
-            indicators={},
-            quality=0.0,
-            session_metrics=None,
-            meets_session_config_requirements=True,
+            indicators={},            meets_session_config_requirements=True,
             added_by="config",
             auto_provisioned=False,
             upgraded_from_adhoc=False,
@@ -138,9 +127,10 @@ class TestNoPersistence:
         session2.register_symbol_data(config_symbol_day2)
         
         # Verify day 2: TSLA not present
-        assert len(session2.symbols) == 1
-        assert "AAPL" in session2.symbols
-        assert "TSLA" not in session2.symbols  # NOT persisted!
+        symbols_day2 = session2.get_active_symbols()
+        assert len(symbols_day2) == 1
+        assert "AAPL" in symbols_day2
+        assert "TSLA" not in symbols_day2  # NOT persisted!
     
     def test_metadata_reset(self):
         """Test metadata resets between sessions."""
@@ -151,10 +141,7 @@ class TestNoPersistence:
             symbol="META",
             base_interval="1m",
             bars={},
-            indicators={},
-            quality=0.88,  # High quality
-            session_metrics={"trades": 50, "profit": 5000.0},
-            meets_session_config_requirements=True,
+            indicators={},            meets_session_config_requirements=True,
             added_by="config",
             auto_provisioned=False,
             upgraded_from_adhoc=False,
@@ -163,8 +150,6 @@ class TestNoPersistence:
         session1.register_symbol_data(symbol_day1)
         
         # Record day 1 metadata
-        day1_quality = symbol_day1.quality
-        day1_metrics = symbol_day1.session_metrics
         day1_added_at = symbol_day1.added_at
         
         # Teardown
@@ -178,8 +163,6 @@ class TestNoPersistence:
             base_interval="1m",
             bars={},
             indicators={},
-            quality=0.0,  # Fresh quality (will be recalculated)
-            session_metrics=None,  # No metrics yet
             meets_session_config_requirements=True,
             added_by="config",
             auto_provisioned=False,
@@ -189,8 +172,6 @@ class TestNoPersistence:
         session2.register_symbol_data(symbol_day2)
         
         # Verify metadata reset
-        assert symbol_day2.quality != day1_quality  # Fresh
-        assert symbol_day2.session_metrics != day1_metrics  # Reset
         assert symbol_day2.added_at != day1_added_at  # New timestamp
     
     def test_queue_clearing(self):
@@ -235,10 +216,7 @@ class TestNoPersistence:
                 symbol=symbol,
                 base_interval="1m",
                 bars={},
-                indicators={},
-                quality=0.0,
-                session_metrics=None,
-                meets_session_config_requirements=True,
+                indicators={},                meets_session_config_requirements=True,
                 added_by="config",
                 auto_provisioned=False,
                 upgraded_from_adhoc=False,
@@ -246,11 +224,11 @@ class TestNoPersistence:
             )
             session1.register_symbol_data(symbol_data)
         
-        assert len(session1.symbols) == 3
+        assert len(session1.get_active_symbols()) == 3
         
         # Teardown
         session1.clear()
-        assert len(session1.symbols) == 0
+        assert len(session1.get_active_symbols()) == 0
         
         # Day 2: Load fresh from config again
         session2 = SessionData()
@@ -259,10 +237,7 @@ class TestNoPersistence:
                 symbol=symbol,
                 base_interval="1m",
                 bars={},
-                indicators={},
-                quality=0.0,
-                session_metrics=None,
-                meets_session_config_requirements=True,
+                indicators={},                meets_session_config_requirements=True,
                 added_by="config",
                 auto_provisioned=False,
                 upgraded_from_adhoc=False,
@@ -270,7 +245,7 @@ class TestNoPersistence:
             )
             session2.register_symbol_data(symbol_data)
         
-        assert len(session2.symbols) == 3
+        assert len(session2.get_active_symbols()) == 3
         
         # Each day loaded fresh from config
         # No persistence from day 1 to day 2

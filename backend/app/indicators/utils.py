@@ -29,7 +29,7 @@ def true_range(current: BarData, previous: BarData) -> float:
 
 
 def simple_moving_average(values: List[float], period: int) -> float:
-    """Calculate simple moving average.
+    """Calculate Simple Moving Average.
     
     Args:
         values: List of values
@@ -38,6 +38,9 @@ def simple_moving_average(values: List[float], period: int) -> float:
     Returns:
         SMA value
     """
+    if period <= 0:
+        raise ValueError(f"Period must be > 0, got {period}")
+    
     if len(values) < period:
         raise ValueError(f"Not enough values: {len(values)} < {period}")
     

@@ -21,10 +21,8 @@ def session_with_deletable_symbols():
         symbol_data = SymbolSessionData(
             symbol=symbol,
             base_interval="1m",
-            bars={"1m": BarIntervalData(derived=False, base=None, data=deque([1, 2, 3]), quality=0.0, gaps=[], updated=False)},
+            bars={"1m": BarIntervalData(derived=False, base=None, data=deque([1, 2, 3]), quality=0.85 if source == "config" else 0.0, gaps=[], updated=False)},
             indicators={"sma_20_5m": Mock()},
-            quality=0.85 if source == "config" else 0.0,
-            session_metrics=None,
             meets_session_config_requirements=(source != "scanner"),
             added_by=source,
             auto_provisioned=(source == "scanner"),
@@ -49,14 +47,14 @@ class TestSymbolDeletion:
         
         # Verify symbol exists
         assert session_data.get_symbol_data("TSLA") is not None
-        assert "TSLA" in session_data.symbols
+        assert "TSLA" in session_data.get_active_symbols()
         
         # Delete symbol
-        session_data.symbols.pop("TSLA")
+        session_data.remove_symbol("TSLA")
         
         # Expected: Symbol data removed
         assert session_data.get_symbol_data("TSLA") is None
-        assert "TSLA" not in session_data.symbols
+        assert "TSLA" not in session_data.get_active_symbols()
     
     def test_delete_symbol_removes_metadata(self, session_with_deletable_symbols):
         """Test deleting symbol removes metadata."""
@@ -69,7 +67,7 @@ class TestSymbolDeletion:
         assert tsla.added_by == "scanner"
         
         # Delete symbol
-        session_data.symbols.pop("TSLA")
+        session_data.remove_symbol("TSLA")
         
         # Expected: Metadata gone (part of SymbolSessionData)
         deleted = session_data.get_symbol_data("TSLA")
@@ -85,7 +83,7 @@ class TestSymbolDeletion:
         assert len(coordinator.bar_queues["TSLA"]) > 0
         
         # Delete symbol and clean up queues
-        coordinator.session_data.symbols.pop("TSLA")
+        coordinator.session_data.remove_symbol("TSLA")
         coordinator.bar_queues.pop("TSLA", None)
         coordinator.quote_queues.pop("TSLA", None)
         
@@ -98,13 +96,13 @@ class TestSymbolDeletion:
         session_data = session_with_deletable_symbols.session_data
         
         # Delete symbol
-        session_data.symbols.pop("NVDA")
+        session_data.remove_symbol("NVDA")
         
         # Verify deleted
         assert session_data.get_symbol_data("NVDA") is None
         
         # Later operations shouldn't see it
-        all_symbols = list(session_data.symbols.keys())
+        all_symbols = session_data.get_active_symbols()
         assert "NVDA" not in all_symbols
         assert "AAPL" in all_symbols
         assert "TSLA" in all_symbols

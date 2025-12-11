@@ -221,12 +221,23 @@ class TestSymbolAddRemoveFlow:
         # Bind add_symbol method
         coordinator.add_symbol = SessionCoordinator.add_symbol.__get__(coordinator)
         
+        # Mock dependencies
+        from app.threads.session_coordinator import ProvisioningRequirements
+        mock_req = ProvisioningRequirements(
+            operation_type="symbol",
+            source="strategy",
+            symbol="AAPL",
+            symbol_exists=False,
+            can_proceed=True
+        )
+        coordinator._analyze_requirements = Mock(return_value=mock_req)
+        coordinator._execute_provisioning = Mock(return_value=True)
+        
         # Add AAPL
         result = coordinator.add_symbol("AAPL")
         
         assert result is True
         assert "AAPL" in coordinator.session_config.session_data_config.symbols
-        assert "AAPL" in coordinator._pending_symbols
     
     def test_remove_symbol_cleans_everything(self, mock_coordinator):
         """Removing symbol should clean all state."""

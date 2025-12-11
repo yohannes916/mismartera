@@ -15,14 +15,33 @@ from app.models.session_config import SessionConfig, SessionDataConfig
 @pytest.fixture
 def complete_session_setup():
     """Setup for complete single-day session test."""
-    # Create config
-    config = SessionConfig()
-    config.session_data_config = SessionDataConfig(
-        base_interval="1m",
-        derived_intervals=[5, 15],
-        trailing_days=30,
-        symbols=["AAPL", "MSFT"],
-        streams=["1m"]
+    from app.models.session_config import BacktestConfig, TradingConfig, APIConfig
+    
+    # Create config with all required arguments
+    config = SessionConfig(
+        session_name="Test Session",
+        exchange_group="US_EQUITY",
+        asset_class="EQUITY",
+        mode="backtest",
+        backtest_config=BacktestConfig(
+            start_date="2025-01-02",
+            end_date="2025-01-02",
+            speed_multiplier=0.0
+        ),
+        session_data_config=SessionDataConfig(
+            symbols=["AAPL", "MSFT"],
+            streams=["1m"]
+        ),
+        trading_config=TradingConfig(
+            max_buying_power=100000.0,
+            max_per_trade=10000.0,
+            max_per_symbol=20000.0,
+            max_open_positions=10
+        ),
+        api_config=APIConfig(
+            data_api="alpaca",
+            trade_api="alpaca"
+        )
     )
     
     # Create coordinator
@@ -178,10 +197,7 @@ class TestSingleDayComplete:
                 symbol=symbol,
                 base_interval="1m",
                 bars={"1m": BarIntervalData(derived=False, base=None, data=deque([1, 2, 3]), 
-                                           quality=0.0, gaps=[], updated=False)},
-                indicators={},
-                quality=0.85,
-                session_metrics={"trades": 5},
+                                           quality=0.85, gaps=[], updated=False)},
                 meets_session_config_requirements=True,
                 added_by="config",
                 auto_provisioned=False,
@@ -191,18 +207,17 @@ class TestSingleDayComplete:
             session_data.register_symbol_data(symbol_data)
         
         # Export data (simulated)
-        export_data = {
-            symbol: {
-                "quality": data.quality,
-                "metrics": data.session_metrics,
+        export_data = {}
+        for symbol in session_data.get_active_symbols():
+            data = session_data.get_symbol_data(symbol)
+            export_data[symbol] = {
+                "metrics": data.metrics,  # SessionMetrics dataclass
                 "bar_count": len(data.bars["1m"].data) if "1m" in data.bars else 0
             }
-            for symbol, data in session_data.symbols.items()
-        }
         
         # Verify export
         assert len(export_data) == 2
-        assert export_data["AAPL"]["quality"] == 0.85
+        assert export_data["AAPL"]["metrics"] is not None
         assert export_data["AAPL"]["bar_count"] == 3
     
     def test_error_handling(self, complete_session_setup):

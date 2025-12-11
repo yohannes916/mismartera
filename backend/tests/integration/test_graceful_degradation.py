@@ -100,7 +100,7 @@ class TestSingleSymbolFailure:
         assert result.can_proceed is False
         assert "BADTICKER" in result.reason
         assert "No Parquet data" in result.reason
-        assert result.has_parquet_data is False
+        assert result.has_historical_data is False
 
 
 class TestAllSymbolsFailure:
@@ -147,13 +147,13 @@ class TestPartialFailures:
     def test_partial_historical_data(self, coordinator_for_degradation):
         """Test symbol with partial historical data (warning, not failure)."""
         # Symbol has data but not full 30 days
-        validation = SymbolValidationResult(symbol="TEST",
-            
+        validation = SymbolValidationResult(
+            symbol="NEWIPO",
             can_proceed=True,  # Can proceed with warning
             reason="Symbol NEWIPO: Only 10 days of historical data available (requested 30)",
-            has_data_source=True,
-            has_parquet_data=True,
-            has_sufficient_historical=False  # Flag set but still proceed
+            data_source_available=True,
+            data_source="parquet",
+            has_historical_data=True
         )
         
         coordinator_for_degradation._validate_symbol_for_loading = Mock(return_value=validation)
@@ -164,7 +164,7 @@ class TestPartialFailures:
         # Expected: Proceed with warning
         assert result.can_proceed is True
         assert "10 days" in result.reason
-        assert result.has_sufficient_historical is False
+        assert result.has_historical_data is True  # Has data, just partial
         
         # Symbol can be loaded with available data
         coordinator_for_degradation._register_single_symbol(
@@ -193,7 +193,7 @@ class TestPartialFailures:
         # Expected: Hard failure, cannot proceed
         assert result.can_proceed is False
         assert "No data source" in result.reason
-        assert result.has_data_source is False
+        assert result.data_source_available is False
 
 
 class TestErrorLogging:

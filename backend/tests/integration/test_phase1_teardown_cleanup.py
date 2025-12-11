@@ -22,9 +22,6 @@ def session_data_with_symbols():
             symbol=symbol,
             base_interval="1m",
             bars={"1m": BarIntervalData(derived=False, base=None, data=deque(), quality=0.0, gaps=[], updated=False)},
-            indicators={},
-            quality=0.0,
-            session_metrics=None,
             meets_session_config_requirements=True,
             added_by="config",
             auto_provisioned=False,
@@ -38,9 +35,6 @@ def session_data_with_symbols():
         symbol="TSLA",
         base_interval="1m",
         bars={"1m": BarIntervalData(derived=False, base=None, data=deque(), quality=0.0, gaps=[], updated=False)},
-        indicators={},
-        quality=0.0,
-        session_metrics=None,
         meets_session_config_requirements=False,
         added_by="scanner",
         auto_provisioned=True,
@@ -89,19 +83,19 @@ class TestPhase1Teardown:
         session_data = coordinator_with_state.session_data
         
         # Verify symbols exist before teardown
-        assert len(session_data.symbols) == 3
-        assert "AAPL" in session_data.symbols
-        assert "MSFT" in session_data.symbols
-        assert "TSLA" in session_data.symbols
+        assert len(session_data.get_active_symbols()) == 3
+        assert "AAPL" in session_data.get_active_symbols()
+        assert "MSFT" in session_data.get_active_symbols()
+        assert "TSLA" in session_data.get_active_symbols()
         
         # Simulate Phase 1 teardown
         session_data.clear()
         
         # Expected: session_data.symbols empty
-        assert len(session_data.symbols) == 0
-        assert "AAPL" not in session_data.symbols
-        assert "MSFT" not in session_data.symbols
-        assert "TSLA" not in session_data.symbols
+        assert len(session_data.get_active_symbols()) == 0
+        assert "AAPL" not in session_data.get_active_symbols()
+        assert "MSFT" not in session_data.get_active_symbols()
+        assert "TSLA" not in session_data.get_active_symbols()
     
     def test_phase1_clear_metadata(self, coordinator_with_state):
         """Test metadata cleared with symbols."""
@@ -223,7 +217,7 @@ class TestPhase1Teardown:
         session_data = coordinator_with_state.session_data
         
         # Day 1: Add symbols
-        assert len(session_data.symbols) == 3
+        assert len(session_data.get_active_symbols()) == 3
         
         # Phase 1 teardown
         session_data.clear()
@@ -231,7 +225,7 @@ class TestPhase1Teardown:
         coordinator_with_state._pending_symbols.clear()
         
         # Expected: Fresh start
-        assert len(session_data.symbols) == 0
+        assert len(session_data.get_active_symbols()) == 0
         assert len(coordinator_with_state.bar_queues) == 0
         assert len(coordinator_with_state._pending_symbols) == 0
         
@@ -259,16 +253,13 @@ class TestPhase1Teardown:
         
         # Day 1 teardown
         session_data.clear()
-        assert len(session_data.symbols) == 0
+        assert len(session_data.get_active_symbols()) == 0
         
         # Day 2: Add new symbols
         symbol = SymbolSessionData(
             symbol="NVDA",
             base_interval="1m",
             bars={},
-            indicators={},
-            quality=0.0,
-            session_metrics=None,
             meets_session_config_requirements=True,
             added_by="config",
             auto_provisioned=False,
@@ -276,20 +267,17 @@ class TestPhase1Teardown:
             added_at=datetime.now()
         )
         session_data.register_symbol_data(symbol)
-        assert len(session_data.symbols) == 1
+        assert len(session_data.get_active_symbols()) == 1
         
         # Day 2 teardown
         session_data.clear()
-        assert len(session_data.symbols) == 0
+        assert len(session_data.get_active_symbols()) == 0
         
         # Day 3: Add different symbols
         symbol2 = SymbolSessionData(
             symbol="RIVN",
             base_interval="1m",
             bars={},
-            indicators={},
-            quality=0.0,
-            session_metrics=None,
             meets_session_config_requirements=True,
             added_by="config",
             auto_provisioned=False,
@@ -297,11 +285,11 @@ class TestPhase1Teardown:
             added_at=datetime.now()
         )
         session_data.register_symbol_data(symbol2)
-        assert len(session_data.symbols) == 1
+        assert len(session_data.get_active_symbols()) == 1
         
         # Expected: Each teardown complete, fresh start each day
         session_data.clear()
-        assert len(session_data.symbols) == 0
+        assert len(session_data.get_active_symbols()) == 0
 
 
 class TestPhase1TimeManagerIntegration:

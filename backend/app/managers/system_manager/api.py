@@ -233,7 +233,7 @@ class SystemManager:
         """
         if self._data_manager is None:
             from app.managers.data_manager.api import DataManager
-            self._data_manager = DataManager(self)
+            self._data_manager = DataManager(system_manager=self)
             logger.debug("DataManager created")
         return self._data_manager
     

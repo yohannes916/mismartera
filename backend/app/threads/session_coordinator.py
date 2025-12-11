@@ -1289,7 +1289,7 @@ class SessionCoordinator(threading.Thread):
                 self._initialize_threads()  # NEW coordination method
                 
                 # Step 5: Pre-session scans
-                if self._scanner_manager._pre_session_scanners:
+                if self._scanner_manager.has_pre_session_scanners():
                     logger.info("Running pre-session scans")
                     success = self._scanner_manager.setup_pre_session_scanners()
                     if not success:
@@ -3653,7 +3653,7 @@ class SessionCoordinator(threading.Thread):
         
         # Check first configured interval
         first_config = historical_config.data[0]
-        interval = first_config.interval
+        interval = first_config.intervals[0]  # Get first interval from list
         days = first_config.trailing_days
         
         try:
@@ -3665,7 +3665,7 @@ class SessionCoordinator(threading.Thread):
             )
             return len(bars) > 0
         except Exception as e:
-            logger.debug(f"{symbol}: Error checking historical data: {e}")
+            logger.error(f"{symbol}: Error checking historical data: {e}", exc_info=True)
             return False
     
     def _check_data_source_for_symbol(self, symbol: str) -> Optional[str]:
